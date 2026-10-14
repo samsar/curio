@@ -3780,19 +3780,30 @@ agreed name (a MULTI-INDEX OR), and the rename itself, which walks the
 host's documents without a declared name and runs only on a change of
 name; `idx_document_cards_stale`, a partial index of the cards whose
 embedded text isn't their text, serves the cards job's keyset pass over
-the stale cards and the startup count of tenants with any, so neither
-reads a fresh card. The fields search is driven from the FTS MATCH, each
-hit's row by rowid and its document by primary key; the card search from
-the vec0 KNN, each document by primary key; a card vector's delete and its
-update in place are vec0 point lookups, as a chunk vector's delete is. The
-refresh's reads (a document's inputs, its bookmarks in their order with no
-sort) and its upserts (by `document_id`, never a scan), the startup scan
-for fields that are missing or of older rules (each document once, its row
-by the unique key), `ResetCards` and `ListByDocuments` (a JSON array of
-IDs, each document's bookmarks by `idx_bookmarks_document`) are pinned.
-The stale-card read and the bookmarks by documents write their tenant
-`+d.tenant_id` and `+tenant_id`, so neither walks a tenant index. See
-"Metadata search: a fields index and a card per document".
+the stale cards, `CountStaleCards` (the count `GET /v1/stats` answers
+`cards_stale` with, a cards pass reports its progress against, and the
+retry after a cards job fails for good reads) and the startup count of
+tenants with any, so none reads a fresh card. The fields search is driven
+from the FTS MATCH, each hit's row by rowid and its document by primary
+key; the card search from the vec0 KNN, each document by primary key.
+`PutCardVectors`' and `MarkUnembeddable`'s marks reach their card by its
+primary key, and a card vector's delete (by the card's trigger or
+`MarkUnembeddable`) and its update in place are vec0 point lookups, as a
+chunk vector's delete is. The refresh's reads (a document's inputs, its
+bookmarks in their order with no sort) and its upserts (by `document_id`,
+never a scan), the startup scan for fields that are missing or of older
+rules (each document once, its row by the unique key), `ResetCards` and
+`ListByDocuments` (a JSON array of IDs, each document's bookmarks by
+`idx_bookmarks_document`) are pinned. So is every statement of the vote
+triggers, each on its own (EXPLAIN QUERY PLAN of a write shows none of the
+triggers it fires), read from its trigger with the row's values bound as
+parameters: a withdrawal seeks each of its vote rows by the primary key,
+its votes term written `+votes` so that `idx_site_name_votes_lead` can't
+serve it as a range of the host's names, and an addition is driven by the
+row's own values. The pass's read of the stale cards, `CountStaleCards`
+and the bookmarks by documents write their tenant `+d.tenant_id` and
+`+tenant_id`, so none walks a tenant index. See "Metadata search: a fields
+index and a card per document".
 
 ---
 
