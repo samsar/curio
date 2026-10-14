@@ -20,6 +20,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -78,16 +79,26 @@ func buildAndRun(m *testing.M) int {
 // fakeOllama is Ollama at version with the default embedding model pulled
 // as digest: /api/version, /api/tags, and /api/embed with deterministic
 // vectors dim wide, counting document and query embeddings (a query
-// carries the default query instruction). The build it plays can change
-// while it serves (switch); salt is how the build's vectors differ.
+// carries the default query instruction) and keeping the documents' texts:
+// a chunk's or a card's. The build it plays can change while it serves
+// (switch); salt is how the build's vectors differ.
 type fakeOllama struct {
-	t                      *testing.T
-	model                  string
-	dim                    int
-	docEmbeds, queryEmbeds atomic.Int32
+	t           *testing.T
+	model       string
+	dim         int
+	queryEmbeds atomic.Int32
 
 	mu                    sync.Mutex
 	digest, version, salt string
+	docTexts              []string
+}
+
+// embedded reports whether a document text the fake embedded contains
+// part.
+func (f *fakeOllama) embedded(part string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.ContainsFunc(f.docTexts, func(text string) bool { return strings.Contains(text, part) })
 }
 
 // switchTo makes the fake serve another build: Ollama at version, the
@@ -141,7 +152,9 @@ func (f *fakeOllama) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if strings.HasPrefix(text, config.Default().Embedding.QueryPrefix) {
 				f.queryEmbeds.Add(1)
 			} else {
-				f.docEmbeds.Add(1)
+				f.mu.Lock()
+				f.docTexts = append(f.docTexts, text)
+				f.mu.Unlock()
 			}
 			resp.Embeddings = append(resp.Embeddings, embed(salt, text, f.dim))
 		}
@@ -332,8 +345,12 @@ func TestDaemon_BookmarkIsFetchedIndexedAndFound(t *testing.T) {
 	assert.Equal(t, docID, res.Items[0].Document.ID)
 	assert.Equal(t, doc.URL, res.Items[0].Document.URL)
 	assert.False(t, res.Degraded, "semantic search ran: %v", res.Warnings)
-	assert.Positive(t, ollama.docEmbeds.Load(), "the index job embedded the article")
+	assert.True(t, ollama.embedded("Paragraph 1 on zymurgy"), "the index job embedded the article's text")
 	assert.Positive(t, ollama.queryEmbeds.Load(), "the search embedded the query")
+	// The cards job runs sqlite.CardsJobDelay after the change that queued
+	// it, once the cards pool's idle poll, up to 5 s apart, finds it due.
+	assert.Eventually(t, func() bool { return ollama.embedded("An Introduction to Zymurgy — ") }, 30*time.Second,
+		50*time.Millisecond, "the cards job embedded the card the fetch gave the document")
 
 	assertDashboard(t, baseURL, docID)
 

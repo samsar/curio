@@ -4,24 +4,29 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"time"
 
 	"github.com/samsar/curio/internal/embedder"
 	"github.com/samsar/curio/internal/store"
 )
 
-// Indexer orchestrates the chunk → embed → write step for one extraction.
+// Indexer orchestrates the chunk → embed → write step for one extraction,
+// and embeds the documents' stale cards.
 //
 // It does NOT fetch, write markdown to disk, or update document state —
 // those are the fetch-job handler's responsibilities. The indexer's job is
 // strictly: given an extraction's markdown, replace the document's chunks
-// in BM25 and vector indices. Idempotent thanks to
-// ChunkStore.ReplaceForDocument.
+// in BM25 and vector indices, idempotent thanks to
+// ChunkStore.ReplaceForDocument; and given the cards the store made stale,
+// store their vectors.
 type Indexer struct {
 	chunks    store.ChunkStore
 	embedder  embedder.Embedder
 	opts      ChunkOptions
 	docPrefix string
 	batchSize int
+	log       *slog.Logger
 }
 
 // Options for constructing an Indexer.
@@ -36,6 +41,9 @@ type Options struct {
 	// EmbedBatchSize caps how many chunks go into one embed request.
 	// Default EmbedBatchSize.
 	EmbedBatchSize int
+	// Log is where EmbedStaleCards says how far a pass got. nil logs
+	// nothing.
+	Log *slog.Logger
 }
 
 // EmbedBatchSize bounds one embed request to at most 32 chunks of at most
@@ -56,7 +64,12 @@ func New(chunks store.ChunkStore, emb embedder.Embedder, opts Options) *Indexer 
 	if batch <= 0 {
 		batch = EmbedBatchSize
 	}
-	return &Indexer{chunks: chunks, embedder: emb, opts: co, docPrefix: opts.DocumentPrefix, batchSize: batch}
+	log := opts.Log
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
+	return &Indexer{chunks: chunks, embedder: emb, opts: co, docPrefix: opts.DocumentPrefix, batchSize: batch,
+		log: log}
 }
 
 // IndexInput is everything Index needs to do its work.
@@ -118,6 +131,135 @@ func (i *Indexer) EmbedChunks(ctx context.Context, texts []string) ([][]float32,
 		prefixed[j] = i.docPrefix + t
 	}
 	return i.embed(ctx, prefixed)
+}
+
+// EmbedStaleCards embeds the tenant's stale cards (store.DocumentIndex),
+// in one pass by document: a batch of at most the batch size at a time,
+// each embedded as chunks are (EmbedChunks, the document prefix applied)
+// and its vectors stored in one transaction (PutCardVectors), which keeps
+// a vector only for a card that still holds the text embedded. A card that
+// changes behind the pass is left to the cards job its write queued. ctx
+// is checked before every batch; the batches stored before a failure stay
+// stored. embedded counts the vectors stored. A long pass says how far it
+// got (cardsProgress), against the stale cards counted as it began.
+//
+// One card the model can't take (embedder.ErrInputTooLong, which fails its
+// whole batch) mustn't hold back the cards behind it, in every later pass
+// too: that batch is embedded again a card at a time (embedEach), and each
+// card refused alone is marked unembeddable (MarkUnembeddable), with a
+// WARN, then the pass goes on. A vector of the wrong width
+// (embedder.ErrWrongDimension) is the model's, not a card's, and ends the
+// pass like any other error.
+func (i *Indexer) EmbedStaleCards(ctx context.Context, cards store.DocumentIndex, tenantID string) (int, error) {
+	of, err := cards.CountStaleCards(ctx, tenantID)
+	if err != nil {
+		return 0, fmt.Errorf("indexer: count stale cards: %w", err)
+	}
+	progress := cardsProgress{log: i.log, of: of, began: time.Now()}
+	embedded := 0
+	for after := ""; ; {
+		if err := ctx.Err(); err != nil {
+			return embedded, fmt.Errorf("indexer: stopped after %d cards: %w", embedded, err)
+		}
+		batch, err := cards.StaleCards(ctx, tenantID, after, i.batchSize)
+		if err != nil {
+			return embedded, fmt.Errorf("indexer: read stale cards: %w", err)
+		}
+		if len(batch) == 0 {
+			return embedded, nil
+		}
+		n, err := i.embedCards(ctx, cards, batch)
+		embedded += n
+		if err != nil {
+			return embedded, err
+		}
+		progress.stored(embedded)
+		after = batch[len(batch)-1].DocumentID
+	}
+}
+
+// embedCards embeds batch in one request and stores its vectors, or, when
+// the request is refused as too long, a card at a time (embedEach). stored
+// counts the vectors stored.
+func (i *Indexer) embedCards(ctx context.Context, cards store.DocumentIndex, batch []store.Card) (stored int,
+	err error) {
+	texts := make([]string, len(batch))
+	for j, c := range batch {
+		texts[j] = c.Text
+	}
+	vectors, err := i.EmbedChunks(ctx, texts)
+	switch {
+	case errors.Is(err, embedder.ErrInputTooLong):
+		return i.embedEach(ctx, cards, batch)
+	case err != nil:
+		return 0, fmt.Errorf("indexer: embed cards: %w", err)
+	}
+	put := make([]store.CardVector, len(batch))
+	for j, c := range batch {
+		put[j] = store.CardVector{DocumentID: c.DocumentID, Text: c.Text, Embedding: vectors[j]}
+	}
+	if stored, err = cards.PutCardVectors(ctx, put); err != nil {
+		return 0, fmt.Errorf("indexer: store card vectors: %w", err)
+	}
+	return stored, nil
+}
+
+// embedEach embeds batch's cards one a request, after the model refused
+// them together as too long: it stores the vectors of those it takes, and
+// marks unembeddable those it refuses alone, each with a WARN. Any other
+// error ends it, storing nothing of the batch, as a batch's error does.
+// stored counts the vectors stored.
+func (i *Indexer) embedEach(ctx context.Context, cards store.DocumentIndex, batch []store.Card) (stored int,
+	err error) {
+	put := make([]store.CardVector, 0, len(batch))
+	var refused []store.Card
+	for _, c := range batch {
+		vectors, err := i.EmbedChunks(ctx, []string{c.Text})
+		switch {
+		case errors.Is(err, embedder.ErrInputTooLong):
+			i.log.Warn("cards: the embedding model can't take this card, which isn't searched by meaning until "+
+				"its text changes", "document_id", c.DocumentID, "bytes", len(c.Text), "err", err)
+			refused = append(refused, c)
+			continue
+		case err != nil:
+			return 0, fmt.Errorf("indexer: embed the card of document %s: %w", c.DocumentID, err)
+		}
+		put = append(put, store.CardVector{DocumentID: c.DocumentID, Text: c.Text, Embedding: vectors[0]})
+	}
+	if stored, err = cards.PutCardVectors(ctx, put); err != nil {
+		return 0, fmt.Errorf("indexer: store card vectors: %w", err)
+	}
+	if _, err := cards.MarkUnembeddable(ctx, refused); err != nil {
+		return stored, fmt.Errorf("indexer: mark the cards the model can't take: %w", err)
+	}
+	return stored, nil
+}
+
+// cardsProgressEvery is how many cards stored apart a pass of
+// EmbedStaleCards says how far it got: about 7 s of embedding at the
+// owner's measured rate (7,557 cards in 108 s), so a fill of thousands
+// logs a line every few seconds and a job of a few cards none.
+const cardsProgressEvery = 500
+
+// cardsProgress says how far a pass of EmbedStaleCards got: one INFO
+// "cards embedding" each time the cards it stored pass a multiple of
+// cardsProgressEvery, with the stale cards it began with (of) and how long
+// it has run.
+type cardsProgress struct {
+	log   *slog.Logger
+	of    int
+	began time.Time
+	// logged is the multiple of cardsProgressEvery last logged.
+	logged int
+}
+
+// stored notes that the pass has stored embedded cards.
+func (p *cardsProgress) stored(embedded int) {
+	if embedded/cardsProgressEvery <= p.logged {
+		return
+	}
+	p.logged = embedded / cardsProgressEvery
+	p.log.Info("cards embedding", "embedded", embedded, "of", p.of, "took_ms", time.Since(p.began).Milliseconds())
 }
 
 // embed embeds texts in consecutive batches of at most batchSize, preserving

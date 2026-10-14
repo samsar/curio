@@ -30,9 +30,9 @@ import (
 var vecOnce sync.Once
 
 // Pool policy. A connection is held by every transaction and by every write
-// waiting out busy_timeout, so the cap sits above the daemon's default 21
-// worker goroutines (16 fetch, 4 index, 1 cluster) with room for the API;
-// at the cap, reads would queue behind the waiting writers. Idle
+// waiting out busy_timeout, so the cap sits above the daemon's default 22
+// worker goroutines (16 fetch, 4 index, 1 cluster, 1 cards) with room for
+// the API; at the cap, reads would queue behind the waiting writers. Idle
 // connections are kept up to the cap because opening one (pragmas,
 // sqlite-vec) costs about 0.7 ms against a few microseconds for a query on
 // a pooled one, and database/sql's default of two idle connections had the
@@ -58,6 +58,9 @@ type DB struct {
 	*sql.DB
 	path     string
 	enqueued *enqueueSignal // wakes workers when a job becomes claimable
+	// cardsJobDelay is how far ahead a write that changed a card queues
+	// the cards job: CardsJobDelay, but in tests (SetCardsJobDelay).
+	cardsJobDelay time.Duration
 }
 
 // Open opens (or creates) the SQLite database file at path. ":memory:" is
@@ -82,8 +85,13 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	if err := db.PingContext(ctx); err != nil {
 		return nil, fmt.Errorf("ping sqlite %q: %w", path, errors.Join(err, db.Close()))
 	}
-	return &DB{DB: db, path: path, enqueued: newEnqueueSignal()}, nil
+	return &DB{DB: db, path: path, enqueued: newEnqueueSignal(), cardsJobDelay: CardsJobDelay}, nil
 }
+
+// SetCardsJobDelay sets how far ahead a write that changed a card queues
+// the cards job, CardsJobDelay until set: tests set 0 to claim it at once,
+// or a window of their own. Call it before the database is shared.
+func (d *DB) SetCardsJobDelay(delay time.Duration) { d.cardsJobDelay = delay }
 
 // Migrate applies pending migrations from the embedded FS and returns the
 // schema version the database is left at. It is MigrateWithHooks with no

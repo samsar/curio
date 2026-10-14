@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/urlutil"
 )
 
 // These tests drive the fetchers to each way a fetch fails, and check the
@@ -126,7 +127,7 @@ func afterItsTurns(n *Native) *Native {
 	interval := time.Minute / DefaultJinaSiteRequestsPerMinute
 	n.jinaSites = newSitePacer(interval)
 	for range int(maxInlineJinaWait/interval) + 1 {
-		n.jinaSites.take(siteOf(hostOf(causePage)), n.clock.now(), maxInlineJinaWait)
+		n.jinaSites.take(urlutil.Site(hostOf(causePage)), n.clock.now(), maxInlineJinaWait)
 	}
 	return n
 }

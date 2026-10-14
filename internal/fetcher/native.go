@@ -27,6 +27,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/urlutil"
 )
 
 // Native is the Go-native fetcher that replaces the Node `web2md` tool as
@@ -71,8 +72,8 @@ type NativeOptions struct {
 	// Empty falls back to the CURIO_JINA_API_KEY environment variable.
 	JinaAPIKey string
 	// JinaSiteRequestsPerMinute caps the Jina requests for pages of one
-	// site (siteOf) a minute, key or not: Jina's abuse check blocks a
-	// domain's keyless reads after a burst. Zero or less means
+	// site (urlutil.Site) a minute, key or not: Jina's abuse check blocks
+	// a domain's keyless reads after a burst. Zero or less means
 	// DefaultJinaSiteRequestsPerMinute.
 	JinaSiteRequestsPerMinute int
 	// DeadLinkDetection classifies hard 404/410 and detected soft 404s
@@ -555,9 +556,9 @@ func (n *Native) tryReadability(ctx context.Context, target string) (*Result, er
 		Title:       article.Title(),
 		Author:      article.Byline(),
 		Language:    article.Language(),
+		SiteName:    article.SiteName(),
 		Meta: map[string]any{
 			"via":       "readability",
-			"site":      article.SiteName(),
 			"transport": n.rt.name(),
 		},
 	}
@@ -1531,8 +1532,8 @@ func (n *Native) extendJinaCooldown(err error, attempt int) {
 //
 //  1. The shared cooldown, when it already outlasts maxInlineJinaWait:
 //     before the site's turn, which it would otherwise spend.
-//  2. The turn of target's site (siteOf), which Jina Reader's block of the
-//     site also holds back (sitePacer.take).
+//  2. The turn of target's site (urlutil.Site), which Jina Reader's block
+//     of the site also holds back (sitePacer.take).
 //  3. The shared limiter and cooldown (pace).
 //  4. The send-time guard, which spaces the site's requests again after
 //     the limiter's queue (sitePacer.spaceSend).
@@ -1546,7 +1547,7 @@ func (n *Native) extendJinaCooldown(err error, attempt int) {
 // kept, since a block may have lifted by then, and a memo of it would be
 // state a restart loses.
 func (n *Native) awaitJina(ctx context.Context, target string) error {
-	site := siteOf(hostOf(target))
+	site := urlutil.Site(hostOf(target))
 	if left := n.jinaCooldown.remaining(n.clock.now()); left > maxInlineJinaWait {
 		return n.cooldownHold(left)
 	}
@@ -1619,7 +1620,7 @@ func siteBlockReason(site string) string { return "Jina Reader's block of " + si
 // one say nothing more.
 func (n *Native) siteBlocked(target string, sb *jinaSiteBlock) *DeferError {
 	now := n.clock.now()
-	site := siteOf(cmp.Or(sb.domain, hostOf(target)))
+	site := urlutil.Site(cmp.Or(sb.domain, hostOf(target)))
 	end := siteBlockEnd(sb.until, now)
 	turn, started := n.jinaSites.block(site, end, sb.reason, now)
 	if started {

@@ -88,6 +88,9 @@ const (
 	JobKindImport    JobKind = "import"
 	JobKindCluster   JobKind = "cluster"
 	JobKindSummarize JobKind = "summarize"
+	// JobKindCards embeds the documents' cards that are stale: a corpus-wide
+	// job, at most one pending per tenant.
+	JobKindCards JobKind = "cards"
 
 	JobStatusPending JobStatus = "pending"
 	JobStatusRunning JobStatus = "running"
@@ -114,6 +117,12 @@ const (
 	SourceManual  = "manual"
 	SourceHTML    = "html" // Netscape HTML export, any browser
 )
+
+// ExtractionMetaSiteName is the key of an extraction's extraction_meta
+// that holds the site name its page declared, when it declared one. The
+// fetch handler writes it, and the store's derivation of the document's
+// search fields reads it.
+const ExtractionMetaSiteName = "site"
 
 // FailureCause is why a failed or dead document failed
 // (documents.failure_cause): what the site did, as the fetcher read it, or
@@ -220,7 +229,7 @@ func (s JobStatus) Valid() bool {
 // Valid reports whether k is one of the JobKind constants.
 func (k JobKind) Valid() bool {
 	switch k {
-	case JobKindFetch, JobKindIndex, JobKindImport, JobKindCluster, JobKindSummarize:
+	case JobKindFetch, JobKindIndex, JobKindImport, JobKindCluster, JobKindSummarize, JobKindCards:
 		return true
 	}
 	return false
@@ -237,8 +246,9 @@ func (t Throttle) Valid() bool {
 
 // Gentle throttle caps: how many jobs of a kind run at once under
 // ThrottleGentle. Index jobs are what keep Ollama, and so the machine,
-// busy; capping fetches spares the network and extraction. Cluster runs
-// one at a time anyway, and kinds without a cap are never throttled.
+// busy; capping fetches spares the network and extraction. Cluster and
+// cards run one at a time anyway, and kinds without a cap are never
+// throttled.
 const (
 	gentleFetchCap = 4
 	gentleIndexCap = 1
@@ -256,7 +266,7 @@ func (t Throttle) Cap(kind JobKind) (int, bool) {
 		return gentleFetchCap, true
 	case JobKindIndex:
 		return gentleIndexCap, true
-	case JobKindImport, JobKindCluster, JobKindSummarize:
+	case JobKindImport, JobKindCluster, JobKindSummarize, JobKindCards:
 	}
 	return 0, false
 }
@@ -364,11 +374,13 @@ type DocumentStore interface {
 	// cause. ErrNotFound if there is no such document.
 	MarkFailed(ctx context.Context, id string, cause FailureCause) error
 	// MarkFetched records that a document was fetched and indexed: its
-	// state becomes fetched, it has no failure cause, and its indexed_at,
-	// when its vectors were written, is now (the time its updated_at gets
-	// in the same statement). It is the only write of indexed_at.
-	// ErrNotFound if there is no such document.
-	MarkFetched(ctx context.Context, id string) error
+	// state becomes fetched, it has no failure cause, its word count is
+	// words, the length of the text whose chunks were indexed, and its
+	// indexed_at, when its vectors were written, is now (the time its
+	// updated_at gets in the same statement). It is the only write of
+	// indexed_at and of word_count. A negative count is an error, and
+	// nothing is written. ErrNotFound if there is no such document.
+	MarkFetched(ctx context.Context, id string, words int) error
 	SetCurrentExtraction(ctx context.Context, documentID, extractionID string) error
 
 	// ApplyFetch records a successful fetch on a document: it points
@@ -377,7 +389,8 @@ type DocumentStore interface {
 	// with no failure cause, until the index step marks it fetched. A nil
 	// field clears its column: those columns describe the current
 	// extraction, so none may keep a value from an earlier one. word_count
-	// is left alone. ErrNotFound if there is no such document.
+	// is left alone: MarkFetched writes it, with the chunks it counts.
+	// ErrNotFound if there is no such document.
 	ApplyFetch(ctx context.Context, id string, m FetchedMetadata) error
 
 	// RequeueFetch resets the tenant's document to pending, clearing its
@@ -542,6 +555,11 @@ type BookmarkStore interface {
 	// newest saved first (by SavedAt, then by ID, descending). It is
 	// unpaged: a URL has at most one bookmark per source.
 	ListByDocument(ctx context.Context, tenantID, documentID string) ([]*Bookmark, error)
+	// ListByDocuments returns the tenant's bookmarks of each of ids, by
+	// document, each document's newest saved first, in one read however
+	// many there are. A document with none, or that isn't the tenant's, is
+	// absent. No IDs return none.
+	ListByDocuments(ctx context.Context, tenantID string, ids []string) (map[string][]*Bookmark, error)
 	Delete(ctx context.Context, id string) error
 	LinkDocument(ctx context.Context, bookmarkID, documentID string) error
 
@@ -827,6 +845,86 @@ type ChunkStore interface {
 	// retrieved, say) are left out; none matching is an empty result, not
 	// an error.
 	GetByIDs(ctx context.Context, ids []string) ([]*Chunk, error)
+}
+
+// DocumentHit is a document a document list found, with its score in
+// that list: higher is better, whatever the list, as for ChunkHit.
+type DocumentHit struct {
+	DocumentID string
+	Score      float64
+}
+
+// Card is a document's card, the short text it is embedded by, as the
+// cards job reads it to embed.
+type Card struct {
+	DocumentID string
+	Text       string
+}
+
+// CardVector is a card's vector and the text it was made from.
+type CardVector struct {
+	DocumentID string
+	Text       string
+	Embedding  []float32
+}
+
+// DocumentIndex searches documents by what they were saved as, not by
+// their text: the fields index over each document's title, the titles and
+// folders it was bookmarked under, its site and its author, searched whole
+// or by the titles alone, and the vectors of the documents' cards. Every
+// document, whatever its state, has its fields and a card: the stores
+// derive them in the transaction of every write that changes what they are
+// derived from. A card has a vector once the cards job has embedded it, and
+// is stale while its text differs from the text its vector was made from.
+// A card whose text the embedding model can't take is marked unembeddable
+// instead: it holds that text as embedded, with no vector, so it isn't
+// stale and isn't searched by meaning until its text changes or
+// ResetCards makes it stale again.
+type DocumentIndex interface {
+	// SearchFields runs query, a MATCH expression as
+	// ChunkStore.BM25Search takes it, against the tenant's documents'
+	// fields, scoped by f, and returns at most limit documents, best
+	// first, equal scores in the order their fields were first written.
+	// Documents of every state are returned.
+	SearchFields(ctx context.Context, tenantID, query string, limit int, f SearchFilters) ([]DocumentHit, error)
+	// SearchTitles runs query, a MATCH expression of ANDed phrases as
+	// search builds it, against the tenant's documents' title and
+	// bookmark titles alone, scoped by f, and returns at most limit
+	// documents, best first by bm25 over those two columns, equal scores
+	// in the order their fields were first written. Documents of every
+	// state are returned. A blank query, or a limit of 0 or less, reads
+	// nothing.
+	SearchTitles(ctx context.Context, tenantID, query string, limit int, f SearchFilters) ([]DocumentHit, error)
+	// SearchCards returns at most limit of the tenant's documents whose
+	// card vectors are nearest embedding, scoped by f, nearest first,
+	// equal distances by document ID. Documents of every state are
+	// returned. It over-fetches neighbors, as ChunkStore.VectorSearch
+	// does, so filtered-out cards don't crowd out its hits. embedding
+	// must be the index's width.
+	SearchCards(ctx context.Context, tenantID string, embedding []float32, limit int, f SearchFilters) ([]DocumentHit, error)
+	// StaleCards returns at most limit of the tenant's stale cards, by
+	// document ID, from the first after after ("" for the start).
+	StaleCards(ctx context.Context, tenantID, after string, limit int) ([]Card, error)
+	// CountStaleCards counts the tenant's stale cards: the cards left to
+	// embed.
+	CountStaleCards(ctx context.Context, tenantID string) (int, error)
+	// PutCardVectors stores each card's vector, in one transaction, for a
+	// card whose text is still the text the vector was made from; a card
+	// whose text changed since is left stale, without the vector. A
+	// vector of another width than the index's is an error, and nothing
+	// is written. written counts the vectors stored.
+	PutCardVectors(ctx context.Context, cards []CardVector) (written int, err error)
+	// MarkUnembeddable records, in one transaction, that the embedding
+	// model can't take each card's text, for a card that still holds it:
+	// the card is no longer stale, and any vector it had is deleted. A
+	// card whose text changed since is left stale. marked counts the
+	// cards recorded.
+	MarkUnembeddable(ctx context.Context, cards []Card) (marked int, err error)
+	// ResetCards makes every one of the tenant's cards stale, keeping
+	// their vectors searchable until they are embedded again, and queues
+	// a cards job, at most one pending per tenant, in one transaction.
+	// It returns how many cards it made stale.
+	ResetCards(ctx context.Context, tenantID string) (int, error)
 }
 
 // DocumentJobPayload is the payload of a job that works on one document

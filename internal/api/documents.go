@@ -476,10 +476,12 @@ func (d Deps) handleReindexDocument(w http.ResponseWriter, r *http.Request) {
 // Index jobs change no document state, so a partial run strands nothing;
 // it stops at the first failure and reports how far it got.
 //
-// For state=fetched it then resets the embedding drift baseline: the fetched
-// documents are every searchable one with content (failed and dead ones are
-// never searched), so once their jobs are in, the whole library is being
-// re-embedded by the build serving now. Vectors from both builds mix until
+// For state=fetched it then makes every document's card stale, queuing
+// the cards job, so the cards are embedded again by the build serving now
+// too, and resets the embedding drift baseline: the fetched documents are
+// every one whose chunks are searched (failed and dead ones' never are),
+// so once their jobs are in, the whole library is being re-embedded by
+// the build serving now. Vectors from both builds mix until
 // the jobs finish. So before it enqueues them it owes the interests a
 // fresh rebuild, which the scheduler queues once the re-embedding drains:
 // the current grouping's seeds and centroids are of the old vectors.
@@ -511,6 +513,13 @@ func (d Deps) handleReindexAll(w http.ResponseWriter, r *http.Request) {
 	for i, id := range ids {
 		if _, err := d.enqueueIndex(r.Context(), id); err != nil {
 			d.writeError(w, r, fmt.Errorf("enqueued %d of %d index jobs before failing: %w", i, len(ids), err))
+			return
+		}
+	}
+	if state == store.DocStateFetched && len(ids) > 0 && d.Index != nil {
+		if _, err := d.Index.ResetCards(r.Context(), d.TenantID); err != nil {
+			d.writeError(w, r, fmt.Errorf("enqueued all %d index jobs, but resetting the document cards failed: %w",
+				len(ids), err))
 			return
 		}
 	}

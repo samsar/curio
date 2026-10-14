@@ -12,8 +12,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/samsar/curio/internal/api"
 	"github.com/samsar/curio/internal/api/apitest"
 	"github.com/samsar/curio/internal/client"
+	"github.com/samsar/curio/internal/store"
 )
 
 func TestHomeMismatchWarning(t *testing.T) {
@@ -201,4 +203,109 @@ func TestStatus_Dashboard(t *testing.T) {
 
 	require.NoError(t, os.WriteFile(srv.Home.ConfigPath(), []byte("daemon:\n  ui: false\n"), 0o600))
 	assert.NotContains(t, mustRun(t, srv, "status"), "dashboard:")
+}
+
+// TestStatus_SearchFields: status warns, in one line, when the daemon's
+// start couldn't check the search fields, and says nothing of a start
+// that checked them or rebuilt their index.
+func TestStatus_SearchFields(t *testing.T) {
+	checked := time.Now()
+	for name, tc := range map[string]struct {
+		fields api.DocumentFields
+		want   string
+	}{
+		"checked": {api.DocumentFields{CheckedAt: checked}, ""},
+		"rebuilt": {api.DocumentFields{CheckedAt: checked, Rebuilt: true}, ""},
+		"failed": {api.DocumentFields{CheckedAt: checked, Error: "derive document fields: disk I/O error"},
+			"warning: the daemon's start couldn't check the search fields (derive document fields: disk I/O " +
+				"error); search may miss documents; run `curio doctor`\n"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := apitest.Start(t, func(d *api.Deps) { d.DocumentFields = tc.fields })
+			out := mustRun(t, srv, "status")
+			if tc.want == "" {
+				assert.NotContains(t, out, "search fields")
+				return
+			}
+			assert.Contains(t, out, tc.want)
+			assert.Equal(t, 1, strings.Count(out, "search fields"))
+		})
+	}
+}
+
+// TestSearchFieldsCheck: doctor passes a start that checked the search
+// fields, saying when, and that it rebuilt their index if it did, and
+// fails one that couldn't, with the restart that fixes it.
+func TestSearchFieldsCheck(t *testing.T) {
+	checked := time.Date(2026, 10, 14, 9, 30, 0, 0, time.UTC)
+	at := localTime(checked)
+	for name, tc := range map[string]struct {
+		fields               client.DocumentFields
+		status               checkStatus
+		detail, hintContains string
+	}{
+		"checked": {client.DocumentFields{CheckedAt: checked}, statusOK, "checked when the daemon started (" + at + ")", ""},
+		"rebuilt": {client.DocumentFields{CheckedAt: checked, Rebuilt: true}, statusOK,
+			"checked when the daemon started (" + at + "); their index didn't match them, and was rebuilt", ""},
+		"failed": {client.DocumentFields{CheckedAt: checked, Rebuilt: true, Error: "disk I/O error"}, statusFail,
+			"the daemon's start (" + at + ") couldn't check them: disk I/O error; search may miss documents",
+			"`curio daemon stop`, then any curio command starts it again"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			status, detail, hint := searchFieldsCheck(tc.fields)
+			assert.Equal(t, tc.status, status)
+			assert.Equal(t, tc.detail, detail)
+			if tc.hintContains == "" {
+				assert.Empty(t, hint)
+				return
+			}
+			assert.Contains(t, hint, tc.hintContains)
+			assert.Contains(t, hint, "docs/setup.md")
+		})
+	}
+}
+
+// TestStatus_Cards: status counts the cards left to embed, and prints no
+// line while none is.
+func TestStatus_Cards(t *testing.T) {
+	srv := apitest.Start(t)
+	assert.NotContains(t, mustRun(t, srv, "status"), "cards:")
+	srv.AddDocument(t, "https://example.com/a", store.DocStateFetched)
+	srv.AddDocument(t, "https://example.com/b", store.DocStatePending)
+	assert.Contains(t, mustRun(t, srv, "status"), "\ncards:     2 to embed\n")
+}
+
+// TestCardsCheck: doctor passes cards left to embed while a cards job runs
+// or waits to run, and warns while the job waiting carries an error or
+// none is queued.
+func TestCardsCheck(t *testing.T) {
+	due := time.Date(2026, 10, 14, 9, 30, 0, 0, time.UTC)
+	waiting := "waiting for the embedding model to answer"
+	for name, tc := range map[string]struct {
+		stale            int
+		pending, running []client.Job
+		status           checkStatus
+		detail, hint     string
+	}{
+		"none stale": {0, nil, nil, statusOK, "every card is embedded", ""},
+		"none stale, a job deferred": {0, []client.Job{{RunAfter: due, LastError: &waiting}}, nil, statusOK,
+			"every card is embedded", ""},
+		"a job running": {12, nil, []client.Job{{}}, statusOK, "12 cards to embed; the cards job is running", ""},
+		"a job pending": {12, []client.Job{{RunAfter: due}}, nil, statusOK,
+			"12 cards to embed; the cards job runs at " + localTime(due), ""},
+		"a job deferred": {12, []client.Job{{RunAfter: due, LastError: &waiting}}, nil, statusWarn,
+			"12 cards to embed; the cards job waits to run at " + localTime(due) + ": " + waiting,
+			"`curio jobs --status pending` shows it; it runs again by itself"},
+		"a job running, another deferred": {12, []client.Job{{RunAfter: due, LastError: &waiting}}, []client.Job{{}},
+			statusOK, "12 cards to embed; the cards job is running", ""},
+		"no job": {12, nil, nil, statusWarn, "12 cards to embed, and no cards job is queued to embed them",
+			"restart the daemon (`curio daemon stop`, then any curio command starts it): its start queues the job"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			status, detail, hint := cardsCheck(tc.stale, tc.pending, tc.running)
+			assert.Equal(t, tc.status, status)
+			assert.Equal(t, tc.detail, detail)
+			assert.Equal(t, tc.hint, hint)
+		})
+	}
 }

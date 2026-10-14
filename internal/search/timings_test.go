@@ -64,7 +64,7 @@ func TestEngine_Timings(t *testing.T) {
 	sdocs := slowDocs{DocumentStore: docs, read: minRead}
 	search := func(t *testing.T, emb Embedder, query string) Timings {
 		t.Helper()
-		engine := New(slow, sdocs, emb, Config{Log: slog.New(slog.DiscardHandler)})
+		engine := New(slow, sdocs, unusedIndex{}, emb, Config{Log: slog.New(slog.DiscardHandler)})
 		res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: query, K: 3})
 		require.NoError(t, err)
 		return res.Timings

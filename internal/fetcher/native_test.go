@@ -27,6 +27,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/urlutil"
 )
 
 // makeArticleHTML returns a reasonably article-shaped page so Readability
@@ -64,6 +65,24 @@ func TestNative_ReadabilityHappyPath(t *testing.T) {
 	assert.Equal(t, "Test Article", res.Title)
 	assert.Contains(t, res.Markdown, "paragraph of an article")
 	assert.Equal(t, "readability", res.Meta["via"])
+}
+
+// TestNative_SiteName: the site name a page declares is its result's
+// SiteName, not extraction meta; a page that declares none has none.
+func TestNative_SiteName(t *testing.T) {
+	declared := strings.Replace(makeArticleHTML("Test Article", ""), "<title>",
+		`<meta property="og:site_name" content="The Example Times"><title>`, 1)
+	for page, want := range map[string]string{declared: "The Example Times", makeArticleHTML("Test Article", ""): ""} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = w.Write([]byte(page))
+		}))
+		res, err := NewNative(NativeOptions{Timeout: 5 * time.Second}).Fetch(context.Background(), srv.URL)
+		srv.Close()
+		require.NoError(t, err)
+		assert.Equal(t, want, res.SiteName)
+		assert.NotContains(t, res.Meta, "site")
+	}
 }
 
 func TestNative_LoginWall_TooShort(t *testing.T) {
@@ -138,6 +157,7 @@ func TestNative_JinaFallbackOnLoginWall(t *testing.T) {
 	assert.Equal(t, "Article via Jina", res.Title)
 	assert.Equal(t, "jina", res.Meta["via"])
 	assert.Contains(t, res.Markdown, "article body from Jina")
+	assert.Empty(t, res.SiteName, "a Jina answer declares no site name")
 }
 
 func TestNative_HTTPError_NoFallback(t *testing.T) {
@@ -2488,7 +2508,7 @@ func blockingJina(t *testing.T, fc *fakeClock, logs *logRecorder, origin, block 
 		if !isJina {
 			return origin.respond(target)
 		}
-		site := siteOf(hostOf(page))
+		site := urlutil.Site(hostOf(page))
 		mu.Lock()
 		hits[site]++
 		mu.Unlock()

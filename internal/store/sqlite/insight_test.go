@@ -719,7 +719,7 @@ func TestChunks_DocumentVectors(t *testing.T) {
 
 	ids := seedDocs(t, db, "local", "https://example.com/x", "https://example.com/y")
 	for _, id := range ids {
-		require.NoError(t, docs.MarkFetched(ctx, id))
+		require.NoError(t, docs.MarkFetched(ctx, id, 0))
 	}
 	extX := latestExtractionID(t, db, ids[0])
 	extY := latestExtractionID(t, db, ids[1])
@@ -763,7 +763,7 @@ func (f *insightFixture) indexed(t *testing.T, at time.Time, ids ...string) {
 	t.Helper()
 	docs := NewDocuments(f.db)
 	for _, id := range ids {
-		require.NoError(t, docs.MarkFetched(f.ctx, id))
+		require.NoError(t, docs.MarkFetched(f.ctx, id, 0))
 		_, err := f.db.Exec(`UPDATE documents SET indexed_at = ? WHERE id = ?`, formatTime(at), id)
 		require.NoError(t, err)
 	}

@@ -84,7 +84,7 @@ func (e *libraryEngine) rebuild(t *testing.T, idx []int, trigger store.RunTrigge
 		switch {
 		case want[i] && !e.fetched[i]:
 			e.clock = e.clock.Add(time.Second)
-			require.NoError(t, e.docs.MarkFetched(e.ctx, dv.DocumentID))
+			require.NoError(t, e.docs.MarkFetched(e.ctx, dv.DocumentID, 0))
 			_, err := e.db.Exec(`UPDATE documents SET indexed_at = ? WHERE id = ?`,
 				e.clock.Format("2006-01-02T15:04:05.000Z"), dv.DocumentID)
 			require.NoError(t, err)

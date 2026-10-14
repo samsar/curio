@@ -158,12 +158,20 @@ type Search struct {
 	// DefaultK is the number of results when a request doesn't set k.
 	DefaultK int `yaml:"default_k"`
 	RRFK     int `yaml:"rrf_k"`
-	// BM25Weight and VectorWeight weigh each retriever in RRF: finite, not
-	// negative, not both zero. A zero switches that retriever's
-	// contribution off; a zero VectorWeight also leaves the query
-	// unembedded, so search never waits on or degrades for Ollama.
+	// BM25Weight and VectorWeight weigh the chunk lists in RRF, and
+	// FieldsWeight, CardsWeight and TitleWeight the document lists: a
+	// document's saved title, folders, site and author, its card's
+	// vector, and its title and bookmark titles holding every word of a
+	// query of two words or more (see decisions.md "Metadata search: a
+	// fields index and a card per document"). Each is finite and not
+	// negative, and not all five are zero. A zero switches that list off;
+	// with VectorWeight and CardsWeight both zero the query is never
+	// embedded, so search never waits on or degrades for Ollama.
 	BM25Weight   float64 `yaml:"bm25_weight"`
 	VectorWeight float64 `yaml:"vector_weight"`
+	FieldsWeight float64 `yaml:"fields_weight"`
+	CardsWeight  float64 `yaml:"cards_weight"`
+	TitleWeight  float64 `yaml:"title_weight"`
 	Collapse     string  `yaml:"collapse"` // max | sum | top3_avg
 	// EmbedTimeoutSeconds bounds embedding a search query. When Ollama is
 	// down or slower than this, search returns keyword-only results marked
@@ -371,10 +379,17 @@ func Default() Config {
 			},
 		},
 		Search: Search{
-			DefaultK:            10,
-			RRFK:                60,
-			BM25Weight:          1.0,
-			VectorWeight:        1.0,
+			DefaultK:     10,
+			RRFK:         60,
+			BM25Weight:   1.0,
+			VectorWeight: 1.0,
+			// Measured on the owner's library over fields 0, 0.25, 0.5 ×
+			// cards 0, 0.5, 1, then the titles over 0 to 3: see
+			// decisions.md "Metadata search: a fields index and a card per
+			// document".
+			FieldsWeight:        0.25,
+			CardsWeight:         0.5,
+			TitleWeight:         2,
 			Collapse:            "max",
 			EmbedTimeoutSeconds: 10,
 		},
@@ -709,19 +724,25 @@ func (d Daemon) SlogLevel() slog.Level {
 }
 
 // validateWeights checks the RRF weights. NaN or a negative weight corrupts
-// the fused ordering, and with both at zero every document scores zero.
+// the fused ordering, and with all five at zero every document scores
+// zero.
 func validateWeights(s Search) error {
 	for _, w := range []struct {
 		key string
 		v   float64
-	}{{"search.bm25_weight", s.BM25Weight}, {"search.vector_weight", s.VectorWeight}} {
+	}{
+		{"search.bm25_weight", s.BM25Weight}, {"search.vector_weight", s.VectorWeight},
+		{"search.fields_weight", s.FieldsWeight}, {"search.cards_weight", s.CardsWeight},
+		{"search.title_weight", s.TitleWeight},
+	} {
 		// Written so NaN, which fails every comparison, is rejected.
 		if !(w.v >= 0) || math.IsInf(w.v, 1) {
 			return fmt.Errorf("%s must be a finite number >= 0, got %g", w.key, w.v)
 		}
 	}
-	if s.BM25Weight == 0 && s.VectorWeight == 0 {
-		return errors.New("search.bm25_weight and search.vector_weight must not both be 0")
+	if s.BM25Weight == 0 && s.VectorWeight == 0 && s.FieldsWeight == 0 && s.CardsWeight == 0 && s.TitleWeight == 0 {
+		return errors.New("search.bm25_weight, vector_weight, fields_weight, cards_weight and title_weight " +
+			"must not all be 0")
 	}
 	return nil
 }

@@ -91,15 +91,61 @@ func TestBookmarks_ListByDocument(t *testing.T) {
 	assert.Nil(t, b.DocumentID)
 }
 
+// TestBookmarks_ListByDocuments: the tenant's bookmarks of each document
+// asked for, newest saved first, in one read; documents with none, or
+// another tenant's, are absent.
+func TestBookmarks_ListByDocuments(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	bms := NewBookmarks(db)
+	saved := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	ingest := func(url, source string, savedAt time.Time) *store.Bookmark {
+		t.Helper()
+		b := newIngestBookmark(url, source)
+		b.SavedAt = savedAt
+		_, err := bms.Ingest(ctx, b)
+		require.NoError(t, err)
+		return b
+	}
+	aOld := ingest("https://example.com/a", store.SourceChrome, saved)
+	aNew := ingest("https://example.com/a", store.SourceSafari, saved.Add(time.Hour))
+	b := ingest("https://example.com/b", store.SourceFirefox, saved)
+	other := ingest("https://example.com/other", store.SourceChrome, saved)
+	theirs := &store.Bookmark{TenantID: "other-tenant", URL: "https://example.com/theirs", Source: store.SourceChrome,
+		SavedAt: saved}
+	_, err := bms.Ingest(ctx, theirs)
+	require.NoError(t, err)
+
+	got, err := bms.ListByDocuments(ctx, "local", []string{*aOld.DocumentID, *b.DocumentID, *theirs.DocumentID,
+		"no-such-document"})
+	require.NoError(t, err)
+	ids := map[string][]string{}
+	for doc, list := range got {
+		for _, bm := range list {
+			ids[doc] = append(ids[doc], bm.ID)
+		}
+	}
+	assert.Equal(t, map[string][]string{*aOld.DocumentID: {aNew.ID, aOld.ID}, *b.DocumentID: {b.ID}}, ids)
+	assert.NotContains(t, got, *other.DocumentID, "a document not asked for")
+
+	none, err := bms.ListByDocuments(ctx, "local", nil)
+	require.NoError(t, err)
+	assert.Empty(t, none)
+}
+
 func newIngestBookmark(url, source string) *store.Bookmark {
 	return &store.Bookmark{TenantID: "local", URL: url, Source: source, SavedAt: time.Now().UTC()}
 }
 
-type rowCounts struct{ documents, bookmarks, jobs int }
+// rowCounts are the rows an ingest writes: its document, its bookmark, the
+// document's fetch job and the cards job a changed card queues, at most
+// one.
+type rowCounts struct{ documents, bookmarks, fetchJobs, cardsJobs int }
 
 func countIngestRows(t *testing.T, db *DB) rowCounts {
 	t.Helper()
-	return rowCounts{countRows(t, db, "documents"), countRows(t, db, "bookmarks"), countRows(t, db, "jobs")}
+	return rowCounts{countRows(t, db, "documents"), countRows(t, db, "bookmarks"), countFetchJobs(t, db),
+		countRows(t, db, "jobs WHERE kind = 'cards'")}
 }
 
 func TestBookmarks_Ingest_NewURL(t *testing.T) {
@@ -121,7 +167,7 @@ func TestBookmarks_Ingest_NewURL(t *testing.T) {
 	require.NotNil(t, b.DocumentID)
 	assert.False(t, b.CreatedAt.IsZero())
 	assert.False(t, b.UpdatedAt.IsZero())
-	assert.Equal(t, rowCounts{1, 1, 1}, countIngestRows(t, db))
+	assert.Equal(t, rowCounts{1, 1, 1, 1}, countIngestRows(t, db))
 
 	doc, err := NewDocuments(db).GetByID(ctx, *b.DocumentID)
 	require.NoError(t, err)
@@ -151,7 +197,7 @@ func TestBookmarks_Ingest_KnownURL(t *testing.T) {
 	first := newIngestBookmark("https://example.com/post", store.SourceChrome)
 	_, err := bms.Ingest(ctx, first)
 	require.NoError(t, err)
-	require.NoError(t, docs.MarkFetched(ctx, *first.DocumentID))
+	require.NoError(t, docs.MarkFetched(ctx, *first.DocumentID, 0))
 
 	second := newIngestBookmark("https://example.com/post", store.SourceSafari)
 	stale := "ignored"
@@ -162,7 +208,7 @@ func TestBookmarks_Ingest_KnownURL(t *testing.T) {
 	assert.Nil(t, res.FetchJob)
 	assert.Equal(t, store.DocStateFetched, res.DocumentState)
 	assert.Equal(t, *first.DocumentID, *second.DocumentID, "input DocumentID is ignored")
-	assert.Equal(t, rowCounts{1, 2, 1}, countIngestRows(t, db))
+	assert.Equal(t, rowCounts{1, 2, 1, 1}, countIngestRows(t, db))
 }
 
 func TestBookmarks_Ingest_Duplicate(t *testing.T) {
@@ -194,7 +240,7 @@ func TestBookmarks_Ingest_Atomic(t *testing.T) {
 	b := newIngestBookmark("https://example.com/post", store.SourceChrome)
 	_, err := bms.Ingest(ctx, b)
 	require.ErrorContains(t, err, "injected")
-	assert.Equal(t, rowCounts{0, 0, 0}, countIngestRows(t, db))
+	assert.Equal(t, rowCounts{0, 0, 0, 0}, countIngestRows(t, db))
 
 	_, err = db.Exec(`DROP TRIGGER t_fail`)
 	require.NoError(t, err)
@@ -202,7 +248,7 @@ func TestBookmarks_Ingest_Atomic(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, res.DocumentCreated)
 	require.NotNil(t, res.FetchJob)
-	assert.Equal(t, rowCounts{1, 1, 1}, countIngestRows(t, db))
+	assert.Equal(t, rowCounts{1, 1, 1, 1}, countIngestRows(t, db))
 }
 
 // TestBookmarks_Ingest_Concurrent: synced browsers import the same URL at
@@ -234,7 +280,7 @@ func TestBookmarks_Ingest_Concurrent(t *testing.T) {
 		assert.NoError(t, err)
 	}
 
-	assert.Equal(t, rowCounts{nURLs, nURLs * len(sources), nURLs}, countIngestRows(t, db))
+	assert.Equal(t, rowCounts{nURLs, nURLs * len(sources), nURLs, 1}, countIngestRows(t, db))
 	rows, err := db.Query(`SELECT count(*) FROM jobs GROUP BY json_extract(payload, '$.document_id')`)
 	require.NoError(t, err)
 	defer rows.Close()

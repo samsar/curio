@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"golang.org/x/sync/errgroup"
 
@@ -18,24 +19,40 @@ import (
 
 // Engine runs hybrid search.
 //
-//  1. BM25 over chunks_fts and vector ANN over chunks_vec, concurrently,
-//     each reading the same pool of chunks whatever the request asks for;
-//     a zero vector weight skips the vector leg
+//  1. Five lists, concurrently, each reading the same pool whatever the
+//     request asks for: BM25 over chunks_fts and the fields list over the
+//     documents' fields, from the same sanitized query; the title list
+//     over the documents' titles and bookmark titles alone, from the AND
+//     of the query's terms (titleQuery); and, from one embedding of the
+//     query, vector ANN over chunks_vec and over the documents' card
+//     vectors. A list weighted 0 is not read, and the query is embedded
+//     only when a semantic list is weighted.
 //  2. RRF fuse the two ranked chunk lists
 //  3. Collapse chunks → documents (best chunk per doc, configurable), and
 //     rank them
-//  4. Return the requested window of that ranking, [Offset, Offset+K), with
+//  4. Add each document list's reciprocal ranks to its documents, fields,
+//     cards, then titles, a document only they found joining without
+//     chunks, and rank them again
+//  5. Return the requested window of that ranking, [Offset, Offset+K), with
 //     each document's best chunks and the BM25 snippets of those alone
 //
+// The chunk lists never return failed or dead documents (their chunks are
+// of a page that is gone); the document lists return documents of every
+// state, by what they were saved as.
+//
 // The Embedder dependency is used only on the query side — to vectorize
-// the user's query before VectorSearch, never with a zero vector weight.
-// Documents are embedded by the indexer at write time.
+// the user's query before the semantic lists, never with both weighted 0.
+// Documents and their cards are embedded by indexing jobs.
 type Engine struct {
 	chunks       store.ChunkStore
 	docs         store.DocumentStore
+	index        store.DocumentIndex
 	embedder     Embedder
 	bm25W        float64
 	vectorW      float64
+	fieldsW      float64
+	cardsW       float64
+	titleW       float64
 	rrfK         int
 	collapse     CollapseStrategy
 	preFanout    int    // minimum chunks to pull from each retriever before fusion
@@ -64,14 +81,19 @@ const (
 
 // Config wires an Engine. Zero-value fields use sensible defaults.
 type Config struct {
-	// BM25Weight and VectorWeight weigh each retriever in RRF. Both zero
-	// means unset (1.0 each); a single zero switches that retriever's
-	// contribution off. A zero VectorWeight also skips the vector leg: the
-	// query is never embedded, so a down or hung embedding model costs the
-	// search nothing and never degrades it. A zero BM25Weight still runs
-	// BM25, whose results are the fallback when the vector leg fails.
+	// BM25Weight, VectorWeight, FieldsWeight, CardsWeight and TitleWeight
+	// weigh each list in RRF. All five zero means unset: 1.0 for each
+	// chunk list, and the document lists off. A zero switches that list's
+	// contribution off, and a zero document weight leaves its list unread.
+	// With VectorWeight and CardsWeight both zero the query is never
+	// embedded, so a down or hung embedding model costs the search nothing
+	// and never degrades it. A zero BM25Weight still runs BM25, whose
+	// results are the fallback when the semantic lists fail.
 	BM25Weight   float64
 	VectorWeight float64
+	FieldsWeight float64
+	CardsWeight  float64
+	TitleWeight  float64
 	RRFK         int
 	Collapse     CollapseStrategy
 	// PreFanout is the fewest chunks a retriever returns before fusion:
@@ -95,8 +117,12 @@ type Config struct {
 	QueryPrefix string
 }
 
-func New(chunks store.ChunkStore, docs store.DocumentStore, embedder Embedder, cfg Config) *Engine {
-	if cfg.BM25Weight == 0 && cfg.VectorWeight == 0 {
+// New builds an engine over the stores. index must not be nil; with every
+// document weight zero it is never read.
+func New(chunks store.ChunkStore, docs store.DocumentStore, index store.DocumentIndex, embedder Embedder,
+	cfg Config) *Engine {
+	if cfg.BM25Weight == 0 && cfg.VectorWeight == 0 && cfg.FieldsWeight == 0 && cfg.CardsWeight == 0 &&
+		cfg.TitleWeight == 0 {
 		cfg.BM25Weight, cfg.VectorWeight = 1.0, 1.0
 	}
 	if cfg.RRFK == 0 {
@@ -120,9 +146,13 @@ func New(chunks store.ChunkStore, docs store.DocumentStore, embedder Embedder, c
 	return &Engine{
 		chunks:       chunks,
 		docs:         docs,
+		index:        index,
 		embedder:     embedder,
 		bm25W:        cfg.BM25Weight,
 		vectorW:      cfg.VectorWeight,
+		fieldsW:      cfg.FieldsWeight,
+		cardsW:       cfg.CardsWeight,
+		titleW:       cfg.TitleWeight,
 		rrfK:         cfg.RRFK,
 		collapse:     cfg.Collapse,
 		preFanout:    cfg.PreFanout,
@@ -150,7 +180,10 @@ type Request struct {
 type Hit struct {
 	Document *store.Document
 	Score    float64
-	Chunks   []ChunkMatch // up to top 3 per doc, in score order
+	// Chunks are up to 3 of the document's matching chunks, in score
+	// order; none for a document only the document lists found, by what
+	// it was saved as.
+	Chunks []ChunkMatch
 }
 
 // ChunkMatch carries one matching chunk with its retriever-specific scores.
@@ -177,8 +210,9 @@ type Result struct {
 	// neither.
 	Total  int
 	Capped bool
-	// Degraded is set when the vector leg failed and Items are keyword-only;
-	// Warnings then says why.
+	// Degraded is set when the semantic lists failed and Items are
+	// keyword-only (BM25, and the fields and title lists when they are
+	// weighted); Warnings then says why.
 	Degraded bool
 	Warnings []string
 	// Timings are how long Search's stages took; Related sets none.
@@ -187,14 +221,17 @@ type Result struct {
 
 // Timings are how long each stage of a search took, for measuring a
 // ranking change against its latency; the API never reports them. The
-// BM25 leg runs alongside the embed and the vector search, so the stages
-// add up to more than Total. A stage that didn't run is 0, and one that
-// failed counts up to its failure.
+// keyword lists run alongside the embed and the semantic lists, and those
+// alongside each other, so the stages add up to more than Total. A stage
+// that didn't run is 0, and one that failed counts up to its failure.
 type Timings struct {
 	Embed   time.Duration // embedding the query
 	BM25    time.Duration // the keyword search
+	Fields  time.Duration // the fields list's search
+	Titles  time.Duration // the title list's search
 	Vector  time.Duration // the vector search
-	Fuse    time.Duration // RRF, resolving the chunks to their documents, and ranking those
+	Cards   time.Duration // the card vectors' search
+	Fuse    time.Duration // RRF, resolving the chunks to their documents, and ranking those with the document lists
 	Hydrate time.Duration // reading the window's documents, their chunks and the snippets
 	Total   time.Duration // the whole search
 }
@@ -202,19 +239,21 @@ type Timings struct {
 // Search runs the hybrid pipeline end-to-end.
 //
 // Every search reads the same pool, chunkFanout(store.MaxSearchK) chunks
-// from each retriever, and ranks the documents they come from; the request
-// picks its window of that ranking. A pool that grew with K would rank a
-// page asked as "k=20, keep 11-20" from more chunks than page 1, and a
-// document could then show on both pages or on neither. See
-// docs/decisions.md "Search pages by offset within a fixed-depth pool".
+// from each chunk list and documentListDepth documents from each document
+// list, and ranks the documents they come from; the request picks its
+// window of that ranking. A pool that grew with K would rank a page asked
+// as "k=20, keep 11-20" from more chunks than page 1, and a document could
+// then show on both pages or on neither. See docs/decisions.md "Search
+// pages by offset within a fixed-depth pool".
 //
-// The two retrievers fail asymmetrically. BM25 is local SQLite and always
-// available, so its failure is a bug or corruption and fails the search. The
-// vector leg depends on an embedding model in another process (Ollama), which
-// may be down, still starting, or hung — legitimately optional at query time —
-// so its failure returns the keyword results marked Degraded instead of
-// discarding them. If the caller's own context ends, Search returns that
-// error, never a degraded success.
+// The lists fail asymmetrically. BM25, the fields list and the title list
+// are local SQLite and always available, so a failure of any is a bug or
+// corruption and fails the search. The semantic lists depend on an
+// embedding model in another process (Ollama), which may be down, still
+// starting, or hung — legitimately optional at query time — so a failure
+// of either drops both, and returns the keyword results marked Degraded
+// instead of discarding them. If the caller's own context ends, Search
+// returns that error, never a degraded success.
 func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 	began := time.Now()
 	if req.Query == "" {
@@ -241,11 +280,16 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 	// Real user queries are natural language ("articles about X, Y, and Z"),
 	// so we tokenize down to safe terms before handing to FTS5. The vector
 	// path keeps the original text since the embedder handles language fine.
-	// Empty after sanitization (e.g. query was all punctuation) means BM25
-	// contributes nothing; vector search still runs, unless weighted 0.
-	var bm25Hits, vecHits []store.ChunkHit
-	var vecErr error
-	// Each leg writes its own stages' fields, read only after Wait.
+	// Empty after sanitization (e.g. query was all punctuation) means the
+	// keyword lists contribute nothing; the semantic lists still run,
+	// unless weighted 0.
+	var (
+		bm25Hits  []store.ChunkHit
+		fieldHits []store.DocumentHit
+		titleHits []store.DocumentHit
+		semantic  semanticHits
+	)
+	// Each list writes its own stages' fields, read only after Wait.
 	var timings Timings
 	g, gctx := errgroup.WithContext(ctx)
 	ftsQuery := sanitizeBM25Query(req.Query)
@@ -260,15 +304,41 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 			bm25Hits = hits
 			return nil
 		})
+		if e.fieldsW > 0 {
+			g.Go(func() error {
+				start := time.Now()
+				hits, err := e.index.SearchFields(gctx, req.TenantID, ftsQuery, documentListDepth, req.Filters)
+				timings.Fields = time.Since(start)
+				if err != nil {
+					return fmt.Errorf("fields: %w", err)
+				}
+				fieldHits = hits
+				return nil
+			})
+		}
 	}
-	// A vector leg weighted 0 would contribute nothing to the ranking, and
-	// running it would still wait on the embedding model, up to
-	// embedTimeout, and degrade the search when that model is down.
-	if e.vectorW != 0 {
+	// The title list reads only a query of at least two terms, every one of
+	// which a document's titles must hold.
+	if titleMatch := titleQuery(req.Query); e.titleW > 0 && titleMatch != "" {
 		g.Go(func() error {
-			// Never fatal: returning nil keeps a vector failure from canceling
-			// the BM25 leg.
-			vecHits, vecErr = e.vectorLeg(gctx, req, fanout, &timings)
+			start := time.Now()
+			hits, err := e.index.SearchTitles(gctx, req.TenantID, titleMatch, documentListDepth, req.Filters)
+			timings.Titles = time.Since(start)
+			if err != nil {
+				return fmt.Errorf("titles: %w", err)
+			}
+			titleHits = hits
+			return nil
+		})
+	}
+	// A semantic list weighted 0 would contribute nothing to the ranking,
+	// and reading it would still wait on the embedding model, up to
+	// embedTimeout, and degrade the search when that model is down.
+	if e.vectorW > 0 || e.cardsW > 0 {
+		g.Go(func() error {
+			// Never fatal: returning nil keeps a semantic failure from
+			// canceling the keyword lists.
+			semantic = e.semanticLeg(gctx, req, fanout, &timings)
 			return nil
 		})
 	}
@@ -281,16 +351,22 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 	}
 
 	res := &Result{Query: req.Query}
-	lists := [][]RankedItem{toRanked(bm25Hits), toRanked(vecHits)}
+	lists := [][]RankedItem{toRanked(bm25Hits), toRanked(semantic.chunks)}
 	weights := []float64{e.bm25W, e.vectorW}
-	if vecErr != nil {
-		e.log.Warn("semantic search unavailable; returning keyword-only results",
-			"query", req.Query, "err", vecErr)
+	docLists := []documentList{
+		{weight: e.fieldsW, hits: fieldHits},
+		{weight: e.cardsW, hits: semantic.cards, semantic: true},
+		{weight: e.titleW, hits: titleHits},
+	}
+	if semantic.err != nil {
 		res.Degraded = true
-		res.Warnings = []string{fmt.Sprintf("semantic search unavailable (%v); keyword-only results", vecErr)}
-		// Only the keyword list is left, and its weight only balances it
+		res.Warnings = []string{e.degradedWarning(semantic.err)}
+		e.log.Warn("semantic search unavailable; returning keyword-only results",
+			"query", req.Query, "err", semantic.err)
+		// Only the keyword lists are left. BM25's weight only balanced it
 		// against the vector list; a zero weight would erase the ranking.
 		lists, weights = lists[:1], []float64{1}
+		docLists = slices.DeleteFunc(docLists, func(l documentList) bool { return l.semantic })
 	}
 	fuseStart := time.Now()
 	fused := Fuse(lists, weights, e.rrfK)
@@ -300,8 +376,8 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 	for _, h := range bm25Hits {
 		bm25ByID[h.ChunkID] = h
 	}
-	vecByID := make(map[string]store.ChunkHit, len(vecHits))
-	for _, h := range vecHits {
+	vecByID := make(map[string]store.ChunkHit, len(semantic.chunks))
+	for _, h := range semantic.chunks {
 		vecByID[h.ChunkID] = h
 	}
 
@@ -319,7 +395,7 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 		scored = append(scored, scoredChunk{chunkID: fc.ID, documentID: docID, score: fc.Score})
 	}
 
-	ranked := rankDocuments(scored, e.collapse)
+	ranked := addDocumentLists(rankDocuments(scored, e.collapse), docLists, e.rrfK)
 	timings.Fuse = time.Since(fuseStart)
 	res.Total, res.Capped = min(len(ranked), store.MaxSearchK), len(ranked) > store.MaxSearchK
 	hydrateStart := time.Now()
@@ -332,25 +408,84 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 	}
 	timings.Hydrate = time.Since(hydrateStart)
 	res.BM25Hits = len(bm25Hits)
-	res.VectorHits = len(vecHits)
+	res.VectorHits = len(semantic.chunks)
 	res.Items = items
 	timings.Total = time.Since(began)
 	res.Timings = timings
 	return res, nil
 }
 
+// degradedWarning is what a degraded search tells its caller: the semantic
+// lists failed for err, and which lists ranked it.
+func (e *Engine) degradedWarning(err error) string {
+	w := fmt.Sprintf("semantic search unavailable (%v); keyword-only results", err)
+	if e.cardsW > 0 {
+		w += ", without the document cards"
+	}
+	return w
+}
+
 // DefaultK is how many results a request that leaves K at 0 gets.
 func (e *Engine) DefaultK() int { return e.defaultK }
 
-// vectorLeg embeds the query under its own deadline, so a hung embedding
-// model costs at most embedTimeout, and runs the ANN search. It records
-// how long each took in t.Embed and t.Vector, and writes nothing else of
-// t: the BM25 leg writes its own field alongside.
-func (e *Engine) vectorLeg(ctx context.Context, req Request, fanout int, t *Timings) ([]store.ChunkHit, error) {
+// semanticHits are the semantic lists' hits, or why they failed: both are
+// dropped together.
+type semanticHits struct {
+	chunks []store.ChunkHit
+	cards  []store.DocumentHit
+	err    error
+}
+
+// semanticLeg embeds the query once, under its own deadline, so a hung
+// embedding model costs at most embedTimeout, then runs the vector search
+// over the chunks and over the cards, each weighted, concurrently. A
+// failure of either fails both. It records how long each took in t.Embed,
+// t.Vector and t.Cards, and writes nothing else of t: the keyword lists
+// write their own fields alongside.
+func (e *Engine) semanticLeg(ctx context.Context, req Request, fanout int, t *Timings) semanticHits {
+	vec, err := e.embedQuery(ctx, req.Query, t)
+	if err != nil {
+		return semanticHits{err: err}
+	}
+	var out semanticHits
+	g, gctx := errgroup.WithContext(ctx)
+	if e.vectorW > 0 {
+		g.Go(func() error {
+			start := time.Now()
+			hits, err := e.chunks.VectorSearch(gctx, req.TenantID, vec, fanout, req.Filters)
+			t.Vector = time.Since(start)
+			if err != nil {
+				return fmt.Errorf("vector search: %w", err)
+			}
+			out.chunks = hits
+			return nil
+		})
+	}
+	if e.cardsW > 0 {
+		g.Go(func() error {
+			start := time.Now()
+			hits, err := e.index.SearchCards(gctx, req.TenantID, vec, documentListDepth, req.Filters)
+			t.Cards = time.Since(start)
+			if err != nil {
+				return fmt.Errorf("card search: %w", err)
+			}
+			out.cards = hits
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return semanticHits{err: err}
+	}
+	return out
+}
+
+// embedQuery embeds the query, behind the query prefix, under its own
+// deadline, recording how long it took in t.Embed.
+func (e *Engine) embedQuery(ctx context.Context, query string, t *Timings) ([]float32, error) {
 	ectx, cancel := context.WithTimeout(ctx, e.embedTimeout)
 	defer cancel()
 	start := time.Now()
-	vecs, err := e.embedder.Embed(ectx, []string{e.queryPrefix + req.Query})
+	vecs, err := e.embedder.Embed(ectx, []string{e.queryPrefix + query})
 	t.Embed = time.Since(start)
 	if err != nil {
 		return nil, fmt.Errorf("embed query: %w", err)
@@ -358,13 +493,7 @@ func (e *Engine) vectorLeg(ctx context.Context, req Request, fanout int, t *Timi
 	if len(vecs) != 1 {
 		return nil, fmt.Errorf("embed query: got %d vectors, want 1", len(vecs))
 	}
-	start = time.Now()
-	hits, err := e.chunks.VectorSearch(ctx, req.TenantID, vecs[0], fanout, req.Filters)
-	t.Vector = time.Since(start)
-	if err != nil {
-		return nil, fmt.Errorf("vector search: %w", err)
-	}
-	return hits, nil
+	return vecs[0], nil
 }
 
 // chunkFanout is how many chunks each retriever returns before fusion for
@@ -720,27 +849,67 @@ func topChunkIDs(perChunk map[string]float64, n int) []string {
 // See docs/decisions.md "BM25 query sanitization: OR + stopwords" for the
 // design rationale and the natural-language-search work we may revisit.
 func sanitizeBM25Query(q string) string {
-	tokens := wordTokenRE.FindAllString(q, -1)
-	if len(tokens) == 0 {
-		return ""
-	}
-	parts := make([]string, 0, len(tokens))
-	for _, t := range tokens {
-		// Strip any embedded double quotes — FTS5 has no escape for `"`
-		// inside a quoted phrase, the only safe move is to drop them.
-		t = strings.ReplaceAll(t, `"`, "")
-		if t == "" {
+	return phrases(keywordTerms(q), " OR ")
+}
+
+// titleListMinTerms is the fewest distinct terms a query needs for the
+// title list to read it. With one term the AND is no more precise than the
+// fields list's OR held to the titles, and at the default weights eight
+// times as heavy: measured on one-word queries, it filled half the first
+// page with documents whose titles hold the word. See docs/decisions.md
+// "Metadata search: a fields index and a card per document".
+const titleListMinTerms = 2
+
+// titleQuery is the title list's MATCH expression for q: the AND of its
+// distinct keyword terms, compared case-insensitively, each quoted as
+// sanitizeBM25Query quotes it. A term with no letter or digit is dropped:
+// FTS5 tokenizes it to an empty phrase, which makes an AND match nothing.
+// "" when fewer than titleListMinTerms terms remain.
+func titleQuery(q string) string {
+	terms := keywordTerms(q)
+	seen := make(map[string]bool, len(terms))
+	distinct := terms[:0]
+	for _, t := range terms {
+		key := strings.ToLower(t)
+		if seen[key] || !strings.ContainsFunc(t, isLetterOrDigit) {
 			continue
 		}
+		seen[key] = true
+		distinct = append(distinct, t)
+	}
+	if len(distinct) < titleListMinTerms {
+		return ""
+	}
+	return phrases(distinct, " AND ")
+}
+
+func isLetterOrDigit(r rune) bool { return unicode.IsLetter(r) || unicode.IsNumber(r) }
+
+// keywordTerms are the terms the keyword lists read a query by: its
+// word-like tokens (wordTokenRE), in order, less the stopwords. No term
+// can hold `"`, which wordTokenRE doesn't match, so a quote inside a word
+// splits it; that is what makes quoting each term as an FTS5 phrase safe,
+// FTS5 having no escape for `"` inside a quoted phrase.
+func keywordTerms(q string) []string {
+	tokens := wordTokenRE.FindAllString(q, -1)
+	terms := make([]string, 0, len(tokens))
+	for _, t := range tokens {
 		if _, stop := bm25Stopwords[strings.ToLower(t)]; stop {
 			continue
 		}
-		parts = append(parts, `"`+t+`"`)
+		terms = append(terms, t)
 	}
-	if len(parts) == 0 {
-		return ""
+	return terms
+}
+
+// phrases joins terms, each quoted as an FTS5 phrase, with op: "" for
+// none.
+func phrases(terms []string, op string) string {
+	quoted := make([]string, len(terms))
+	for i, t := range terms {
+		quoted[i] = `"` + t + `"`
 	}
-	return strings.Join(parts, " OR ")
+	return strings.Join(quoted, op)
 }
 
 // wordTokenRE matches runs of letters, digits, apostrophes, and hyphens —

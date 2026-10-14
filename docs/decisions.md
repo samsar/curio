@@ -89,7 +89,7 @@ when the entry was first committed.
 - 2026-09-24 — [Subprocess fetchers: kill the process group, cap the output](#subprocess-fetchers-kill-the-process-group-cap-the-output)
 - 2026-09-24 — [Chrome profiles carry their own User-Agent and sec-ch-ua](#chrome-profiles-carry-their-own-user-agent-and-sec-ch-ua) (revised)
 - 2026-09-24 — [Store boundary: consumers see interfaces, depguard enforces it](#store-boundary-consumers-see-interfaces-depguard-enforces-it) (revised)
-- 2026-09-24 — [Documents: explicit Create and ApplyFetch, no upsert](#documents-explicit-create-and-applyfetch-no-upsert)
+- 2026-09-24 — [Documents: explicit Create and ApplyFetch, no upsert](#documents-explicit-create-and-applyfetch-no-upsert) (revised)
 - 2026-09-24 — [Bookmark ingest: one transaction, fetch only for new documents](#bookmark-ingest-one-transaction-fetch-only-for-new-documents)
 - 2026-09-24 — [Migrate: goose's Provider, and a context all the way down](#migrate-gooses-provider-and-a-context-all-the-way-down) (revised)
 - 2026-09-24 — [Folder and host filters: literal input, segment-boundary folders](#folder-and-host-filters-literal-input-segment-boundary-folders) (revised)
@@ -122,7 +122,7 @@ when the entry was first committed.
 - 2026-09-26 — [YouTube: a shared cooldown after a 429](#youtube-a-shared-cooldown-after-a-429) (revised)
 - 2026-09-26 — [Page verdicts: one judge for every page, bot challenges included](#page-verdicts-one-judge-for-every-page-bot-challenges-included) (revised)
 - 2026-09-26 — [Jina answers are judged like the origin's pages](#jina-answers-are-judged-like-the-origins-pages) (revised)
-- 2026-09-26 — [Search leaves out failed and dead documents](#search-leaves-out-failed-and-dead-documents)
+- 2026-09-26 — [Search leaves out failed and dead documents](#search-leaves-out-failed-and-dead-documents) (revised)
 - 2026-09-27 — [Cross-site redirects: judged where they land](#cross-site-redirects-judged-where-they-land)
 - 2026-09-27 — [Error pages whose status is hidden](#error-pages-whose-status-is-hidden)
 - 2026-09-27 — [Jina requests identify as curio](#jina-requests-identify-as-curio) (revised)
@@ -159,8 +159,9 @@ when the entry was first committed.
 - 2026-10-03 — [Dashboard: two-level interests](#dashboard-two-level-interests)
 - 2026-10-03 — [Page text: not-found notices, parked domains and sign-in forms](#page-text-not-found-notices-parked-domains-and-sign-in-forms)
 - 2026-10-04 — [Interest map: two views of each regrouping, drawn when it is built](#interest-map-two-views-of-each-regrouping-drawn-when-it-is-built)
-- 2026-10-13 — [Search evaluation: graded, per kind, on a copy, never in the repo](#search-evaluation-graded-per-kind-on-a-copy-never-in-the-repo)
+- 2026-10-13 — [Search evaluation: graded, per kind, on a copy, never in the repo](#search-evaluation-graded-per-kind-on-a-copy-never-in-the-repo) (revised)
 - 2026-10-13 — [Model roles: a provider and model per use, inheriting generation's](#model-roles-a-provider-and-model-per-use-inheriting-generations)
+- 2026-10-13 — [Metadata search: a fields index and a card per document](#metadata-search-a-fields-index-and-a-card-per-document)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -447,6 +448,26 @@ when Ollama is down, and reports `vector_hits` 0 and no embed or vector
 time. A BM25 weight of 0 still runs BM25, so a config with `bm25_weight: 0`
 still falls back to the keyword results (weight 1) when the vector leg
 fails. The default 1/1 weights rank exactly as before.
+
+**Revised (2026-10-13), metadata search:** search ranks five lists. The
+two chunk lists, BM25 and vector, are fused and collapsed as above; then
+three lists of whole documents, the fields (BM25 over each document's
+saved title, folders, site and author), the cards (a KNN over each
+document's embedded card) and the titles (the AND of a query's distinct
+terms over each document's title and bookmark titles, for a query of two
+terms or more), each add `weight/(rrf_k + rank)` to their documents, and a
+document only they found joins with no chunks. Their weights are
+`search.fields_weight`, `search.cards_weight` and `search.title_weight`,
+each finite and not negative with 0 switching the list off; the five must
+not all be 0, and all five 0 in `search.Config` means unset (1, 1, 0, 0,
+0). The query is embedded once, for both semantic lists, and only when
+`vector_weight` or `cards_weight` is above 0. Degradation stays one rule:
+any failure in the semantic leg (the embed, either KNN) drops both
+semantic lists, and BM25 (at weight 1), the fields list and the title list
+(at their weights, local SQLite reads like BM25, whose failure fails the
+search) still rank; the warning adds ", without the document cards" when
+the cards were on. See "Metadata search: a fields index and a card per
+document".
 
 ---
 
@@ -3354,6 +3375,18 @@ value the new extraction lacks must not survive from the old one. Clients
 already fall back to the URL or the bookmark title when `title` is NULL.
 `word_count` is left alone because no fetcher sets it.
 
+**Revised (2026-10-13):** nothing wrote `word_count`, so it was NULL for
+every document, though the API and the Document page show it. Now
+`MarkFetched` writes it, in the statement that marks the document
+fetched, from the markdown the index step chunked (`indexer.WordCount`,
+the chunker's own unit: whitespace-separated words, inline data URLs left
+out), so the count always describes the extraction whose chunks are
+stored. `ApplyFetch` still leaves it alone. Nothing backfills it; a
+document gets its count at its next index. `ApplyFetch` is now one
+transaction with the refresh of the document's search fields, which its
+title, author and declared site name feed (see "Metadata search: a fields
+index and a card per document").
+
 ---
 
 ## Bookmark ingest: one transaction, fetch only for new documents
@@ -3736,6 +3769,41 @@ both primary keys) are pinned, and refuse a walk of the tenant's documents.
 A document's delete still seeks `idx_interest_assignments_document` and
 `idx_interest_placements_document`. See "Interest map: two views of each
 regrouping, drawn when it is built".
+
+**Revised (2026-10-13):** migration 019's tables bring three indexes and
+their pins. `idx_site_name_votes_lead (tenant_id, host, kind, votes DESC,
+name)` serves the two seeks a fields refresh makes for a host's leading
+declared name and title suffix, covering, with no sort;
+`idx_document_fields_site (tenant_id, host, declared_site, site_name)`
+serves its read of the host's documents to rename, two ranges around the
+agreed name (a MULTI-INDEX OR), and the rename itself, which walks the
+host's documents without a declared name and runs only on a change of
+name; `idx_document_cards_stale`, a partial index of the cards whose
+embedded text isn't their text, serves the cards job's keyset pass over
+the stale cards, `CountStaleCards` (the count `GET /v1/stats` answers
+`cards_stale` with, a cards pass reports its progress against, and the
+retry after a cards job fails for good reads) and the startup count of
+tenants with any, so none reads a fresh card. The fields search is driven
+from the FTS MATCH, each hit's row by rowid and its document by primary
+key; the card search from the vec0 KNN, each document by primary key.
+`PutCardVectors`' and `MarkUnembeddable`'s marks reach their card by its
+primary key, and a card vector's delete (by the card's trigger or
+`MarkUnembeddable`) and its update in place are vec0 point lookups, as a
+chunk vector's delete is. The refresh's reads (a document's inputs, its
+bookmarks in their order with no sort) and its upserts (by `document_id`,
+never a scan), the startup scan for fields that are missing or of older
+rules (each document once, its row by the unique key), `ResetCards` and
+`ListByDocuments` (a JSON array of IDs, each document's bookmarks by
+`idx_bookmarks_document`) are pinned. So is every statement of the vote
+triggers, each on its own (EXPLAIN QUERY PLAN of a write shows none of the
+triggers it fires), read from its trigger with the row's values bound as
+parameters: a withdrawal seeks each of its vote rows by the primary key,
+its votes term written `+votes` so that `idx_site_name_votes_lead` can't
+serve it as a range of the host's names, and an addition is driven by the
+row's own values. The pass's read of the stale cards, `CountStaleCards`
+and the bookmarks by documents write their tenant `+d.tenant_id` and
+`+tenant_id`, so none walks a tenant index. See "Metadata search: a fields
+index and a card per document".
 
 ---
 
@@ -5256,6 +5324,21 @@ pending/failed/dead documents have no indexed chunks.
 `EmbeddingsForDocument` and `DocumentVectors` are unchanged: a failed or
 dead source document still has vectors for find-related, and clustering
 already reads fetched documents only.
+
+**Revised (2026-10-13), by the owner:** search finds failed and dead
+documents again, by what they were saved as, never by their stale text.
+The chunk retrievers still leave them out, as above, so no passage of a
+failed fetch's old extraction is ever shown or ranked. The document lists
+of metadata search (the fields, the cards and the title list) reach every
+document of every state: a bookmark whose page is gone is still the
+bookmark its owner is looking for, and its title, folders and site are
+what they remember it by. About three in ten documents of the owner's
+library are failed or dead. Such a hit has no passages; the API sends the
+bookmarks it was saved under in their place, and every client shows a dead
+page as no longer available and a failed one as one curio couldn't read, a
+page often still there behind a sign-in, a bot check or a timeout.
+find-related is unchanged. See "Metadata search: a fields index and a card
+per document".
 
 ---
 
@@ -9289,11 +9372,12 @@ together:
     expiry.
 - **Jina requests are paced per site** (`sitePacer`,
   `internal/fetcher/sitepace.go`). A site is the registrable domain
-  (`siteOf`, `publicsuffix.EffectiveTLDPlusOne`: mobile.twitter.com and
-  twitter.com are one site), or the host itself for an IP address, a name
-  under no public suffix, or a public suffix. A site gets
-  `fetcher.native.jina_site_requests_per_minute` requests a minute (default
-  6, `DefaultJinaSiteRequestsPerMinute`: turns 10 s apart), key or not.
+  (`siteOf` (now `urlutil.Site`), `publicsuffix.EffectiveTLDPlusOne`:
+  mobile.twitter.com and twitter.com are one site), or the host itself for
+  an IP address, a name under no public suffix, or a public suffix. A site
+  gets `fetcher.native.jina_site_requests_per_minute` requests a minute
+  (default 6, `DefaultJinaSiteRequestsPerMinute`: turns 10 s apart), key or
+  not.
   `awaitJina` clears each request in order: the shared cooldown's
   pre-check (a held request spends no turn), the site's turn, the shared
   limiter and cooldown (`pace`, unchanged), a send-time guard, and the
@@ -11349,19 +11433,19 @@ title, for four kinds of page that aren't the page asked for
   among the flagged pages is a heading; Bespoke's "# 404" and
   javalobby.org's "## 404 - หน้าไม่พบ" are the verdicts that rest on one.
   Reason: `text reads like a not-found page: "PAGE NOT FOUND"`.
-- **A parked domain** (dead link, with detection on): a line of the
-  opening that is an optional subject and one predicate
-  (`parkedDomainRE`). Subjects: "this domain", "the domain (name)",
-  "domain", or a domain name, which counts only when it is the requested
-  host or its site (`siteOf`), "www." and case ignored. Predicates: is or
-  may be for sale, is parked, (registration) has expired, has been
-  (recently) registered with or at a domain, Hover's "is a totally awesome
-  idea still being worked on", easyDNS's "is yet another domain managed by
-  …". With a subject, the predicate ends the line or is followed by ".",
-  "!" or ":"; without one, it is the whole line (GoDaddy's "is for sale!"
-  under the domain's name). An expiry needs a subject, as Namecheap's
-  "Domain registration has expired." has: "Registration has expired."
-  alone is as likely an event's sign-up page. A search-ads parking page's
+- **A parked domain** (dead link, with detection on): a line of the opening
+  that is an optional subject and one predicate (`parkedDomainRE`).
+  Subjects: "this domain", "the domain (name)", "domain", or a domain name,
+  which counts only when it is the requested host or its site (`siteOf` (now
+  `urlutil.Site`)), "www." and case ignored. Predicates: is or may be for
+  sale, is parked, (registration) has expired, has been (recently)
+  registered with or at a domain, Hover's "is a totally awesome idea still
+  being worked on", easyDNS's "is yet another domain managed by …". With a
+  subject, the predicate ends the line or is followed by ".", "!" or ":";
+  without one, it is the whole line (GoDaddy's "is for sale!" under the
+  domain's name). An expiry needs a subject, as Namecheap's "Domain
+  registration has expired." has: "Registration has expired." alone is as
+  likely an event's sign-up page. A search-ads parking page's
   heading, "Related searches" or "Related search topics" alone on its line
   (`parkingHeadingRE`), counts too. Only the opening's lines that begin
   within its first 256 bytes of own text are read (`parkedNoticeBytes`):
@@ -12742,6 +12826,28 @@ every delta +0.000 and no query moved, and pointing the tool at the home's
 own database was refused, naming `daemon.pid`, with the directory left
 as it was.
 
+**Revised (2026-10-13), metadata search:** the variants are `hybrid`
+(config.yaml's weights), then `bm25`, `vector`, `fields`, `cards` and
+`titles`, each one list at weight 1, each a `search.Config`. Before any
+query the tool brings the copy up to date the way the daemon's start does
+(`devtool.OpenCopy` migrates, sizes both vector indexes at the copy's
+width and refreshes the document fields) and embeds the stale cards
+through `Indexer.EmbedStaleCards`, the cards job's own loop, with
+config.yaml's document prefix and embed timeout, logging its progress. The
+report adds `library.fields_ms`, `cards_ms` and `cards_embedded`: run
+facts, like the timings, left out of the determinism comparison (a second
+run on the same copy embeds no card). Reachability is per variant: a
+judgment resolves once to facts (the document exists, its state, whether
+it has chunks), and is searchable for a variant when any list it weights
+above 0 can return its document: the chunk lists one neither failed nor
+dead with chunks, the document lists any document. `library.unsearchable`
+keeps its first meaning, what the chunk lists can't return, and the text
+report says so. Provenance adds the three weights (`search.fields_weight`,
+`cards_weight` and `title_weight`, which the text report prints with the
+others), and the stages `fields`, `titles` (after `fields`) and `cards`;
+the format stays 1, every change additive, and PR 1's report still loads
+as a baseline (a test loads one; its missing weights read as 0).
+
 ---
 
 ## Model roles: a provider and model per use, inheriting generation's
@@ -12813,6 +12919,676 @@ know `generation.roles` ("field roles not found in type
 config.Generation", checked with v2.6.0's config loader), so its daemon
 refuses to start and its CLI fails on the same parse; remove the key
 first, as setup.md says.
+
+---
+
+## Metadata search: a fields index and a card per document
+
+**Decision:** search finds a document by what it was saved as, not only
+by its text. Two lists of whole documents join the two chunk lists: the
+**fields** list, BM25 over each document's title, bookmark titles,
+folders, site and author (`document_fields_fts`), and the **cards** list,
+a KNN over each document's card, a short text of the same facts embedded
+once (`document_cards_vec`). Both reach every document of every state, so
+a bookmark whose page failed or went dead is found again by its title,
+folder or site. A third, the **title** list, finds for a query of two
+distinct terms or more the documents whose title and bookmark titles hold
+every one of them, so such a bookmark, searched by what it was saved as,
+reaches the first page. The defaults, chosen by measurement on the
+owner's library, are `search.fields_weight` 0.25, `search.cards_weight`
+0.5 and `search.title_weight` 2.
+
+**Why:** the chunk lists see a page's text, its document title and its
+tags. What its owner remembers a bookmark by, the title they saved it
+under, the folder they filed it in, the site it came from, was searched
+by nothing, and about three in ten documents of the owner's library have
+no text search may use at all (failed or dead). Queries that name a site
+or a person were among the weakest kinds in PR 1's evaluation (nDCG@10
+0.380), and the owner's own searches, the owner-tagged queries, scored
+0.288.
+
+**What is searched.** Each field is cut to 2 KiB on a rune boundary:
+
+- `title`: the document's title.
+- `bookmark_titles`: its bookmarks' distinct titles, oldest saved first.
+- `folders`: its bookmarks' folder paths without the browser's root label
+  (Bookmarks Bar, Other Bookmarks, Favorites, …, compared without case
+  and only as the first segment), segments joined with " / ". The root
+  says nothing a query would name; a folder of that name deeper down is
+  the owner's and stays. A test holds the importers' root labels to the
+  list.
+- `site`: the document's display site name and its host's words: the
+  registrable label with hyphens as spaces, then every subdomain label but
+  `www` (`ben-evans.com` → "ben evans", `blog.example.co.uk` → "example
+  blog"), through the public suffix list, so a TLD is never a word.
+- `author`.
+
+BM25 weighs the columns 1, 1, 0.5, 1, 1: a folder names a category many
+documents share, so it counts half. The card is the title; the bookmark
+titles that differ from it; the display site name, else the host; the
+author; the folders: each part's whitespace collapsed, cut to 300 bytes,
+empty parts dropped, joined with " — " (at most `docmeta.MaxCardBytes`).
+
+**Site names.** A page's `og:site_name` (`fetcher.Result.SiteName`, from
+readability and web2md's front matter; Jina, GitHub, YouTube and PDFs
+declare none) is stored raw in the extraction's meta under `site` and
+cleaned when derived: whitespace collapsed, 120 bytes, and dropped when it
+names a platform rather than the site (Medium, Substack, WordPress,
+Tumblr, Blogger, Google Docs, Wikimedia, AWS) or is the host itself. A
+document's display name is its own declared name, else the name its host
+agrees on: the declared name most of its documents hold (one is enough),
+else the title suffix (the text after a title's last " | ", " – ", " — ",
+" - " or " · ", 2 to 60 bytes, with a letter, neither generic nor the
+host) at least two of its documents carry, else a curated table of at most
+25 well-known public sites whose domain doesn't spell their name (20
+today, such as `stratechery.com` → Stratechery, `hbr.org` → Harvard
+Business Review), else none. Ties go to byte order. The table is general
+and short; growing it to win a query is out of bounds.
+
+**Derived tables, not an FTS over documents.** The fields come from
+three tables (the document, its current extraction's meta, its bookmarks)
+and from rules only Go can apply (the public suffix list, root labels,
+the host's agreement). An FTS5 index over `documents` would hold only what
+a documents column holds, and a contentless or view-backed one couldn't
+be kept in step by triggers across bookmarks and extractions. So
+`document_fields` (migration 019) holds one derived row per document,
+with an integer `seq` for the external-content FTS's rowid (`documents` is
+keyed by a UUID) and the agreement's inputs beside the searched text:
+`declared_site` and `title_suffixes` per row, which triggers count per
+host in `site_name_votes` (see "Cost per write"), so agreeing a host's
+name never reads its documents' titles and bookmarks. The FTS update
+trigger fires only when a searched column's value changed (a `WHEN` over
+the five), so writing those inputs, `site_name` or `rules` never
+re-tokenizes a row, although the refresh's upsert sets every column:
+`AFTER UPDATE OF` alone fires for every column an UPDATE's SET names, and
+re-tokenized every row a rules bump rewrote. `document_cards` holds the
+card's `text` and the `embedded_text` its vector was made from; a card is
+stale while they differ, and `idx_document_cards_stale`, a partial index
+of exactly those, is what the cards job pages through. None of the tables
+carries `updated_at`, like `chunks`.
+
+**One writer.** `refreshFields` (`internal/store/sqlite/fields.go`) is the
+only writer of `document_fields` and of `document_cards.text`, and
+`internal/docmeta` the only derivation: pure functions, standard library,
+`urlutil` and `textutil` alone (depguard `docmeta-pure`), versioned by
+`docmeta.RulesVersion` with a golden file per version that records the
+rules' tables and limits and their outputs over a synthetic sample, so an
+edit to a table no sample document meets still needs a new version. The
+search surfaces show a hit without a passage through it, so the three say
+one thing in one way: `SavedAs` picks the bookmark (the newest whose title
+isn't blank, else the newest) and names its folder as search reads it
+(`FolderText`), and `Unavailable` words a dead or failed page. Those
+present; no row is derived through them, so they are outside
+`RulesVersion`. `refreshFields` runs inside the transaction of every write
+that changes an input: `Documents.Create`, `ApplyFetch` (now one `BEGIN
+IMMEDIATE` transaction), and `SetCurrentExtraction`; `Bookmarks.Ingest`
+(new and existing documents), `Create` (when it links a document),
+`Delete` (on the document it linked) and `LinkDocument` (on the old and
+the new). State is no input, so `MarkFetched`, `MarkFailed` and the
+refetches don't run it. It upserts each row `ON CONFLICT … DO UPDATE …
+WHERE` something changed (never `INSERT OR REPLACE`, which would fire the
+delete triggers), agrees the host's name, and when that changed rewrites
+the site and card of the host's other documents without a declared name. A
+write that changes no input writes nothing (a test counts
+`total_changes()`), and a property test holds any order of the seven
+writes to the fields a full derivation of the final data gives.
+`urlutil.Site`, the registrable domain, moved from the fetcher, whose site
+pacing uses it too.
+
+**Why not on `documents`.** The research sketch put the display name in a
+`documents.site_name` column. It changes when a sibling is fetched or
+saved, so writing it there would either set `updated_at` on documents that
+didn't change, reordering the Library (on the first start after the
+upgrade, about two thirds of the owner's documents would have jumped to
+its top), or need an exception to "every UPDATE sets `updated_at`". The
+raw declared value stays on the extraction, so a change of rules derives
+again from it.
+
+**Cost per write: vote counts, kept by triggers.** A write agrees its
+host's name from `site_name_votes`, one row per tenant, host, kind
+(`declared` or `suffix`) and name, holding how many of the host's
+documents declare that name or carry that suffix. The leader of each kind
+is the first row of `idx_site_name_votes_lead (tenant_id, host, kind,
+votes DESC, name)`, one seek each, ties in byte order as Go's
+(`docmeta.AgreedNameOf` decides from the two leaders, and a property test
+holds it to `AgreedName` over the counts). Then the host's documents
+without a declared name that hold another name are read, two ranges of
+`idx_document_fields_site (tenant_id, host, declared_site, site_name)`
+around the agreed name, empty unless the agreement changed; only then
+does one UPDATE rename them and each one's card is rewritten. The steady
+state so reads a constant number of rows whatever the host's size, every
+plan pinned. A change of the agreed name stays proportional to the
+siblings, which hold the name in their `site` column and their card, and
+it makes every one of those cards stale: indexing the host's name apart
+from each document's `site` would make it constant, but would change
+bm25's columns and the ranking, so it is the known cost. A refreshed
+document whose own vote moves the agreement is written twice, under the
+old name and then renamed, which is rare and cheaper than the arithmetic
+that would avoid it.
+
+Triggers keep the counts, not Go: the counts are then a function of the
+`document_fields` rows that no write can bypass, a cascade delete of a
+document, a test's direct UPDATE or a later writer included, and they
+commit or roll back with the row, as the FTS index does. A Go-kept table
+would need its own delete path and could drift. Each row's insert adds its
+declared name and each distinct suffix, its delete withdraws them
+(deleting a count that reaches 0, which the `votes > 0` CHECK requires),
+and an update that changes what it contributes moves them. A withdrawal
+reaches each of its vote rows by the primary key, one seek a name: its
+`votes` term is written `+votes`, which keeps it off
+`idx_site_name_votes_lead`. Written plainly, the suffixes' `votes > 1` was
+served by that index as a range of every suffix of the host that two of
+its documents carry, so a fetch that moved a document's suffix took 0.30,
+0.60 and 1.6 ms on a host of 500, 5,000 and 20,000 such suffixes, and
+takes 0.28, 0.31 and 0.31 ms by the key
+(`BenchmarkApplyFetch_SuffixMoves`). EXPLAIN QUERY PLAN of a write shows
+none of the triggers it fires, so `plans_test.go` pins each trigger
+statement on its own, read from the trigger as the database holds it with
+its `old.*` and `new.*` bound as parameters. A property test recounts the
+votes after any order of the seven writes. A document deleted outside the
+store's writes withdraws its votes at once, and its host's other documents
+keep the name they hold until the host's next write, which renames them:
+the misnamed read runs on every refresh. The suffixes are a JSON array
+(CHECKed to be one) because a trigger can split one with `json_each` and
+can't split a list a line, a trigger holding no CTE; `docmeta` keeps its
+list a line, and the store encodes the array. JSON text is UTF-8 alone,
+and `json.Marshal` replaces each stray byte, one that isn't part of UTF-8,
+with a U+FFFD, which would have voted for a name `docmeta` never derived;
+so `docmeta.TitleSuffix` makes a suffix valid UTF-8 itself, one U+FFFD a
+run of such bytes before its limits apply, and the votes count the name
+`AgreedName` counts. No suffix on the owner's copy holds such a byte, and
+its derived rows and votes are byte for byte the same.
+
+Measured on one machine, back to back with the branch before the votes
+(probes over a library of one host, the p50 of 200 calls, the median of
+three runs with the votes; the benchmarks in `fields_bench_test.go`):
+
+| | host of 10 | 350 | 3,000 | 10,000 |
+|---|---|---|---|---|
+| `ApplyFetch` before | 0.19 ms | 0.34 ms | 1.84 ms | 5.97 ms |
+| `ApplyFetch` with the votes | 0.26 ms | 0.25 ms | 0.25 ms | 0.24 ms |
+| `Ingest` before (the host's last 200 saves) | 0.36 ms | 0.38 ms | 1.91 ms | 6.16 ms |
+| `Ingest` with the votes | 0.42 ms | 0.36 ms | 0.36 ms | 0.39 ms |
+
+`BenchmarkApplyFetch` (re-fetching the host's documents, so the host keeps
+its size) gives 0.15, 0.73 and 6.53 ms on hosts of 10, 1,000 and 10,000
+before, and 0.23, 0.26 and 0.30 ms with the votes; the extra on a host of
+ten is the two leader reads, the misnamed read and the vote triggers.
+Sixteen goroutines fetching every page of a 3,000-document host, whose
+pages declare one name, two or none, failed 16, 8 and 9 calls with
+"database is locked" (the 5 s busy timeout) before, each write holding the
+lock for its host's read, and none in three runs with the votes. Those
+runs still have a latency tail, a call's p99 about 0.6 s and the slowest 2
+to 3.75 s against the 5 s busy timeout: the sixteen writers keep flipping
+the host's agreed name, each flip renames its siblings under the lock, a
+cost of O(siblings) (below), and the other writers queue behind it. The
+storm is synthetic: origin fetches are capped at 2 in flight per host
+(`hostGate`), and Jina's reads of a site are paced, so a host's writes
+don't come sixteen at a time. A change of name costs 28.7 ms on a host of
+1,000 and 157 ms on one of 5,000 before, 6.8 to 8.0 and 35 to 44 ms with
+the votes (`BenchmarkRefreshFields_Rename`, 4,999 siblings renamed in a
+transaction rolled back: 149 ms before, 36 ms with). `BenchmarkIngest`
+saves on its hosts every iteration, so it measures hosts of thousands:
+1.18 ms a save before, 0.54 ms with the votes. No write can come within 2×
+of main's: the derived rows themselves, their transaction, FTS writes and
+card, take a fetch's write on a host of ten from about 0.03 ms on main to
+0.2 to 0.3 ms. The target is a cost independent of the host's size, which
+the votes meet (a host of 10,000 against one of 350: 1.0× for `ApplyFetch`
+and 1.08× for `Ingest`, against 17.6× and 16× before).
+
+A refresh prepares the statements it runs for every document and host once
+a call (`newFieldsTx`), not once a document: the driver caches no
+statement, and preparing one that writes `document_fields` compiles its
+triggers, so preparing them per document doubled the startup refresh in a
+prototype (0.62 to 1.14 s on the owner's copy). Deriving the copy's 7,557
+documents takes 0.57 to 0.59 s with the votes, against 0.65 to 0.67 s
+before them, and their fields, site names and cards are byte for byte the
+same; the copy's 3,795 vote rows equal a recount. A rules bump that
+changes no output, every row rewritten with the same text, takes 0.22 s
+against 0.62 s: no host read, no re-tokenized row.
+
+**A startup refresh, not a SQL backfill.** Migration 019 creates the
+tables empty. `sqlite.EnsureDocumentFields`, after `EnsureVectorIndex` and
+before the full API is up, derives every document whose row is missing or
+was derived by another `RulesVersion`, whole hosts at a time, up to 1,000
+documents a transaction, so a run cut short keeps what it committed and
+the next resumes; then it queues a cards job for every tenant with stale
+cards. One INFO line, "document fields refreshed" (rebuilt, documents,
+hosts, cards_stale, took_ms). The sketch's SQL backfill would have been a
+second implementation of the rules, and it already disagreed with the Go
+one (it stripped two root labels and made every dot of the host a word,
+TLDs included). The same step applies the next rules change (a version
+bump) to every home. `devtool.OpenCopy` runs it too.
+
+**The start checks the fields index, and never fails over the fields.**
+`EnsureDocumentFields` first checks `document_fields_fts` against
+`document_fields` (`INSERT INTO document_fields_fts(document_fields_fts,
+rank) VALUES('integrity-check', 1)`): rank 1 is what makes FTS5 compare
+the index with its content table, and without it the check passed an
+inconsistent index on the bundled SQLite 3.53.4, so every test's FTS
+check uses it too. SQLite reports an index that disagrees as corruption
+(`ErrCorrupt`), which the store wraps as
+`sqlite.ErrFieldsIndexInconsistent`; the step then rebuilds the index
+from the table (`'rebuild'`), checks it again, and logs one WARN.
+Inconsistency is no idle risk: a write over a row the index disagrees on
+fails with "database disk image is malformed" (`SQLITE_CORRUPT_VTAB`), a
+document's delete and the refresh's own FTS `'delete'` among them. On the
+owner's copy the check takes 14 to 34 ms (warm, cold) and the rebuild 15
+to 20 ms, cheap enough for every start; `chunks_fts`'s check takes 1.76
+s, so the start leaves it alone. The daemon never fails its start over
+this step, unless a shutdown cut it short: one that did exited 1, and the
+launchd agent's `KeepAlive {SuccessfulExit: false}` restarted it every 10
+s for as long as the fault lasted, so curio served nothing. Now it logs
+one ERROR (what failed, that search may miss documents, that the next
+start retries) and serves. healthz reports what the start did as
+`document_fields` (`checked_at`, `rebuilt`, `error`), a value fixed at
+start that needs no read; `curio status` prints one warning line when it
+failed, and `curio doctor` a `search fields` line: ✓ when the start
+checked them, saying when, and that it rebuilt the index if it did; ✗
+with the error and the fix, a restart (`curio daemon stop`, then any
+command starts the daemon, whose start checks and rebuilds the index).
+There is no on-demand check: the CLI can't open the database, an FTS5
+command takes the write lock, and what such a check finds is fixed by a
+restart, whose start runs it.
+
+**Writes keep their derived rows in one transaction.** A write whose
+derived rows fail fails whole; there is no path that saves the document
+and owes its fields. A derived-row write fails only when the database
+itself does (corruption, I/O, a full disk), since the derivation is pure
+Go over fixed statements; a degraded write would keep writing documents
+into a database known to be damaged, and would need a ledger of owed rows
+whose own writes go through the same index. `chunks` and `chunks_fts` have
+had this contract since migration 008, and the start now repairs the
+fields index in well under 50 ms, so a restart is the fix.
+
+**Cards, staleness and the cards job.** A changed card text queues a
+`cards` job in the transaction that changed it (`EnqueueOnce`: at most one
+pending per tenant, a running one not counting), so a stale card always
+has a job pending or running and no caller can forget to queue one; a
+write rolled back queues nothing. The sketch
+queued from the callers (after an import, after `MarkFetched`, after
+reindex-all, at start); `MarkFetched` changes no card, so a document whose
+index failed would never have had its card embedded. The job runs on its
+own one-goroutine pool, under the queue gate (uncapped by the gentle
+throttle, which caps fetch and index), so card work never takes an index
+slot. It pages through the stale cards 32 at a time
+(`Indexer.EmbedStaleCards`, one embed call and one `PutCardVectors`
+transaction a batch, with the document prefix); `PutCardVectors` stores a
+vector only while the card still holds the text embedded, so a card
+changed meanwhile stays stale for the job its writer queued. An embed
+that got no answer (`ollama.ErrUnreachable`) defers the job, its attempt
+refunded, for half its age, between 1 and 5 minutes, within the day's
+deferral budget ("Waiting is not failing"). Five minutes is what bounds
+the wait once Ollama answers again, since nothing tells the queue it came
+back, at a cost of at most 12 "job deferred" lines an hour through an
+outage; a deferred job is pending, so the card changes meanwhile join it.
+A wrong width is a verdict for the whole job: the model answers every
+card at its width, so no card is to blame. Anything else retries through
+the queue.
+
+**A card the model can't take is set aside, not the job.** A batch of 32
+cards is one request, and one card the model refuses
+(`embedder.ErrInputTooLong`, with a model whose context is smaller than a
+card and the document prefix: a card is at most `docmeta.MaxCardBytes`,
+1,520 bytes, denser in tokens for CJK text) failed the batch, then the
+job for good, and every later job at the same batch, so every card from
+it on stayed stale. Now `EmbedStaleCards` embeds that batch again a card
+at a time: those the model takes are stored, and each it refuses alone is
+recorded (`DocumentIndex.MarkUnembeddable`, under `PutCardVectors`'
+guard: `embedded_text = text`, `embedded_at` NULL, any vector deleted)
+with one WARN naming the document and the card's length in bytes, and the
+pass goes on. Such a card isn't stale, which needs no schema change and
+keeps the stale index as it is, and it is told apart from an embedded one
+without a join to vec0; it isn't searched by meaning, and is tried again
+when its text changes or `ResetCards` runs. A card at a time rather than
+bisecting: simpler and plainly correct, at most 32 more requests, only
+for a batch that already failed. Any other error from those requests ends
+the pass as before. A wrong width isn't split: it would mark every card
+unembeddable. `POST /v1/documents/reindex-all` makes every card stale
+(`ResetCards`, which queues the job), keeping the old vectors searchable
+until they are embedded again; the drift sampler stays chunks-only.
+`document_cards_vec` is created by `EnsureVectorIndex` at the home's
+width with its delete trigger, under the rules `chunks_vec` follows, and
+a new card vector table makes every card stale.
+
+**A cards job that fails for good queues the next an hour ahead.** It
+marks no document. Its permanent-failure hook (`retryCards`) queues the
+next cards job `cardsRetryDelay` (an hour) ahead through `EnqueueOnce`,
+which keeps a job already pending, while the tenant has stale cards, with
+one WARN naming the cause and when the next runs; so a job that failed for
+good (a verdict, its attempts spent, a day of deferrals, or an orphan out
+of attempts at start) never leaves stale cards without a job, where they
+used to wait for the next card change, reindex-all or start. An hour,
+after a verdict too: a model answering at another width stays one until
+it is fixed, which the drift monitor reports meanwhile, so the retry costs
+one failed job an hour and resumes by itself once it is. No periodic
+sweep instead: a loop queueing a job whenever stale cards have none would
+requeue every minute a job that fails at once for a verdict, and pacing
+it would need the backoff a job's `run_after` already gives; the interest
+scheduler doesn't run with insight off; and the drift monitor would couple
+two components for a convenience. Stale cards lack a job only when the
+hook's own write fails, which `curio doctor` shows.
+
+**The backlog is visible.** `GET /v1/stats` counts the cards left to
+embed (`cards_stale`, `DocumentIndex.CountStaleCards`: the stale index and
+each card's document by primary key, 3 ms with the owner's 7,557 cards
+all stale; a failure fails the answer, like the other counts). `curio
+status` prints a `cards:` line while any is left. `curio doctor`'s
+`cards` check passes while a cards job is running or pending without an
+error, warns while the pending job carries one (deferred or retrying),
+with the error and when it runs, and warns when stale cards have no job
+at all, its fix a restart, whose start queues one. A pass logs INFO
+"cards embedding" each 500 cards stored (embedded, of: the stale cards
+counted as it began, took_ms), through the indexer, so `searcheval`'s fill
+logs the same lines; a fill of the owner's 7,557 cards takes about 108 s,
+and used to log one line, at its end.
+
+**Card vectors are updated in place.** `PutCardVectors` UPDATEs a card's
+vector in `document_cards_vec` by its primary key, a vec0 point lookup,
+and INSERTs one only when the UPDATE changed no row. sqlite-vec (v0.1.6)
+inserts only into its newest chunk, so a vector deleted and inserted again
+leaves its slot in an older chunk empty for good, and a card is embedded
+again more often than it seems: an ordinary import embeds it at the save
+and again after the fetch changes it, which took 3,000 cards from 3 vec0
+chunks to 6 when re-embedding deleted and inserted, against 3 in place.
+Three reindex-alls (every card made stale, then embedded again) took 7,500
+cards from 8 chunks to 30, 32 to 120 MB, and the card KNN's p50 from 11.7
+to 23.0 ms, since the KNN scans every chunk; in place they stay at 8
+chunks, 32 MB and 11.4 to 12.1 ms. `chunks_vec` leaks the same way on
+every reindex and refetch, which delete a document's chunks with their
+vectors and insert new ones; it is left as is, since the new chunks have
+new IDs and another count, so no vector is there to update in place.
+
+**The cards job runs 10 s after the change that queued it.** It is queued
+`sqlite.CardsJobDelay` (10 s) ahead, and its commit wakes no worker: the
+cards pool's idle poll, at most 5 s apart, finds it once it is due, as it
+finds a deferred job. Every card change inside the window finds it pending
+and shares it, so a burst (an import's ingests, then its fetches seconds
+apart) shares one job and one embed request a batch. Queued to run at once
+and waking the pool, every card-changing write made while no job was
+pending queued one that embedded a card or two: through the daemon's
+pools, 60 pages saved and fetched 40 ms apart left 61 cards jobs, against
+1 with the window. Nothing prunes finished jobs but `curio jobs prune
+--older-than` and `curio jobs delete --status` ("Jobs lifecycle"), so the
+rows add up: a 5,000-page import, fetched at the setup estimate's 25 to 45
+pages a minute (1.9 to 3.3 hours), left about one cards job per
+card-changing fetch, ≈5,000 rows beside its ≈10,000 fetch and index rows,
+and now leaves about one per 12 to 13 s of fetching (the window and the
+idle poll), ≈520 to 940. Each job saved is an Ollama request and three
+writes (the claim, `PutCardVectors`, `MarkDone`). 10 s rather than 30 to
+60: a just-fetched page's card vector comes within about 15 s, the queue
+drains (`curio status --follow`, keep-awake) seconds after the last fetch,
+and the fields and title lists find a page saved a moment ago, in the
+transaction that saved it, meanwhile. A longer window would save little
+more, a cards batch being one request either way at import rates, and
+would need an e2e timing knob; the window has no config key.
+
+**The fusion.** The chunk lists are fused by RRF and collapsed exactly as
+before. Then each document list adds `weight/(rrf_k + rank)` to its
+documents, rank 1-based, the fields, then the cards, then the titles, and
+a document only they found joins with no chunks; the result is sorted by
+score, then document ID. Sums are taken in that fixed order, the title
+list's last, so at `title_weight` 0 every sum, and so every ranking, is
+what the fields and cards alone give. All three are read 200 deep (`2 ×
+store.MaxSearchK`) whatever the window, so every page of a query is cut
+from one ranking ("Search pages by offset within a fixed-depth pool"), and
+`total` and `capped` count documents only they found. The fields and title
+lists break ties by `seq`, the cards list by distance, then document ID,
+over-fetching the KNN (`min(limit × 10, 1000)`) for its filters. The
+fields list runs beside BM25 on the same sanitized query; the query is
+embedded once for both semantic lists, which run side by side, so a config
+that set `vector_weight: 0` to keep search off Ollama embeds the query
+again for the cards list until it sets `cards_weight: 0` too
+(docs/setup.md says so for the upgrade). Any failure in the semantic leg
+drops both semantic lists (one rule, one warning, ", without the document
+cards" added when the cards were on); BM25 and the fields and title lists
+still rank, and a failure of either of those two fails the search, as
+BM25's does. The lists are a slice, so later work adds lists or stages
+without reshaping it.
+
+**The title list.** `DocumentIndex.SearchTitles` runs the query against
+the same index held to two columns, `{title bookmark_titles} : (…)`, and
+ranks by bm25 over them alone (column weights 1, 1, 0, 0, 0, named
+beside the fields list's); it joins and filters as the fields list does,
+through one SQL builder, returns every state and breaks ties by `seq`
+(its plan is pinned, driven from the MATCH). Search owns the query: the
+AND of the query's distinct terms, compared without case, from the
+sanitizer's own tokens and stopwords, each quoted as BM25's are
+(`titleQuery`). A term with no letter or digit is dropped: FTS5
+tokenizes it to an empty phrase, and an AND holding one matches nothing
+(`{title bookmark_titles} : ("-" AND "science")` matches no row on the
+bundled SQLite 3.53.4). The store owns the schema, the column filter and
+the weights, as for BM25 and the fields. The list is read only for a
+query of two distinct terms or more (`titleListMinTerms`), 200 deep, at
+`search.title_weight`, 2 by default. It is a keyword list: a degraded
+search keeps it, and its failure fails the search. The arithmetic of the
+default: rank 1 in the title list alone is 2/61, a tie with a document
+both chunk lists rank first, and with the fields list's rank 1 beside it,
+2.25/61, above any document only the chunk lists found; so a page saved a
+moment ago, with no chunks and no card vector yet, reaches the top. An
+AND is precise where the fields list's OR is not: on the 50 graded
+queries it matched anything for 5 (a median of 1 document, at most 7),
+and it matched every one of the 372 known-item queries below (a median
+of 1, at most 15).
+
+**Failed, dead and pending documents.** The chunk lists still leave
+failed and dead documents out, so a failed fetch's stale text is never
+ranked or shown; the document lists reach every state ("Search leaves out
+failed and dead documents", Revised). A pending document is in the chunk
+lists once it has chunks (a refetch keeps its last ones), and before its
+first index in the document lists alone, so a bookmark saved a moment ago
+is found by its title. A hit only the document lists found has no
+passages. The API sends, on a hit without matches only, the bookmarks it
+was saved under (`bookmarks`: title, folder, source, saved; one
+`ListByDocuments` read per response). The dashboard shows "Saved as …" in
+place of a passage, its folder as search reads it (`docmeta.FolderText`,
+without the browser's root), and, with a link to the original, that a
+dead page is no longer available or that a failed one couldn't be read: a
+failed page is often still there, behind a sign-in, a bot check or a
+timeout. `curio search` and MCP `search_bookmarks` say the same, in the
+same words (`docmeta.Unavailable`).
+
+**Word counts.** `documents.word_count` was never written; `MarkFetched`
+now writes it ("Documents: explicit Create and ApplyFetch", Revised).
+
+**Measured** on a copy of the owner's library (7,557 documents, 50
+graded queries, 666 judgments), each run on its own fresh copy of it with
+the owner's config.yaml, against PR 1's baseline. Deriving every
+document's fields took 0.76 to 0.81 s; embedding its 7,557 cards took 105
+to 111 s with Ollama otherwise idle. With both weights 0 the pipeline
+reproduced PR 1's ranking exactly (every group delta +0.000, all 50
+rankings identical): the new code leaves the chunk ranking alone. The
+grid, hybrid, each cell all queries' nDCG@10 / owner-tagged nDCG@10 /
+owner-tagged R@10 / keyword R@10 (PR 1: 0.590 / 0.288 / 0.268 / 0.845):
+
+| fields \ cards | 0 | 0.5 | 1 |
+|---|---|---|---|
+| 0 | 0.590 / 0.288 / 0.268 / 0.845 | 0.637 / 0.341 / 0.303 / 0.864 | 0.656 / 0.340 / 0.207 / 0.864 |
+| 0.25 | 0.605 / 0.294 / 0.295 / 0.845 | **0.654 / 0.342 / 0.297 / 0.864** | 0.664 / 0.336 / 0.201 / 0.864 |
+| 0.5 | 0.613 / 0.307 / 0.295 / 0.827 | 0.660 / 0.331 / 0.287 / 0.845 | 0.668 / 0.343 / 0.201 / 0.864 |
+
+Each list adds to the chunk lists' ranking (fields 0.25 alone +0.015,
+cards 0.5 alone +0.047), and the two together add most. The cards at
+weight 1 cost the owner-tagged queries a quarter of their recall at 10
+(0.20 against 0.27), and the fields at 0.5 without the cards cost the
+keyword queries recall (0.827); the rule below keeps both out.
+
+**The defaults, 0.25 and 0.5.** The rule set before the grid ran: the
+best all-queries nDCG@10 among the points keeping owner-tagged R@10 at
+PR 1's 0.268 or more and keyword R@10 at 0.84 or more, ties within 0.005
+to the higher owner-tagged nDCG@10, then the lower total weight. Its
+literal pick, 0.5 / 0.5 (0.660), misses the bar the defaults must clear
+for owner-tagged nDCG@10 (0.331 against 0.34), with evidence queries
+0.048 under PR 1, at the limit of the 0.05 a kind may fall; so the
+default is 0.25 / 0.5, the best point (0.654, 0.006 below) that clears
+every bar. Neither list is off. With the defaults, against PR 1:
+
+| | nDCG@10 | R@10 | R@100 | MRR |
+|---|---|---|---|---|
+| all (50) | 0.590 → 0.654 | 0.567 → 0.599 | 0.725 → 0.799 | 0.772 → 0.824 |
+| owner-tagged (8) | 0.288 → 0.342 | 0.268 → 0.297 | 0.482 → 0.466 | 0.559 → 0.630 |
+
+and nDCG@10 by kind: vague reference +0.155, site or person +0.174, code
++0.097, list +0.049, world hop +0.028, keyword +0.020 (R@10 0.845 →
+0.864), evidence +0.002, analytic +0.000, temporal −0.033. 19 queries
+moved by 0.05 or more, 17 of them up. Every judgment is now reachable
+(136 were out of the chunk lists' reach: failed, dead or chunkless). Each
+list alone, all queries' nDCG@10: BM25 0.463, vector 0.558, fields 0.443,
+cards 0.595.
+
+**Latency**, measured back to back on one machine state: PR 1's
+`searcheval` (built from main), this branch's with the defaults, then PR
+1's again. Hybrid total p50 143.5 and 146.6 ms for PR 1, 146.9 ms with
+the defaults; p95 196.3 and 197.3 ms, and 197.9 ms. By stage, p50 / p95,
+PR 1 then the defaults: embed 39.2 / 49.8 and 37.8 / 50.2; BM25 30.7 /
+108.9 and 31.7 / 100.7; fields — and 1.8 / 5.7; vector 67.5 / 82.0 and
+76.8 / 98.0; cards — and 17.8 / 25.4; fuse 0.4 / 0.8 and 0.6 / 0.9;
+hydrate 33.9 / 64.1 and 31.7 / 60.5. The fields list runs beside BM25
+and the card KNN beside the chunk KNN, so neither adds its own time to
+the total: the chunk KNN's p50 rose about 9 ms running beside the card
+KNN (PR 1's two runs differ by 3.6 ms there), and the total's p50 by 3.4
+ms against the first PR 1 run and 0.3 ms against the second.
+
+**The upgrade, measured.** This branch's build on a scratch home with a
+copy of the owner's database (fetch jobs removed): migration 019 applied
+in 347 ms; "document fields refreshed" derived 7,560 documents on 3,213
+hosts in 805 ms with 7,560 cards stale; the cards job, held while the
+copy's queue was paused, ran once it was resumed, one attempt, 7,560
+cards in 107.8 s; no WARN or ERROR in the log. `ListByDocuments` for 10
+documents took 31 µs at p50 (58 µs at p95).
+
+**The title list, measured.** Before it, a document only the fields and
+cards found scored at most `(fields_weight + cards_weight) / (rrf_k + 1)`,
+0.0123, under any document with a chunk in roughly the top 21 of either
+chunk list, and the vector list returns 800 chunks for every query. So a
+known item, a bookmark searched by what it was saved as, was reachable but
+never findable, which the 50 graded queries don't measure. A second,
+private set measures it, built by a seeded script from a copy of the
+owner's library and kept out of the repository like the first: 198
+bookmarks, stratified by state (64 fetched, 2 pending, 66 failed, 66 dead)
+and by source (Chrome and Safari about half each, 2 saved by hand), and
+372 queries, 198 by the saved title (one trailing site suffix removed) and
+174 by a fragment of it (3 to 5 of its content words); every query has 3
+content words or more and matches no more than 20 documents' titles. Each
+list alone ranks these items well (the fields: S@1 0.985 by title and
+0.965 by fragment for the failed and dead ones; the cards: 0.962 and
+0.825): the fusion is what buried them. Hybrid, the owner's config.yaml,
+each weight on a copy prepared once (migration 019 applied, fields
+derived, 7,557 cards embedded):
+
+| | failed + dead by title (132): S@1 / S@10 / MRR | by fragment (114) | fetched by title (64): S@1 / S@10 |
+|---|---|---|---|
+| PR 1 | 0.000 / 0.000 / 0.000 | 0.000 / 0.000 / 0.000 | 0.86 / 0.97 |
+| fields and cards (title 0) | 0.000 / 0.000 / 0.024 | 0.000 / 0.000 / 0.023 | 0.906 / 0.984 |
+| title 0.5 | 0.000 / 0.424 / 0.101 | 0.000 / 0.430 / 0.103 | 0.984 / 1.000 |
+| title 1 | 0.083 / 0.955 / 0.319 | 0.053 / 0.930 / 0.308 | 1.000 / 1.000 |
+| title 1.5 | 0.455 / 0.992 / 0.666 | 0.447 / 1.000 / 0.667 | 1.000 / 1.000 |
+| **title 2** | **0.977 / 1.000 / 0.982** | **0.956 / 1.000 / 0.978** | 1.000 / 1.000 |
+| title 3 | 0.977 / 1.000 / 0.982 | 0.965 / 1.000 / 0.982 | 0.984 / 1.000 |
+
+Before the title list the failed and dead items' median rank was 45 (131
+of 132 within the 100, the best 14th); at 2 it is 1, and both pending
+items are first. On the 50 graded queries every title weight from 0.5 to 3
+gives the same: all nDCG@10 0.655 (0.654 without the list, 0.590 for PR
+1), owner-tagged nDCG@10 0.342 and R@10 0.297, keyword R@10 0.864, and the
+worst kind against PR 1 temporal, −0.033, as before; two rankings moved
+(one at 0.5), one keyword query (nDCG@10 0.783 to 0.821) and one reorder.
+At weight 0 every ranking of both sets is the one fields and cards alone
+gave. The bars, set before these runs: the 50 queries within 0.01 of the
+first pass (all nDCG@10 0.644 or more, owner-tagged 0.332), keyword R@10
+0.84 or more and no kind more than 0.05 under PR 1, as the fields and
+cards were held to; and, new, the failed and dead known items on the first
+page. Weight 2 is the smallest of the grid that puts almost every one
+first: rank 1 in the title list alone ties a document both chunk lists
+rank first, and the fields list's rank 1 beside it lifts the item over it;
+3 is no better. Latency, back to back in one session, three rounds of PR
+1's `searcheval` (built from main, on a schema-18 copy), then this
+branch's at weight 0, then at 2: hybrid total p50 147.8, 147.6 and 144.4
+ms for PR 1, 142.5, 145.3 and 144.9 at 0, 143.7, 143.7 and 142.4 at 2; the
+title stage itself 0.4 ms at p50 and 0.7 at p95 on the 50 queries, and at
+most 3.1 ms on the known items, beside BM25.
+
+**Rejected, measured on the same sets.**
+
+- Fusing documents, not chunks (each chunk list collapsed to a document
+  ranking first, then RRF over the four): at the shipped weights the
+  known items stay off the first page (S@10 0.00, median rank 81) and
+  all nDCG@10 falls to 0.634; fields 1 and cards 1 reach S@10 0.49 with
+  evidence queries 0.069 under PR 1; fields 2 and cards 1 reach 0.81
+  with all nDCG@10 0.586 and evidence 0.110 under. It would also have
+  rewritten the chunk fusion the first pass calibrated.
+- Weighing the fields list higher: its OR matches too much to be heavy.
+  fields 1 reaches S@10 0.41 (owner-tagged R@10 0.194, evidence −0.080);
+  fields 2 reaches 0.89 by title and 0.82 by fragment with all nDCG@10
+  0.573 and world-hop queries 0.184 under PR 1; with cards 1 as well,
+  0.92 and 0.91, all 0.610, world hop −0.107. Each fails a bar.
+- An AND over all five fields at weight 2: the same on the 50 queries,
+  slightly worse on the known items (fragment S@1 0.947 against 0.956).
+- A minimum of one term: on the judged sets the same as two (no judged
+  query has a single word), but on 40 unjudged one-word probes (words in
+  20 to 200 titles) it replaced half the first 10 (5.0 of 10 kept), the
+  documents whose titles hold the word rising from 4.1 to 7.4 a page and
+  failed or dead ones from 0 to 0.7: with one term the AND is the fields
+  list's OR held to the titles, at the defaults eight times as heavy.
+
+**Known limitations.**
+
+- A one-word query, or one whose words a bookmark holds only between its
+  title and its site or folders, doesn't engage the title list: such a
+  bookmark is found by the fields and cards alone, at their weights, and
+  may still rank past the first page.
+- Short topical queries now rank first the documents whose titles hold
+  every word, failed and dead ones among them. On 40 unjudged two-word
+  probes (pairs in 5 to 60 titles) at weight 2 the first 10 kept 5.6 of
+  their documents (5.9 at 1.5), documents with both words in a title rose
+  from 2.5 to 6.3 a page and failed or dead ones from 0 to 1.2. No judged
+  query is that short; judge some before moving the weight or the
+  minimum.
+- A re-import doesn't update a bookmark's title or folder: `Ingest` keeps
+  the first save of a URL from a source (`ON CONFLICT DO NOTHING`), so the
+  fields keep the title and folder it was first saved with.
+- Pages read through Jina Reader declare no site name (its answer carries
+  no `og:site_name`); their host's agreement or the curated table names
+  them, or nothing does.
+- A page is embedded twice during an import: its card at ingest (title,
+  bookmark, site), and again after its fetch brings a title, author or
+  site name, unless the fetch lands in the same cards window. A card is
+  one short input, next to the page's chunks; the first embed is what
+  lets a page that never fetches be found by meaning.
+- The title list counts a query's terms by their lowercase form
+  (`titleQuery`), while the index folds stems and diacritics (`porter`,
+  `remove_diacritics 2`), so two forms of one word ("run running") or a
+  word with and without its accents ("café cafe") count as two terms and
+  engage the title list as a one-word query would not, its AND then
+  reading one word held to the titles. No simpler rule is sound: counting
+  as the index does needs the tokenizer's porter stemming and Unicode
+  decomposition (`golang.org/x/text` as a new direct dependency), and a
+  prefix or suffix rule would merge words the index keeps apart.
+- Under the gentle throttle (at most 4 fetches and 1 index job), a card
+  fill runs beside the one index job, the cards pool being uncapped, so a
+  search's query embed can wait in Ollama behind both. Holding the cards
+  job while an index job runs isn't simple: `Gate.Admit` sees only the
+  asking pool's running count and must do no I/O, so a hold across pools
+  needs state they share and a wake-up when the index pool goes idle.
+
+**Going back to 2.6.x.** 2.6 runs goose v3.28.0, which ignores database
+versions it doesn't know (as 2.5's does: "Going back to 2.5.x"), so its
+daemon starts on a schema-19 database. It writes none of the new tables
+(deleting a document still removes its rows, through their foreign keys
+and triggers) and never claims a cards job. Back on 2.7, the start
+derives the fields of the documents 2.6 created; a document 2.6 fetched,
+or whose bookmarks it changed, keeps the fields it had until its next
+write or the next rules bump. Remove `search.fields_weight`,
+`search.cards_weight` and `search.title_weight` from config.yaml first:
+2.6 decodes it strictly ("field fields_weight not found in type
+config.Search", checked with v2.6.0's config loader), so its daemon
+refuses to start and its CLI fails on the same parse.
+
+**How to revisit:** a rule change (a generic name, a separator, the
+table) is a change in `internal/docmeta` and a `RulesVersion` bump with a
+new golden file; the next start derives every document again and the
+cards job embeds the cards that changed. The weights are config; measure
+any change with `make search-eval` against the last report.
 
 ---
 

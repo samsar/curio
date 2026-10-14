@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/urlutil"
 )
 
 // The replay drives one Native through an import's worth of fetches of one
@@ -137,7 +138,7 @@ func TestReplay_BurstOfOneSite(t *testing.T) {
 		page, isJina := strings.CutPrefix(target, jinaBase)
 		if !isJina {
 			host := hostOf(target)
-			if siteOf(host) != busySite {
+			if urlutil.Site(host) != busySite {
 				return htmlPage(thinPage).respond(target)
 			}
 			if hostCached(n, host) {
@@ -146,7 +147,7 @@ func TestReplay_BurstOfOneSite(t *testing.T) {
 			return answerStatus(http.StatusForbidden).respond(target)
 		}
 		jinaRequests[page]++
-		if siteOf(hostOf(page)) != busySite {
+		if urlutil.Site(hostOf(page)) != busySite {
 			return article.respond(target)
 		}
 		now := fc.now()
@@ -186,7 +187,7 @@ func TestReplay_BurstOfOneSite(t *testing.T) {
 		cacheBefore, busyBefore = cacheEntries(n), len(busyJina)
 	}
 	settled := func(job *replayJob) {
-		if siteOf(hostOf(job.url)) != busySite {
+		if urlutil.Site(hostOf(job.url)) != busySite {
 			lastOther = fc.now()
 			return
 		}
@@ -241,7 +242,7 @@ func TestReplay_BurstOfOneSite(t *testing.T) {
 	}
 	assert.LessOrEqual(t, fetches, 3*len(busy))
 	for _, job := range jobs {
-		if siteOf(hostOf(job.url)) != busySite {
+		if urlutil.Site(hostOf(job.url)) != busySite {
 			assert.NoError(t, job.err, job.url)
 		}
 	}
@@ -268,7 +269,7 @@ func sumCalls(recent map[CallClass]int) int {
 func jinaRequestsElsewhere(requests map[string]int, site string) int {
 	total := 0
 	for page, n := range requests {
-		if siteOf(hostOf(page)) != site {
+		if urlutil.Site(hostOf(page)) != site {
 			total += n
 		}
 	}
@@ -309,7 +310,7 @@ func TestReplay_OwnersBlockAnswers(t *testing.T) {
 			require.ErrorIs(t, err, errJinaSiteBlocked)
 			sb, ok := errors.AsType[*jinaSiteBlock](err)
 			require.True(t, ok)
-			assert.Equal(t, tc.site, siteOf(sb.domain))
+			assert.Equal(t, tc.site, urlutil.Site(sb.domain))
 			assert.Equal(t, tc.ends, siteBlockEnd(sb.until, tc.answered))
 		})
 	}

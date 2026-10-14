@@ -648,7 +648,7 @@ func TestChunks_SearchSkipsFailedAndDeadDocuments(t *testing.T) {
 					return len(bm) == 1, len(vec) == 1
 				}
 
-				require.NoError(t, docs.MarkFetched(ctx, docID))
+				require.NoError(t, docs.MarkFetched(ctx, docID, 0))
 				bm, vec := searched()
 				require.True(t, bm && vec, "a fetched document is searched")
 
@@ -658,7 +658,7 @@ func TestChunks_SearchSkipsFailedAndDeadDocuments(t *testing.T) {
 				assert.False(t, vec, "vector")
 
 				if back == store.DocStateFetched {
-					require.NoError(t, docs.MarkFetched(ctx, docID))
+					require.NoError(t, docs.MarkFetched(ctx, docID, 0))
 				} else {
 					_, err := docs.RequeueFetch(ctx, "local", docID)
 					require.NoError(t, err)
@@ -746,7 +746,7 @@ func (l *sampleLibrary) add(tenant string, state store.DocState, texts ...string
 	require.NoError(l.t, l.chunks.ReplaceForDocument(ctx, id, latestExtractionID(l.t, l.db, id), "", nil, inputs))
 	switch state {
 	case store.DocStateFetched:
-		require.NoError(l.t, l.docs.MarkFetched(ctx, id))
+		require.NoError(l.t, l.docs.MarkFetched(ctx, id, 0))
 	case store.DocStateFailed, store.DocStateDead:
 		require.NoError(l.t, l.docs.MarkFailed(ctx, id, stateCause(state)))
 	case store.DocStatePending:

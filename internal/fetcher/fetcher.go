@@ -34,6 +34,10 @@ type Result struct {
 	Author      string
 	Language    string
 	PublishedAt *time.Time
+	// SiteName is the site name the page declares (its og:site_name, or
+	// the site web2md's front matter names), as read; empty when it
+	// declares none. Search derives the document's site from it.
+	SiteName string
 	// Meta is fetcher-specific metadata; persisted as extraction_meta.
 	// JSON-serializable.
 	Meta map[string]any

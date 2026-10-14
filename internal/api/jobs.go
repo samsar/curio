@@ -16,7 +16,7 @@ import (
 // JobResponse mirrors store.Job with timestamps as time.Time. Payload is
 // passed through as raw JSON. DocURL and DocTitle come from a left-join
 // on documents; they're empty for jobs that don't reference a doc
-// (import, cluster, summarize) or when the doc was dropped.
+// (import, cluster, summarize, cards) or when the doc was dropped.
 type JobResponse struct {
 	ID           string          `json:"id"`
 	Kind         string          `json:"kind"`
@@ -215,7 +215,7 @@ func jobFilters(r *http.Request) (store.ListJobsOpts, error) {
 		return store.ListJobsOpts{}, badRequest("status %q must be one of: pending, running, done, failed", opts.Status)
 	}
 	if opts.Kind != "" && !opts.Kind.Valid() {
-		return store.ListJobsOpts{}, badRequest("kind %q must be one of: fetch, index, import, cluster, summarize", opts.Kind)
+		return store.ListJobsOpts{}, badRequest("kind %q must be one of: fetch, index, import, cluster, summarize, cards", opts.Kind)
 	}
 	return opts, nil
 }

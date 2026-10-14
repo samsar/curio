@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/samsar/curio/internal/urlutil"
 )
 
 // The text rules judge a page by what it says, where its title, URL and
@@ -288,12 +290,12 @@ func (t *pageText) parkedDomain(target string) string {
 // parkedNotice reports whether line, on a page of host, is a parked
 // domain's notice: a search-ads parking page's heading, or a match of
 // parkedDomainRE. A notice naming a domain counts only when it names host
-// or its site (siteOf): a page may report another site's sale. Without a
-// subject, the predicate must be the whole line, as GoDaddy's "is for
-// sale!" under the domain's name; a line that goes on after it is about
-// something else ("is parked. The owner left."). An expiry counts only
-// with its subject: "Registration has expired." alone is as likely an
-// event's sign-up page.
+// or its site (urlutil.Site): a page may report another site's sale.
+// Without a subject, the predicate must be the whole line, as GoDaddy's
+// "is for sale!" under the domain's name; a line that goes on after it is
+// about something else ("is parked. The owner left."). An expiry counts
+// only with its subject: "Registration has expired." alone is as likely
+// an event's sign-up page.
 func parkedNotice(line, host string) bool {
 	if parkingHeadingRE.MatchString(line) {
 		return true
@@ -305,7 +307,7 @@ func parkedNotice(line, host string) bool {
 	group := func(name string) string { return m[parkedDomainRE.SubexpIndex(name)] }
 	if domain := group("domain"); domain != "" {
 		domain = strings.TrimPrefix(strings.ToLower(domain), "www.")
-		return domain == host || domain == siteOf(host)
+		return domain == host || domain == urlutil.Site(host)
 	}
 	if group("subject") != "" {
 		return true

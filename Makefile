@@ -111,16 +111,16 @@ cluster-report:
 	@test -n "$(DB)" || { echo 'usage: make cluster-report DB=<copy of curio.db> [JSON=<file>] [DRAWS=n] [SEED=n]' >&2; exit 2; }
 	$(GO) run -tags=$(GOTAGS) ./cmd/clusterreport -db "$(DB)" $(if $(JSON),-json "$(JSON)") $(if $(DRAWS),-draws $(DRAWS)) $(if $(SEED),-seed $(SEED))
 
-## search-eval: score search on a copy of a home's database against a graded query file (DB=<copy> QUERIES=<file> [CONFIG=<config.yaml>] [JSON=<file>] [BASELINE=<previous JSON>] [VARIANTS=hybrid,bm25,vector])
+## search-eval: score search on a copy of a home's database against a graded query file (DB=<copy> QUERIES=<file> [CONFIG=<config.yaml>] [JSON=<file>] [BASELINE=<previous JSON>] [VARIANTS=hybrid,bm25,vector,fields,cards,titles])
 # A developer's tool: go run, so nothing lands in ./bin; built with the
 # release's version stamp, which the report records. It migrates the
 # database it reads and refuses a home's own, like cluster-report, and
-# embeds the queries through config.yaml's Ollama, which must have the
-# model: it never pulls one. Keep the query file and the JSON report out
-# of the repository. See cmd/searcheval.
+# embeds the queries, and the copy's stale cards, through config.yaml's
+# Ollama, which must have the model: it never pulls one. Keep the query
+# file and the JSON report out of the repository. See cmd/searcheval.
 .PHONY: search-eval
 search-eval:
-	@test -n "$(DB)" && test -n "$(QUERIES)" || { echo 'usage: make search-eval DB=<copy of curio.db> QUERIES=<file> [CONFIG=<config.yaml>] [JSON=<file>] [BASELINE=<previous JSON>] [VARIANTS=hybrid,bm25,vector]' >&2; exit 2; }
+	@test -n "$(DB)" && test -n "$(QUERIES)" || { echo 'usage: make search-eval DB=<copy of curio.db> QUERIES=<file> [CONFIG=<config.yaml>] [JSON=<file>] [BASELINE=<previous JSON>] [VARIANTS=hybrid,bm25,vector,fields,cards,titles]' >&2; exit 2; }
 	$(GO) run -tags=$(GOTAGS) -ldflags "$(LDFLAGS)" ./cmd/searcheval -db "$(DB)" -queries "$(QUERIES)" $(if $(CONFIG),-config "$(CONFIG)") $(if $(JSON),-json "$(JSON)") $(if $(BASELINE),-baseline "$(BASELINE)") $(if $(VARIANTS),-variants "$(VARIANTS)")
 
 ## vet: go vet
@@ -172,7 +172,7 @@ tools:
 	$(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 	$(GO) install github.com/pressly/goose/v3/cmd/goose@$(GOOSE_VERSION)
 
-## migrate-up: apply pending migrations to ~/.curio/curio.db
+## migrate-up: apply pending migrations to ~/.curio/curio.db with the goose CLI, which has no sqlite-vec and fails on those that need it, 001 and 019 among them (the daemon migrates at start; see migrations/README.md)
 .PHONY: migrate-up
 migrate-up:
 	$(GOOSE) -dir migrations sqlite3 $${CURIO_HOME:-$$HOME/.curio}/curio.db up

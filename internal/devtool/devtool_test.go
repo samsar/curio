@@ -81,6 +81,47 @@ func TestOpenCopy_ReadsTheWidth(t *testing.T) {
 	assert.Equal(t, 8, c.Width)
 }
 
+// TestOpenCopy_BringsTheCopyUpToDate: a copy from before metadata search
+// opens as the daemon would leave it at start: its documents' fields
+// derived and searchable, and a card vector index as wide as its chunks'.
+// Opened again, there is nothing left to derive.
+func TestOpenCopy_BringsTheCopyUpToDate(t *testing.T) {
+	ctx := context.Background()
+	path, _ := newDatabase(t, t.TempDir(), "copy.db", 18)
+	db, err := sqlite.Open(ctx, path)
+	require.NoError(t, err)
+	_, err = db.Exec(`
+		INSERT INTO documents (id, tenant_id, url, state) VALUES ('d1', 'local', 'https://example.com/a', 'dead'),
+			('d2', 'local', 'https://example.org/b', 'fetched');
+		INSERT INTO bookmarks (id, tenant_id, document_id, url, title, saved_at, source, folder_path)
+			VALUES ('b1', 'local', 'd1', 'https://example.com/a', 'Consensus in practice', '2026-10-01T00:00:00.000Z',
+				'chrome', '/Bookmarks Bar/Distributed');`)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	c, err := OpenCopy(ctx, path)
+	require.NoError(t, err)
+	assert.Equal(t, 2, c.Fields.Documents)
+	assert.Equal(t, 2, c.Fields.CardsStale)
+	hits, err := c.Index.SearchFields(ctx, store.LocalTenantID, `"distributed"`, 10, store.SearchFilters{})
+	require.NoError(t, err)
+	require.Len(t, hits, 1)
+	assert.Equal(t, "d1", hits[0].DocumentID, "a dead document, by its bookmark's folder")
+	stale, err := c.Index.StaleCards(ctx, store.LocalTenantID, "", 10)
+	require.NoError(t, err)
+	written, err := c.Index.PutCardVectors(ctx, []store.CardVector{{DocumentID: stale[0].DocumentID,
+		Text: stale[0].Text, Embedding: make([]float32, c.Width)}})
+	require.NoError(t, err)
+	assert.Equal(t, 1, written, "the card vector index is the chunks' width")
+	require.NoError(t, c.Close())
+
+	again, err := OpenCopy(ctx, path)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, again.Close()) })
+	assert.Zero(t, again.Fields.Documents)
+	assert.Equal(t, 1, again.Fields.CardsStale)
+}
+
 // TestOpenCopy_RefusesAHome: a database beside daemon.pid, or beside the
 // home's marker alone, is refused, by its own path or through a link from
 // elsewhere, before anything opens it: no -wal or -shm file, its time

@@ -939,7 +939,7 @@ func TestSearchHit_MatchKind(t *testing.T) {
 		matches []Match
 		want    string
 	}{
-		{nil, ""},
+		{nil, "bookmark details"},
 		{[]Match{{BM25: bm25}}, "keyword only"},
 		{[]Match{{Vector: vector}, {Vector: vector}}, "meaning only"},
 		{[]Match{{BM25: bm25, Vector: vector}}, "keyword + meaning"},
@@ -947,6 +947,30 @@ func TestSearchHit_MatchKind(t *testing.T) {
 		{[]Match{{}}, ""},
 	} {
 		assert.Equal(t, tc.want, SearchHit{Matches: tc.matches}.MatchKind(), "%+v", tc.matches)
+	}
+}
+
+// TestSearchHit_Saved: a hit without matches says what it was saved as,
+// by the bookmark docmeta.SavedAs picks, the parts it has; or, with
+// neither a title nor a folder, where that bookmark was saved from.
+func TestSearchHit_Saved(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		bookmarks []SavedBookmark
+		want      string
+	}{
+		{"none", nil, ""},
+		{"title and folder", []SavedBookmark{{Title: "Queues", FolderPath: "/Bookmarks Bar/Tech/Streams"}},
+			"Saved as “Queues” in Tech / Streams"},
+		{"a title alone", []SavedBookmark{{Title: "Queues", Source: "chrome"}}, "Saved as “Queues”"},
+		{"a folder alone", []SavedBookmark{{FolderPath: "/Favorites/Later", Source: "safari"}}, "Saved in Later"},
+		{"a root alone", []SavedBookmark{{FolderPath: "/Bookmarks Bar", Source: "chrome"}}, "Saved from Chrome"},
+		{"the newest's source", []SavedBookmark{{Source: "safari"}, {Source: "chrome"}}, "Saved from Safari"},
+		{"a source alone", []SavedBookmark{{Source: "html"}}, "Saved from a bookmarks file"},
+		{"by hand", []SavedBookmark{{Source: "manual"}}, "Saved from curio"},
+		{"an unknown source", []SavedBookmark{{Source: evilScript}}, "Saved from " + evilScript},
+	} {
+		assert.Equal(t, tc.want, SearchHit{Bookmarks: tc.bookmarks}.Saved(), tc.name)
 	}
 }
 

@@ -61,17 +61,28 @@ type embeddingProvenance struct {
 type searchProvenance struct {
 	BM25Weight          float64 `json:"bm25_weight"`
 	VectorWeight        float64 `json:"vector_weight"`
+	FieldsWeight        float64 `json:"fields_weight"`
+	CardsWeight         float64 `json:"cards_weight"`
+	TitleWeight         float64 `json:"title_weight"`
 	RRFK                int     `json:"rrf_k"`
 	Collapse            string  `json:"collapse"`
 	EmbedTimeoutSeconds int     `json:"embed_timeout_seconds"`
 }
 
-// libraryReport counts the judgments, over every query, and those search
-// can't return.
+// libraryReport counts the judgments, over every query, and those the
+// chunk lists can't return (each variant's groups count those its own
+// lists can't); and what bringing the copy up to date did: how long
+// deriving its fields took, and how many of its cards were embedded, in
+// how long. Those are facts of the run, like its timings: a second run on
+// the same copy derives and embeds nothing.
 type libraryReport struct {
 	Judgments    int `json:"judgments"`
 	Missing      int `json:"missing"`
 	Unsearchable int `json:"unsearchable"`
+
+	FieldsMS      float64 `json:"fields_ms"`
+	CardsMS       float64 `json:"cards_ms"`
+	CardsEmbedded int     `json:"cards_embedded"`
 }
 
 // variantReport is one variant's run.
@@ -92,8 +103,8 @@ type percentiles struct {
 	P95 float64 `json:"p95"`
 }
 
-// groupReport is a group's mean scores, and how many of its judgments
-// search can't return.
+// groupReport is a group's mean scores, and how many of its judgments the
+// variant can't return.
 type groupReport struct {
 	eval.GroupScore
 	Missing      int `json:"missing"`
@@ -130,7 +141,8 @@ type rankedReport struct {
 }
 
 // newReport is the report of a run, its variants still to run.
-func newReport(opts options, cfg config.Config, lib *devtool.Copy, qf queryFile, judged map[string]resolved) *report {
+func newReport(opts options, cfg config.Config, lib *devtool.Copy, qf queryFile, judged map[string]resolved,
+	cards cardsFill) *report {
 	names := make([]string, len(opts.variants))
 	for i, v := range opts.variants {
 		names[i] = v.name
@@ -142,13 +154,15 @@ func newReport(opts options, cfg config.Config, lib *devtool.Copy, qf queryFile,
 		Embedding: embeddingProvenance{Provider: cfg.Embedding.Provider, Model: cfg.Embedding.Model,
 			Dim: cfg.Embedding.Dim, BaseURL: cfg.Embedding.BaseURL, QueryPrefix: cfg.Embedding.QueryPrefix},
 		Search: searchProvenance{BM25Weight: cfg.Search.BM25Weight, VectorWeight: cfg.Search.VectorWeight,
-			RRFK: cfg.Search.RRFK, Collapse: cfg.Search.Collapse, EmbedTimeoutSeconds: cfg.Search.EmbedTimeoutSeconds},
+			FieldsWeight: cfg.Search.FieldsWeight, CardsWeight: cfg.Search.CardsWeight,
+			TitleWeight: cfg.Search.TitleWeight, RRFK: cfg.Search.RRFK, Collapse: cfg.Search.Collapse,
+			EmbedTimeoutSeconds: cfg.Search.EmbedTimeoutSeconds},
 		K: store.MaxSearchK, Variants: names, Baseline: opts.baseline,
-	}}
+	}, Library: libraryReport{FieldsMS: ms(lib.Fields.Took), CardsMS: ms(cards.took), CardsEmbedded: cards.embedded}}
 	for _, q := range qf.set.Queries {
 		for _, j := range q.Relevant {
 			rep.Library.Judgments++
-			switch judged[j.URL].status {
+			switch judged[j.URL].status(chunkReach) {
 			case missing:
 				rep.Library.Missing++
 			case unsearchable:
@@ -161,8 +175,10 @@ func newReport(opts options, cfg config.Config, lib *devtool.Copy, qf queryFile,
 }
 
 // newQueryReport is query i's report: its scores, its judgments with their
-// documents and ranks, and the ranking that got them.
-func newQueryReport(i int, q eval.Query, score eval.QueryScore, r ranking, judged map[string]resolved) queryReport {
+// documents, ranks and whether a search reaching by can return them, and
+// the ranking that got them.
+func newQueryReport(i int, q eval.Query, score eval.QueryScore, r ranking, judged map[string]resolved,
+	by reach) queryReport {
 	tags := q.Tags
 	if tags == nil {
 		tags = []string{}
@@ -177,7 +193,7 @@ func newQueryReport(i int, q eval.Query, score eval.QueryScore, r ranking, judge
 	}
 	for _, j := range q.Relevant {
 		res := judged[j.URL]
-		jr := judgmentReport{URL: j.URL, DocumentID: res.documentID, Grade: j.Grade, Status: res.status}
+		jr := judgmentReport{URL: j.URL, DocumentID: res.documentID, Grade: j.Grade, Status: res.status(by)}
 		if rank, ok := rankOf[j.URL]; ok {
 			jr.Rank = &rank
 		}
@@ -189,7 +205,7 @@ func newQueryReport(i int, q eval.Query, score eval.QueryScore, r ranking, judge
 	return qr
 }
 
-// newGroupReport is g's mean scores and its judgments search can't
+// newGroupReport is g's mean scores and its judgments the variant can't
 // return, counted over its queries.
 func newGroupReport(g eval.Group, scores []eval.QueryScore, queries []queryReport) groupReport {
 	gr := groupReport{GroupScore: eval.Summarize(g, scores)}
@@ -220,9 +236,11 @@ func (r *report) text(b *bytes.Buffer, base *baseline) {
 	p := r.Provenance
 	fmt.Fprintf(b, "Search evaluation of %s (schema %d, %d-wide vectors), curio %s\n", p.Database, p.Schema, p.Width,
 		p.Version)
-	fmt.Fprintf(b, "Queries: %s (sha256 %s), %d queries, %d judgments: %d missing, %d unsearchable\n",
+	fmt.Fprintf(b, "Queries: %s (sha256 %s), %d queries, %d judgments: %d missing, %d the chunk lists can't return\n",
 		p.Queries, shortHash(p.QueriesSHA256), r.queryCount(), r.Library.Judgments, r.Library.Missing,
 		r.Library.Unsearchable)
+	fmt.Fprintf(b, "Library: document fields derived in %.0f ms; %d cards embedded in %.1f s\n", r.Library.FieldsMS,
+		r.Library.CardsEmbedded, r.Library.CardsMS/1000)
 	fmt.Fprintf(b, "Searched with %s: %s; k %d; variants %s\n", configName(p.Config), searchSettings(p),
 		p.K, strings.Join(p.Variants, ", "))
 	if base != nil {
@@ -253,8 +271,9 @@ func (r *report) queryCount() int {
 // searchSettings are the embedding model and search keys a run used.
 func searchSettings(p provenance) string {
 	s := p.Search
-	return fmt.Sprintf("embedding %s; bm25_weight %g, vector_weight %g, rrf_k %d, collapse %s, embed_timeout_seconds %d",
-		p.Embedding.Model, s.BM25Weight, s.VectorWeight, s.RRFK, s.Collapse, s.EmbedTimeoutSeconds)
+	return fmt.Sprintf("embedding %s; bm25_weight %g, vector_weight %g, fields_weight %g, cards_weight %g, "+
+		"title_weight %g, rrf_k %d, collapse %s, embed_timeout_seconds %d", p.Embedding.Model, s.BM25Weight,
+		s.VectorWeight, s.FieldsWeight, s.CardsWeight, s.TitleWeight, s.RRFK, s.Collapse, s.EmbedTimeoutSeconds)
 }
 
 // shortHash is a SHA-256's first 12 hex digits.

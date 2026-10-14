@@ -61,6 +61,7 @@ func TestQueue_Get(t *testing.T) {
 			{Kind: "fetch", Limit: testPools.Fetch, Running: 1, Pending: 4, DueLater: 2, NextDue: later},
 			{Kind: "index", Limit: testPools.Index},
 			{Kind: "cluster", Limit: 1, Pending: 1},
+			{Kind: "cards", Limit: 1},
 		},
 	}, q)
 }
@@ -126,8 +127,8 @@ func TestQueue_UpdateSeveralFields(t *testing.T) {
 	assert.True(t, q.Paused)
 	assert.Equal(t, "gentle", q.Throttle)
 	assert.Equal(t, "22:00-07:00", q.Schedule)
-	assert.Equal(t, []QueueKindResponse{{Kind: "fetch", Limit: 4}, {Kind: "index", Limit: 1}, {Kind: "cluster", Limit: 1}},
-		q.Kinds)
+	assert.Equal(t, []QueueKindResponse{{Kind: "fetch", Limit: 4}, {Kind: "index", Limit: 1}, {Kind: "cluster", Limit: 1},
+		{Kind: "cards", Limit: 1}}, q.Kinds)
 	assert.EqualValues(t, 1, settings.puts.Load())
 }
 

@@ -40,7 +40,8 @@ func TestStats(t *testing.T) {
 	assert.Equal(t, 4, got.BookmarksTotal)
 	assert.Equal(t, 4, got.DocumentsTotal)
 	assert.Equal(t, map[string]int{"fetched": 2, "failed": 1, "pending": 1}, got.DocumentsByState)
-	assert.Equal(t, map[string]int{"done": 2, "running": 1}, got.JobsByStatus)
+	assert.Equal(t, map[string]int{"done": 2, "running": 1, "pending": 1}, got.JobsByStatus,
+		"the fetch jobs, and the cards job the documents' writes queued")
 }
 
 var errInjected = errors.New("injected")
@@ -157,6 +158,66 @@ func TestHealth_YouTubeFetcher(t *testing.T) {
 			assert.Equal(t, bin, got)
 		}
 	}
+}
+
+// TestHealth_DocumentFields: healthz reports what the daemon's start did
+// to the documents' search fields, its time in UTC, the error only when
+// the start couldn't check or derive them; it never changes the status.
+func TestHealth_DocumentFields(t *testing.T) {
+	checked := time.Date(2026, 10, 14, 9, 30, 0, 0, time.FixedZone("CEST", 2*3600))
+	for _, tc := range []struct {
+		name   string
+		fields DocumentFields
+		want   string
+	}{
+		{"checked", DocumentFields{CheckedAt: checked},
+			`"document_fields":{"checked_at":"2026-10-14T07:30:00Z","rebuilt":false}`},
+		{"rebuilt", DocumentFields{CheckedAt: checked, Rebuilt: true},
+			`"document_fields":{"checked_at":"2026-10-14T07:30:00Z","rebuilt":true}`},
+		{"failed", DocumentFields{CheckedAt: checked, Error: "derive document fields: disk I/O error"},
+			`"document_fields":{"checked_at":"2026-10-14T07:30:00Z","rebuilt":false,` +
+				`"error":"derive document fields: disk I/O error"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestServer(t, func(d *Deps) { d.DocumentFields = tc.fields })
+			resp := s.do(t, request{method: http.MethodGet, path: "/v1/healthz"})
+			require.Equal(t, http.StatusOK, resp.status, resp.body)
+			assert.Contains(t, resp.body, tc.want)
+			assert.Contains(t, resp.body, `"status":"ok"`)
+		})
+	}
+}
+
+// failingStaleCount is a document index whose stale cards can't be
+// counted.
+type failingStaleCount struct{ store.DocumentIndex }
+
+func (failingStaleCount) CountStaleCards(context.Context, string) (int, error) { return 0, errInjected }
+
+// TestStats_CardsStale: stats counts the cards left to embed, the cards
+// job's backlog; one it can't count fails the whole answer, like the
+// other counts, and without a document index there are none.
+func TestStats_CardsStale(t *testing.T) {
+	stats := func(t *testing.T, s *testServer) map[string]any {
+		t.Helper()
+		resp := s.do(t, request{method: http.MethodGet, path: "/v1/stats"})
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		var got map[string]any
+		require.NoError(t, json.Unmarshal([]byte(resp.body), &got))
+		return got
+	}
+	s := newTestServer(t)
+	assert.InDelta(t, 0, stats(t, s)["cards_stale"], 0, "a new library has none, and says so")
+	s.seedDocument(t, "https://example.com/a", store.DocStateFetched)
+	s.seedDocument(t, "https://example.com/b", store.DocStatePending)
+	assert.InDelta(t, 2, stats(t, s)["cards_stale"], 0)
+
+	failing := newTestServer(t, func(d *Deps) { d.Index = failingStaleCount{d.Index} })
+	assertProblem(t, failing.do(t, request{method: http.MethodGet, path: "/v1/stats"}), http.StatusInternalServerError)
+
+	none := newTestServer(t, func(d *Deps) { d.Index = nil })
+	none.seedDocument(t, "https://example.com/a", store.DocStateFetched)
+	assert.InDelta(t, 0, stats(t, none)["cards_stale"], 0)
 }
 
 // driftMonitor is a DriftMonitor that reports report and counts

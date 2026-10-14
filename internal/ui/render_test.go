@@ -213,6 +213,18 @@ func sampleHits() []SearchHit {
 		Matches: []Match{{Segments: Passage("", "# "+evilScript), Vector: new(0.4)}},
 	}, {
 		DocumentID: "long", Title: strings.Repeat("A long title ", 25) + evilQuotes, URL: evilURL,
+	}, {
+		DocumentID: "saved", URL: "https://example.com/" + strings.Repeat("y", 700), State: "pending",
+		Bookmarks: []SavedBookmark{{Title: evilLong + evilQuotes + evilScript,
+			FolderPath: "/Bookmarks Bar/" + evilLong + evilAttr, Source: "chrome"}},
+	}, {
+		DocumentID: "dead", URL: "https://example.com/" + strings.Repeat("z", 700) + evilScript, State: "dead",
+		BookmarkTitle: evilAttr, Bookmarks: []SavedBookmark{{Title: evilAttr, Source: evilScript}},
+	}, {
+		DocumentID: "failed", URL: evilURL, State: "failed", Bookmarks: []SavedBookmark{{Source: evilQuotes}},
+	}, {
+		DocumentID: "fetched", URL: "https://example.com/f", State: "fetched", Title: evilRTL,
+		Bookmarks: []SavedBookmark{{FolderPath: evilScript, Source: "safari"}},
 	}}
 }
 

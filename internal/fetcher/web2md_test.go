@@ -31,7 +31,8 @@ A long article about feature flags...
 	require.NotNil(t, r.PublishedAt)
 	assert.Equal(t, 2017, r.PublishedAt.Year())
 	assert.Equal(t, "readability", r.Meta["via"])
-	assert.Equal(t, "martinfowler.com", r.Meta["site"])
+	assert.Equal(t, "martinfowler.com", r.SiteName)
+	assert.NotContains(t, r.Meta, "site", "the site name is a field of its own")
 	assert.Contains(t, r.Markdown, "# Feature Toggles")
 	assert.NotContains(t, r.Markdown, "---") // frontmatter stripped
 }

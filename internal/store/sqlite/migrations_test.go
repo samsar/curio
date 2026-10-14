@@ -1266,6 +1266,224 @@ func TestMigration018_Constraints(t *testing.T) {
 	}
 }
 
+// TestMigration019_MetadataSearch: 019 adds the derived search tables and
+// the cards kind; the jobs it rebuilds keep every column of every row, and
+// refuse a kind they don't know. Its Down drops the cards jobs and gives
+// 018's schema back byte for byte, and Up runs again.
+func TestMigration019_MetadataSearch(t *testing.T) {
+	ctx := context.Background()
+	db, p := migratedTo(t, 18)
+	_, err := db.Exec(`
+		INSERT INTO documents (id, tenant_id, url, title, state) VALUES
+			('d1', 'local', 'https://example.com/1', 'One', 'fetched'),
+			('d2', 'local', 'https://example.com/2', NULL, 'pending');
+		INSERT INTO bookmarks (id, tenant_id, document_id, url, title, saved_at, source, folder_path)
+			VALUES ('b1', 'local', 'd1', 'https://example.com/1', 'Saved one', '2026-10-01T00:00:00.000Z', 'chrome',
+				'/Bookmarks Bar/Reading');
+		INSERT INTO jobs (id, tenant_id, kind, payload, document_id, status, attempts, run_after, last_error,
+		                  created_at, updated_at, started_at) VALUES
+			('fetch-d1', 'local', 'fetch', '{"document_id":"d1"}', 'd1', 'done', 1, '2026-10-01T00:00:00.000Z', NULL,
+			 '2026-10-01T00:00:00.000Z', '2026-10-01T00:01:00.000Z', '2026-10-01T00:00:30.000Z'),
+			('index-d2', 'local', 'index', '{"document_id":"d2"}', 'd2', 'pending', 2, '2026-10-02T00:00:00.000Z',
+			 'waiting for an upstream', '2026-10-01T00:00:00.000Z', '2026-10-01T00:02:00.000Z', NULL),
+			('cluster', 'local', 'cluster', '{"trigger":"auto"}', NULL, 'failed', 1, '2026-10-01T00:00:00.000Z', 'boom',
+			 '2026-10-01T00:00:00.000Z', '2026-10-01T00:03:00.000Z', '2026-10-01T00:02:30.000Z');`)
+	require.NoError(t, err)
+	const jobColumnsQ = `SELECT id, tenant_id, kind, payload, status, attempts, run_after, last_error,
+		created_at, updated_at, started_at, document_id FROM jobs ORDER BY id`
+	const rowsQ = `SELECT * FROM %s ORDER BY id`
+	jobsBefore := dumpRows(t, db, jobColumnsQ)
+	docsBefore := dumpRows(t, db, fmt.Sprintf(rowsQ, "documents"))
+	bookmarksBefore := dumpRows(t, db, fmt.Sprintf(rowsQ, "bookmarks"))
+	schemaBefore := schemaDump(t, db)
+
+	_, err = p.UpTo(ctx, 19)
+	require.NoError(t, err)
+	assert.Equal(t, jobsBefore, dumpRows(t, db, jobColumnsQ), "the rebuild keeps every job as it was")
+	assert.Equal(t, docsBefore, dumpRows(t, db, fmt.Sprintf(rowsQ, "documents")))
+	assert.Equal(t, bookmarksBefore, dumpRows(t, db, fmt.Sprintf(rowsQ, "bookmarks")))
+	for table, columns := range map[string][]string{
+		"document_fields": {"seq", "document_id", "tenant_id", "host", "declared_site", "title_suffixes", "site_name",
+			"title", "bookmark_titles", "folders", "site", "author", "rules"},
+		"document_cards":  {"document_id", "text", "embedded_text", "embedded_at"},
+		"site_name_votes": {"tenant_id", "host", "kind", "name", "votes"},
+	} {
+		for _, column := range columns {
+			assert.True(t, hasColumn(t, db, table, column), "%s.%s", table, column)
+		}
+	}
+	assert.Empty(t, dumpRows(t, db, `SELECT * FROM document_fields`), "the store derives the rows, not the migration")
+	assert.Empty(t, dumpRows(t, db, `SELECT * FROM document_cards`))
+	assert.Empty(t, dumpRows(t, db, `SELECT * FROM site_name_votes`))
+	for name, insert := range map[string]string{
+		"suffixes a line each": `INSERT INTO document_fields (document_id, tenant_id, title_suffixes, rules)
+			VALUES ('d1', 'local', 'Example', 1)`,
+		"suffixes in an object": `INSERT INTO document_fields (document_id, tenant_id, title_suffixes, rules)
+			VALUES ('d1', 'local', '{"a": "Example"}', 1)`,
+		"a vote of no kind": `INSERT INTO site_name_votes (tenant_id, host, kind, name, votes)
+			VALUES ('local', 'example.com', 'title', 'Example', 1)`,
+		"a vote row of no votes": `INSERT INTO site_name_votes (tenant_id, host, kind, name, votes)
+			VALUES ('local', 'example.com', 'suffix', 'Example', 0)`,
+	} {
+		_, err := db.Exec(insert)
+		assert.ErrorContains(t, err, "constraint failed", name)
+	}
+	var jobsTable string
+	require.NoError(t, db.QueryRow(`SELECT sql FROM sqlite_master WHERE name = 'jobs'`).Scan(&jobsTable))
+	assert.True(t, strings.HasPrefix(jobsTable, "CREATE TABLE jobs ("), "jobs keeps the text 019 wrote: %s", jobsTable)
+	_, err = db.Exec(`INSERT INTO jobs (id, tenant_id, kind, payload) VALUES ('cards', 'local', 'cards', '{}')`)
+	require.NoError(t, err, "a cards job inserts")
+	_, err = db.Exec(`INSERT INTO jobs (id, tenant_id, kind, payload) VALUES ('bogus', 'local', 'bogus', '{}')`)
+	assert.ErrorContains(t, err, "constraint failed", "a kind the CHECK doesn't name")
+	_, err = db.Exec(`INSERT INTO jobs (id, tenant_id, kind, payload, document_id) VALUES ('orphan', 'local', 'fetch', '{}',
+		'no-such-document')`)
+	assert.ErrorContains(t, err, "FOREIGN KEY constraint failed", "jobs keep their document's foreign key")
+	assert.Empty(t, dumpRows(t, db, `PRAGMA foreign_key_check`))
+	assertForeignKeysOnEverywhere(t, db)
+
+	_, err = p.DownTo(ctx, 18)
+	require.NoError(t, err)
+	assert.Equal(t, schemaBefore, schemaDump(t, db), "018's schema, byte for byte")
+	assert.Equal(t, jobsBefore, dumpRows(t, db, jobColumnsQ), "the cards job is gone, the others kept")
+
+	_, err = p.UpTo(ctx, 19)
+	require.NoError(t, err, "Up runs again")
+}
+
+// TestMigration019_FieldsIndexFollowsTheRows: the triggers keep
+// document_fields_fts in step with document_fields through inserts,
+// updates and deletes, and site_name_votes with what the rows contribute;
+// a write that leaves the searched columns' values as they were, even an
+// upsert setting every column as refreshFields writes them, writes no
+// index entry, and one that leaves a row's contribution as it was moves no
+// vote.
+func TestMigration019_FieldsIndexFollowsTheRows(t *testing.T) {
+	ctx := context.Background()
+	db, _ := migratedTo(t, 19)
+	// total_changes() counts the rows a connection's statements and their
+	// triggers wrote, so one connection makes every statement.
+	conn, err := db.Conn(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, conn.Close()) })
+	exec := func(q string, args ...any) {
+		t.Helper()
+		_, err := conn.ExecContext(ctx, q, args...)
+		require.NoError(t, err)
+	}
+	totalChanges := func() int {
+		t.Helper()
+		var n int
+		require.NoError(t, conn.QueryRowContext(ctx, `SELECT total_changes()`).Scan(&n))
+		return n
+	}
+	// changes runs q and counts the rows it and its triggers wrote.
+	changes := func(q string, args ...any) int {
+		t.Helper()
+		before := totalChanges()
+		exec(q, args...)
+		return totalChanges() - before
+	}
+	match := func(q string) []string {
+		t.Helper()
+		rows, err := conn.QueryContext(ctx, `SELECT f.document_id FROM document_fields_fts
+			JOIN document_fields f ON f.seq = document_fields_fts.rowid
+			WHERE document_fields_fts MATCH ? ORDER BY f.document_id`, q)
+		require.NoError(t, err)
+		defer rows.Close()
+		var ids []string
+		for rows.Next() {
+			var id string
+			require.NoError(t, rows.Scan(&id))
+			ids = append(ids, id)
+		}
+		require.NoError(t, rows.Err())
+		return ids
+	}
+	// integrity compares the index with its content table: without rank
+	// 1, FTS5's integrity-check passes an index that disagrees with it.
+	integrity := func() {
+		t.Helper()
+		exec(`INSERT INTO document_fields_fts (document_fields_fts, rank) VALUES ('integrity-check', 1)`)
+	}
+	votes := func() [][]any {
+		t.Helper()
+		return dumpRows(t, db, `SELECT host, kind, name, votes FROM site_name_votes ORDER BY host, kind, name`)
+	}
+
+	exec(`INSERT INTO documents (id, tenant_id, url) VALUES ('d1', 'local', 'https://example.com/1'),
+		('d2', 'local', 'https://example.org/2')`)
+	exec(`INSERT INTO document_fields (document_id, tenant_id, host, title, bookmark_titles, folders, site, author, rules)
+		VALUES ('d1', 'local', 'example.com', 'Kafka streams', 'Saved kafka notes', 'Reading / Queues', 'example', 'Ada', 1),
+		       ('d2', 'local', 'example.org', 'Postgres internals', '', 'Databases', 'example', 'Grace', 1)`)
+	integrity()
+	assert.Equal(t, []string{"d1"}, match("kafka"))
+	assert.Equal(t, []string{"d1"}, match("queues"))
+	assert.Equal(t, []string{"d2"}, match("grace"))
+	assert.Equal(t, []string{"d1", "d2"}, match("example"))
+	assert.Empty(t, votes(), "no declared name, no suffix")
+
+	for _, tc := range []struct {
+		set   string
+		wrote int
+	}{
+		{"host = 'other.example'", 1},
+		{"site_name = 'Example'", 1},
+		{"declared_site = 'Example'", 1 + 1},
+		// The contribution moves whole: the declared name withdrawn and
+		// added again, beside the two suffixes.
+		{`title_suffixes = '["Example", "Example Blog"]'`, 1 + 4},
+		{"rules = 2", 1},
+	} {
+		assert.Equal(t, tc.wrote, changes(`UPDATE document_fields SET `+tc.set+` WHERE document_id = 'd1'`),
+			"%s: the row and its votes alone; no trigger wrote the index", tc.set)
+	}
+	integrity()
+	assert.Equal(t, [][]any{{"other.example", "declared", "Example", int64(1)},
+		{"other.example", "suffix", "Example", int64(1)}, {"other.example", "suffix", "Example Blog", int64(1)}}, votes())
+
+	// The upsert refreshFields writes, setting every column, guarded to
+	// write nothing for a row as stored.
+	upsert := func(rules int, declared, suffixes string) int {
+		t.Helper()
+		return changes(upsertFieldsSQL, "d1", "local", "other.example", declared, suffixes, "Example",
+			"Kafka streams", "Saved kafka notes", "Reading / Queues", "example", "Ada", rules)
+	}
+	assert.Zero(t, upsert(2, "Example", `["Example", "Example Blog"]`), "a row as stored writes nothing")
+	assert.Equal(t, 1, upsert(3, "Example", `["Example", "Example Blog"]`),
+		"a new rules version writes the row alone, no index entry")
+	assert.Equal(t, 1+3+3, upsert(3, "Other", `["Example Blog", "Other"]`),
+		"new contributions with the same text: the row, and its votes moved, three rows withdrawn and three "+
+			"added; no index entry")
+	integrity()
+	assert.Equal(t, [][]any{{"other.example", "declared", "Other", int64(1)},
+		{"other.example", "suffix", "Example Blog", int64(1)}, {"other.example", "suffix", "Other", int64(1)}}, votes())
+
+	assert.Greater(t, changes(`UPDATE document_fields SET title = 'Postgres replication', author = 'Edgar'
+		WHERE document_id = 'd1'`), 1, "the row, and the index's delete and insert")
+	integrity()
+	assert.Empty(t, match("kafka streams"), "the old title is gone")
+	assert.Equal(t, []string{"d1"}, match("kafka"), "the bookmark title still holds it")
+	assert.Equal(t, []string{"d1", "d2"}, match("postgres"))
+	assert.Equal(t, []string{"d1"}, match("edgar"))
+	assert.Empty(t, match("ada"))
+
+	exec(`UPDATE document_fields SET host = 'example.com', declared_site = 'Example', title_suffixes = '["Example"]'
+		WHERE document_id = 'd2'`)
+	exec(`UPDATE document_fields SET host = 'example.com', declared_site = 'Example', title_suffixes = '["Example"]'
+		WHERE document_id = 'd1'`)
+	assert.Equal(t, [][]any{{"example.com", "declared", "Example", int64(2)},
+		{"example.com", "suffix", "Example", int64(2)}}, votes(), "two documents hold each name")
+	exec(`DELETE FROM documents WHERE id = 'd2'`)
+	integrity()
+	assert.Equal(t, []string{"d1"}, match("postgres"), "the cascade took d2's row and its entry")
+	assert.Empty(t, match("grace"))
+	assert.Empty(t, dumpRows(t, db, `SELECT * FROM document_fields WHERE document_id = 'd2'`))
+	assert.Equal(t, [][]any{{"example.com", "declared", "Example", int64(1)},
+		{"example.com", "suffix", "Example", int64(1)}}, votes(), "and withdrew its votes")
+	exec(`DELETE FROM documents WHERE id = 'd1'`)
+	assert.Empty(t, votes(), "a name nobody holds has no row")
+}
+
 // bm25BeforeMigration008 is BM25Search's query before migration 008, over
 // the regular six-column chunks_fts.
 const bm25BeforeMigration008 = `

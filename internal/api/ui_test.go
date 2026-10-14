@@ -225,7 +225,9 @@ func TestUI_Status(t *testing.T) {
 	assert.Contains(t, body, `<th scope="col" class="num">Finished, 10m</th>`)
 	assert.Contains(t, body, `<td>fetch</td><td class="num">0 of 16</td><td class="num">1</td><td class="num">0</td>`,
 		"the new page's fetch job")
-	assert.Contains(t, body, `<span class="why">Working: 1 job waiting</span>`)
+	assert.Contains(t, body, `<td>cards</td><td class="num">0 of 1</td><td class="num">1</td><td class="num">0</td>`,
+		"the cards job the writes queued")
+	assert.Contains(t, body, `<span class="why">Working: 2 jobs waiting</span>`)
 	assert.Contains(t, body, `id="queue-pause" data-kind="pause"`)
 	assert.Contains(t, body, "1 job queued, and none finished in the last 10m.")
 	assert.Contains(t, body, `qwen3-embedding:0.6b<span class="sub">1024 dimensions</span>`)
@@ -561,6 +563,34 @@ func addSightings(t *testing.T, srv *apitest.Server, n int) {
 	}
 }
 
+// TestUI_SearchSavedHits: a result found by what it was saved as has no
+// passage: one line in its place says what it was saved as, and a dead
+// document's page is said to be gone, a failed one's not to be readable,
+// each with its original address; the result says it matched on bookmark
+// details.
+func TestUI_SearchSavedHits(t *testing.T) {
+	srv := apitest.Start(t, apitest.DocumentLists)
+	srv.AddDocument(t, "https://example.com/gone", store.DocStateDead)
+	srv.AddBookmark(t, "https://example.com/gone", store.SourceChrome, `Sourdough <b>"starters"</b>`,
+		"/Bookmarks Bar/Baking")
+	srv.AddDocument(t, "https://example.com/walled", store.DocStateFailed)
+	srv.AddBookmark(t, "https://example.com/walled", store.SourceChrome, "Sourdough levain", "")
+	srv.AddBookmark(t, "https://example.com/later", store.SourceSafari, "Sourdough hydration", "")
+
+	body := getPage(t, srv, "/ui/?q=sourdough", http.StatusOK)
+	assert.Equal(t, 3, strings.Count(body, `<li class="result">`))
+	assert.Contains(t, body, `<p class="saved-as" title="Saved as “Sourdough &lt;b&gt;&#34;starters&#34;&lt;/b&gt;” in Baking">`+
+		`Saved as “Sourdough &lt;b&gt;&#34;starters&#34;&lt;/b&gt;” in Baking</p>`)
+	assert.Contains(t, body, `<p class="saved-gone">Saved — the page is no longer available · `+
+		`<a href="https://example.com/gone" rel="noopener noreferrer" target="_blank">the original address</a></p>`)
+	assert.Contains(t, body, `<p class="saved-gone">Saved — the page couldn&#39;t be read · `+
+		`<a href="https://example.com/walled" rel="noopener noreferrer" target="_blank">the original address</a></p>`)
+	assert.Contains(t, body, `<p class="saved-as" title="Saved as “Sourdough hydration”">`)
+	assert.Equal(t, 2, strings.Count(body, `class="saved-gone"`), "the pending page is still there")
+	assert.Equal(t, 3, strings.Count(body, `<span class="badge badge-accent plain">bookmark details</span>`))
+	assert.NotContains(t, body, `class="snippet"`)
+}
+
 // TestUI_SearchPages: the results come 10 a page, each page the next 10 of
 // the one ranking POST /v1/search returns, with a pager whose links are
 // the query's pages; a page past the last is a 200 that says how many
@@ -573,7 +603,7 @@ func TestUI_SearchPages(t *testing.T) {
 	embeds, mu := 0, new(sync.Mutex)
 	srv := apitest.Start(t, func(d *api.Deps) {
 		emb := countingEmbedder{Embedder: apitest.Embedder{Dim: config.Default().Embedding.Dim}, calls: &embeds, mu: mu}
-		d.Search = search.New(d.Chunks, d.Documents, emb, search.Config{Log: slog.New(slog.DiscardHandler)})
+		d.Search = search.New(d.Chunks, d.Documents, d.Index, emb, search.Config{Log: slog.New(slog.DiscardHandler)})
 	})
 	addSightings(t, srv, 25)
 	ranking := make([]string, 0, 25)
@@ -699,7 +729,7 @@ func TestUI_SearchNamedByBookmark(t *testing.T) {
 // keyword results under the engine's warning.
 func TestUI_SearchDegraded(t *testing.T) {
 	srv := apitest.Start(t, func(d *api.Deps) {
-		d.Search = search.New(d.Chunks, d.Documents, failingEmbedder{}, search.Config{Log: slog.New(slog.DiscardHandler)})
+		d.Search = search.New(d.Chunks, d.Documents, d.Index, failingEmbedder{}, search.Config{Log: slog.New(slog.DiscardHandler)})
 	})
 	doc := titled(t, srv, "https://example.com/kafka", "Kafka partitions", store.DocStateFetched)
 	srv.AddContent(t, doc, "kafka partitions")
@@ -730,7 +760,7 @@ func TestUI_SearchEmptyQuery(t *testing.T) {
 	calls, mu := 0, new(sync.Mutex)
 	srv := apitest.Start(t, func(d *api.Deps) {
 		emb := countingEmbedder{Embedder: apitest.Embedder{Dim: config.Default().Embedding.Dim}, calls: &calls, mu: mu}
-		d.Search = search.New(d.Chunks, d.Documents, emb, search.Config{Log: slog.New(slog.DiscardHandler)})
+		d.Search = search.New(d.Chunks, d.Documents, d.Index, emb, search.Config{Log: slog.New(slog.DiscardHandler)})
 	})
 	for _, q := range []string{"", "?q=", "?q=%20%20", "?content_type=video"} {
 		assert.Contains(t, getPage(t, srv, "/ui/"+q, http.StatusOK), `<div class="landing">`, q)
@@ -908,7 +938,7 @@ func TestUI_SearchType(t *testing.T) {
 	embeds, mu := 0, new(sync.Mutex)
 	srv := apitest.Start(t, func(d *api.Deps) {
 		emb := countingEmbedder{Embedder: apitest.Embedder{Dim: config.Default().Embedding.Dim}, calls: &embeds, mu: mu}
-		d.Search = search.New(d.Chunks, d.Documents, emb, search.Config{Log: slog.New(slog.DiscardHandler)})
+		d.Search = search.New(d.Chunks, d.Documents, d.Index, emb, search.Config{Log: slog.New(slog.DiscardHandler)})
 	})
 	article := titled(t, srv, "https://example.com/article", "Kafka article", store.DocStateFetched)
 	srv.AddContent(t, article, "kafka partitions explained")
@@ -1535,6 +1565,10 @@ func TestUI_Document(t *testing.T) {
 	assert.NotContains(t, body, `class="callout callout-danger`)
 	assert.Contains(t, body, "<code>curio refetch "+doc.ID+"</code>")
 	assert.Contains(t, body, "<code>curio reindex "+doc.ID+"</code>")
+	assert.NotContains(t, body, " words</span>", "no count before an index")
+	require.NoError(t, srv.Deps.Documents.MarkFetched(context.Background(), doc.ID, 1234))
+	assert.Contains(t, getPage(t, srv, "/ui/documents/"+doc.ID, http.StatusOK),
+		`<span class="text">1,234 words</span>`, "an index's count")
 
 	for _, on := range []string{"1", "true"} {
 		images := getPageCSP(t, srv, "/ui/documents/"+doc.ID+"?images="+on, http.StatusOK, ui.CSPWithImages)

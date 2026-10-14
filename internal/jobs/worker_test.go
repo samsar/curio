@@ -111,7 +111,7 @@ func TestWorker_JobInterruptedByShutdownIsRequeued(t *testing.T) {
 
 			// One earlier real failure, so there is an attempt and a
 			// last_error that must survive the interruption.
-			_, err := deps.Queue.ClaimNext(ctx, nil)
+			_, err := deps.Queue.ClaimNext(ctx, []store.JobKind{store.JobKindFetch})
 			require.NoError(t, err)
 			_, err = deps.Queue.MarkFailed(ctx, job.ID, "earlier failure", true)
 			require.NoError(t, err)

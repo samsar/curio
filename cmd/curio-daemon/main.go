@@ -221,6 +221,10 @@ func start(ctx context.Context, cfg config.Config, home *curiohome.Home, meta cu
 		}
 		return nil, err
 	}
+	fields, err := ensureDocumentFields(ctx, db)
+	if err != nil {
+		return nil, err
+	}
 	// sqlite-vec's build flags say whether a released binary has its NEON
 	// distance kernels. Only this log line reads them, so a sqlite-vec that
 	// words its vec_debug() differently costs the line its flags, not the
@@ -236,7 +240,7 @@ func start(ctx context.Context, cfg config.Config, home *curiohome.Home, meta cu
 	syncMarkerSchemaVersion(home, meta, int(schemaVersion))
 	startup.SetInitializing()
 
-	d, err := newDaemon(ctx, cfg, home, meta.EmbeddingDim, db)
+	d, err := newDaemon(ctx, cfg, home, meta.EmbeddingDim, db, fields)
 	if err != nil {
 		return nil, err
 	}
@@ -257,6 +261,35 @@ func start(ctx context.Context, cfg config.Config, home *curiohome.Home, meta cu
 		d.scheduler.Check(ctx)
 	}
 	return d, nil
+}
+
+// ensureDocumentFields makes the documents' search fields right before any
+// search reads them (sqlite.EnsureDocumentFields): it repairs their index
+// when it disagrees with them, and derives the fields a new home, an
+// upgrade or a change of the derivation's rules left missing. It never
+// fails the start but for a shutdown during it: a daemon that can't do
+// this still serves everything but a complete search, where failing would
+// leave launchd restarting it every 10 s for as long as the fault lasts,
+// serving nothing. What it found is reported on healthz, for status and
+// doctor, and the next start tries again.
+func ensureDocumentFields(ctx context.Context, db *sqlitestore.DB) (api.DocumentFields, error) {
+	done, err := sqlitestore.EnsureDocumentFields(ctx, db)
+	fields := api.DocumentFields{CheckedAt: time.Now(), Rebuilt: done.Rebuilt}
+	if done.Rebuilt {
+		slog.Warn("document fields: their search index didn't match them; rebuilt it from them")
+	}
+	switch {
+	case err != nil && ctx.Err() != nil:
+		return api.DocumentFields{}, err
+	case err != nil:
+		slog.Error("document fields: couldn't check or derive the documents' search fields; search may miss "+
+			"documents until a start does, and the next start tries again", "err", err)
+		fields.Error = err.Error()
+		return fields, nil
+	}
+	slog.Info("document fields refreshed", "rebuilt", done.Rebuilt, "documents", done.Documents, "hosts", done.Hosts,
+		"cards_stale", done.CardsStale, "took_ms", done.Took.Milliseconds())
+	return fields, nil
 }
 
 // migrationHooks log each migration and report it through startup, which
@@ -351,13 +384,15 @@ type daemon struct {
 }
 
 // newDaemon builds the stores, clients, engines and pools over db, whose
-// vector index is dim wide.
+// vector index is dim wide; fields is what the start did to the documents'
+// search fields, which healthz reports.
 func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim int,
-	db *sqlitestore.DB) (*daemon, error) {
+	db *sqlitestore.DB, fields api.DocumentFields) (*daemon, error) {
 	docs := sqlitestore.NewDocuments(db)
 	exts := sqlitestore.NewExtractions(db)
 	bms := sqlitestore.NewBookmarks(db)
 	chunks := sqlitestore.NewChunks(db, dim)
+	index := sqlitestore.NewDocumentIndex(db, dim)
 	queue := sqlitestore.NewJobs(db)
 	insights := sqlitestore.NewInsights(db)
 
@@ -394,8 +429,9 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 		ChunkSize:      cfg.Chunking.SizeTokens,
 		ChunkOverlap:   cfg.Chunking.OverlapTokens,
 		DocumentPrefix: cfg.Embedding.DocumentPrefix,
+		Log:            slog.Default(),
 	})
-	engine := search.New(chunks, docs, emb, search.ConfigFrom(cfg))
+	engine := search.New(chunks, docs, index, emb, search.ConfigFrom(cfg))
 
 	// A change of build is verified by re-embedding a sample through the
 	// indexer, so the requests are the ones that made the stored vectors,
@@ -418,6 +454,7 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 		Queue:       queue,
 		Dispatcher:  dispatcher,
 		Indexer:     idx,
+		Cards:       index,
 		Log:         slog.Default(),
 	}
 	// With insight off nothing is rebuilt or placed on its own: there is
@@ -455,6 +492,7 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 		Extractions:     exts,
 		Bookmarks:       bms,
 		Chunks:          chunks,
+		Index:           index,
 		Queue:           queue,
 		Embedder:        emb,
 		GenerationModel: cfg.Generation.Model,
@@ -469,6 +507,7 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 		KeepAwake:       keeper,
 		YouTubeFetcher:  routed.ytdlp,
 		GitHubToken:     routed.githubToken,
+		DocumentFields:  fields,
 		Log:             slog.Default(),
 	}
 	if scheduler != nil {

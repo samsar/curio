@@ -341,9 +341,10 @@ The fix is
 curio reindex --all
 ```
 
-which re-embeds every fetched document and takes the build serving now as
-the new baseline. Search mixes old and new vectors until the index jobs
-finish. The daemon never reindexes by itself.
+which re-embeds every fetched document and every document's card, and
+takes the build serving now as the new baseline. Search mixes old and new
+vectors until the index jobs and the cards job finish. The daemon never
+reindexes by itself.
 
 ## Fetcher options
 
@@ -768,6 +769,55 @@ database as it is, and once you upgrade again the map is drawn anew (see
 `insight.map` from `config.yaml` first, though: 2.5.x doesn't know the key,
 so its daemon refuses to start and its commands refuse to run.
 
+## Search
+
+Search ranks five lists and fuses them: the passages of each page's text
+by keywords (BM25) and by meaning (the vectors), and each document by
+what it was saved as: its title, bookmark titles, folders, site and
+author by keywords (the *fields*), its title and bookmark titles holding
+every word of a query of two words or more (the *titles*), and its
+*card*, a short text of the same facts, by meaning. The document lists
+also find bookmarks whose page failed or went dead, shown without a
+passage. Each list's weight is a key under `search:`, and 0 turns that
+list off:
+
+| Key | Default | What it does |
+|---|---|---|
+| `search.bm25_weight` | 1 | the passages by keywords |
+| `search.vector_weight` | 1 | the passages by meaning |
+| `search.fields_weight` | 0.25 | the documents by their saved title, bookmark titles, folders, site and author |
+| `search.cards_weight` | 0.5 | the documents by their cards' meaning |
+| `search.title_weight` | 2 | the documents whose title and bookmark titles hold every word of the query between them, for a query of two distinct words or more that aren't stopwords: what puts a bookmark you search for by the title you saved it under on the first page |
+
+Each weight is a number, 0 or more, and not all five may be 0. With
+`vector_weight` and `cards_weight` both 0 the query is never embedded, so
+search never waits on Ollama. When Ollama doesn't answer, search ranks by
+keywords alone (BM25, the fields and the titles) and says so
+(`degraded`).
+
+The cards are embedded by queued work, the `cards` job, on a pool of its
+own: after an import, after a fetch changes what a page is saved as, and
+at the daemon's start when any card is stale. It runs about 10 s after the
+change that queued it, so the changes of an import share one job; until
+then the fields and title lists find the page. Like the other jobs it
+waits while the queue is paused or outside its schedule, and while Ollama
+doesn't answer it waits too, trying again every few minutes (at most 5)
+for up to a day. One that fails for good, say a model that answers at
+another width, is tried again an hour later while cards are left. `curio
+status` prints a `cards:` line with the cards left to embed, and `curio
+doctor`'s `cards` check warns when cards are left with no cards job queued
+(restart the daemon: its start queues one) or when the job waiting carries
+an error. `curio reindex --all` embeds every card again. Upgrading to 2.7
+derives every document's fields at the daemon's first start (seconds for
+thousands of documents) and queues the cards job, which embeds one card
+per document. If you set `vector_weight: 0` to keep search off Ollama, set
+`cards_weight: 0` too: the cards list embeds the query as well.
+
+Going back to curio 2.6.x, remove `search.fields_weight`,
+`search.cards_weight` and `search.title_weight` from `config.yaml` first:
+2.6.x doesn't know the keys, so its daemon refuses to start and its
+commands refuse to run.
+
 ## Config: time budgets for Ollama calls
 
 Each bounds how long one kind of work waits on Ollama; all are validated as
@@ -821,6 +871,30 @@ one from the content it already has and returns it to `fetched`, and
 `curio refetch --all --state=failed` retries every failed document. A
 search query that long falls back to keyword results with the same reason
 in its warning.
+
+**`database disk image is malformed`** on a save, a fetch or a delete,
+or **`search fields` failing in `curio doctor`** — the full-text index of
+the documents' search fields (`document_fields_fts`) no longer matches
+the fields, or the database itself is damaged. Restart the daemon (`curio
+daemon stop`; the next command starts it): its start checks the index
+against the fields and rebuilds it when they disagree, in well under a
+second, and `curio doctor` then says when it checked and that it rebuilt
+the index. A start that can't check them still serves, but search may
+miss documents; `curio status` warns of it, and `curio doctor`'s `search
+fields` check shows the error. To check by hand, with the daemon stopped
+(`curio daemon stop`), macOS's own `sqlite3` will do:
+
+```
+sqlite3 ~/.curio/curio.db "INSERT INTO document_fields_fts (document_fields_fts, rank) VALUES ('integrity-check', 1)"
+sqlite3 ~/.curio/curio.db "INSERT INTO document_fields_fts (document_fields_fts) VALUES ('rebuild')"
+sqlite3 ~/.curio/curio.db "PRAGMA integrity_check"
+```
+
+The first checks the index (no output when it matches; "database disk
+image is malformed" when it doesn't), the second rebuilds it from the
+fields, and the third checks the database itself, which answers `ok` when
+it is sound. If that one reports damage, keep a copy of the home before
+anything else (`cp -R ~/.curio ~/.curio.damaged`).
 
 **`curio home from an older curio`** — the home was made by a curio from
 before home formats: its vectors came from another embedding model, under

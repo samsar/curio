@@ -9,8 +9,9 @@ package pointers), where the result deviates from the plan, and what was
 deferred. Design reasoning lives in `docs/decisions.md`.
 
 **Where things stand:** M0–M4 are shipped. M6 is under way ahead of M5: its
-first PR, the search evaluation and model roles, is merged. **Next: M6's
-metadata search.**
+first PR, the search evaluation and model roles, is merged, and its
+second, metadata search, is done. **Next: the rest of M6's 2.7 search
+work.**
 
 ## M0 — Walking skeleton
 
@@ -272,6 +273,28 @@ before it:
   exactly (decisions.md "Search evaluation: graded, per kind, on a copy,
   never in the repo" and "Model roles: a provider and model per use,
   inheriting generation's").
+- PR 2a, done: metadata search. Each document's title, bookmark titles,
+  folders, site and author are searchable fields (`document_fields`, BM25)
+  and make its card, a short text embedded once by a `cards` job on a pool
+  of its own (`document_cards`); site names come from the page, else the
+  name its host's pages agree on, else a short table of public sites.
+  Both lists are fused into the ranking after the chunks, weighted by
+  `search.fields_weight` and `search.cards_weight` (0.25 and 0.5, chosen
+  on the owner's copy), with a third, the title list
+  (`search.title_weight` 2: the documents whose title and bookmark titles
+  hold every word of a query of two words or more), and all three reach
+  failed and dead bookmarks, which every client shows without a passage,
+  saying what they were saved as. The cards job runs 10 s after the
+  change that queued it, so an import's changes share one.
+  `documents.word_count` is written at last. `searcheval` gains the
+  `fields`, `cards` and `titles` variants, reachability per variant and
+  the card fill. On the owner's copy, all queries' nDCG@10 went from 0.590
+  to 0.655 and the owner-tagged ones' from 0.288 to 0.342, with search's
+  p50 no slower than PR 1's; and a failed or dead bookmark searched by the
+  title it was saved under, which before ranked 45th at the median and
+  never on the first page, is first for 97.7% of such queries and on the
+  first page for all (decisions.md "Metadata search: a fields index and a
+  card per document").
 
 ## M7 — Hosted mode
 

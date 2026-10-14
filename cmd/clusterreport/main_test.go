@@ -52,7 +52,7 @@ func newCopy(t *testing.T, dir, name string, n int, vector func(i int) []float32
 		require.NoError(t, docs.SetCurrentExtraction(ctx, doc.ID, ext.ID))
 		require.NoError(t, chunks.ReplaceForDocument(ctx, doc.ID, ext.ID, "", nil,
 			[]store.ChunkInput{{Text: "text", Embedding: vector(i)}}))
-		require.NoError(t, docs.MarkFetched(ctx, doc.ID))
+		require.NoError(t, docs.MarkFetched(ctx, doc.ID, 0))
 	}
 	return path
 }

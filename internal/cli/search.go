@@ -9,6 +9,7 @@ import (
 
 	"github.com/samsar/curio/internal/client"
 	"github.com/samsar/curio/internal/daemonctl"
+	"github.com/samsar/curio/internal/docmeta"
 	"github.com/samsar/curio/internal/textutil"
 )
 
@@ -67,8 +68,11 @@ func renderSearchResults(w io.Writer, res *client.SearchResponse) {
 		len(res.Items), res.Query, res.BM25Hits, res.VectorHits)
 	for i, hit := range res.Items {
 		title := hit.Document.URL
-		if hit.Document.Title != nil && *hit.Document.Title != "" {
+		switch {
+		case hit.Document.Title != nil && *hit.Document.Title != "":
 			title = *hit.Document.Title
+		case hit.BookmarkTitle != "":
+			title = hit.BookmarkTitle
 		}
 		fmt.Fprintf(w, "%2d. %s\n", i+1, title)
 		fmt.Fprintf(w, "    %s   (score %.4f)\n", hit.Document.URL, hit.Score)
@@ -92,9 +96,47 @@ func renderSearchResults(w io.Writer, res *client.SearchResponse) {
 			for _, line := range wrapLines(snippet, 100) {
 				fmt.Fprintf(w, "    %s\n", line)
 			}
+		} else {
+			renderSavedAs(w, hit)
 		}
 		fmt.Fprintln(w)
 	}
+}
+
+// renderSavedAs says what a hit without a matching passage matched on:
+// the bookmark it was saved as, and for a failed or dead document, why it
+// has no page to read.
+func renderSavedAs(w io.Writer, hit client.SearchHit) {
+	if saved := savedAs(hit.Bookmarks); saved != "" {
+		for _, line := range wrapLines("saved as: "+saved, 100) {
+			fmt.Fprintf(w, "    %s\n", line)
+		}
+	}
+	if why := docmeta.Unavailable(hit.Document.State); why != "" {
+		fmt.Fprintf(w, "    %s (%s); its bookmark matched\n", why, hit.Document.State)
+	}
+}
+
+// savedAs is what the bookmark docmeta.SavedAs picks says: its title and
+// its folder, the parts it has, joined by " · ".
+func savedAs(bookmarks []client.SearchHitBookmark) string {
+	saved, _ := docmeta.SavedAs(docmetaBookmarks(bookmarks))
+	var parts []string
+	for _, p := range []string{saved.Title, saved.Folder} {
+		if p != "" {
+			parts = append(parts, p)
+		}
+	}
+	return strings.Join(parts, " · ")
+}
+
+// docmetaBookmarks are bookmarks as docmeta reads them.
+func docmetaBookmarks(bookmarks []client.SearchHitBookmark) []docmeta.Bookmark {
+	out := make([]docmeta.Bookmark, len(bookmarks))
+	for i, b := range bookmarks {
+		out[i] = docmeta.Bookmark{Title: b.Title, FolderPath: b.FolderPath}
+	}
+	return out
 }
 
 // truncate caps s at n runes, marking a cut with "...". Widths count runes,
