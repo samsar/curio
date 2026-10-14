@@ -1397,7 +1397,14 @@ components:
           type: object
           description: Jobs per status; statuses with none are absent.
           additionalProperties: { type: integer }
-      required: [version, bookmarks_total, documents_total]
+        cards_stale:
+          type: integer
+          description: >
+            The documents' cards left to embed: those whose text changed
+            since their vector was made, or that have none. The cards job
+            embeds them; a backlog that stays with no cards job pending or
+            running is one `curio doctor` warns of.
+      required: [version, bookmarks_total, documents_total, cards_stale]
 
     Metrics:
       type: object

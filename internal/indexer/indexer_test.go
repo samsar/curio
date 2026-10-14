@@ -1,9 +1,12 @@
 package indexer
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"testing"
@@ -502,4 +505,47 @@ func TestIndexer_EmbedStaleCards_EmbedFailure(t *testing.T) {
 	require.ErrorIs(t, err, embedder.ErrInputTooLong)
 	assert.Contains(t, err.Error(), "embed cards")
 	assert.Equal(t, 32, n)
+}
+
+// TestIndexer_EmbedStaleCards_LogsProgress: a pass says how far it got
+// once each 500 cards it stores, against the stale cards it began with,
+// and a pass of fewer cards says nothing.
+func TestIndexer_EmbedStaleCards_LogsProgress(t *testing.T) {
+	db := sqlitetest.NewDB(t)
+	dim := sqlitetest.Width(t, db)
+	cards := sqlitestore.NewDocumentIndex(db, dim)
+	seedCards(t, db, "local", 1100)
+	var logs bytes.Buffer
+	idx := New(sqlitestore.NewChunks(db, dim), &batchRecorder{dim: dim},
+		Options{EmbedBatchSize: 100, Log: slog.New(slog.NewJSONHandler(&logs, nil))})
+
+	n, err := idx.EmbedStaleCards(context.Background(), cards, "local")
+	require.NoError(t, err)
+	require.Equal(t, 1100, n)
+	type line struct {
+		Msg      string `json:"msg"`
+		Embedded int    `json:"embedded"`
+		Of       int    `json:"of"`
+		TookMS   *int64 `json:"took_ms"`
+	}
+	var got []line
+	for raw := range strings.Lines(logs.String()) {
+		var l line
+		require.NoError(t, json.Unmarshal([]byte(raw), &l))
+		require.Equal(t, "cards embedding", l.Msg)
+		require.NotNil(t, l.TookMS)
+		got = append(got, line{Msg: l.Msg, Embedded: l.Embedded, Of: l.Of})
+	}
+	assert.Equal(t, []line{{"cards embedding", 500, 1100, nil}, {"cards embedding", 1000, 1100, nil}}, got)
+
+	docs := sqlitestore.NewDocuments(db)
+	for i := range 40 {
+		require.NoError(t, docs.Create(context.Background(), &store.Document{TenantID: "local",
+			URL: fmt.Sprintf("https://example.org/%d", i)}))
+	}
+	logs.Reset()
+	n, err = idx.EmbedStaleCards(context.Background(), cards, "local")
+	require.NoError(t, err)
+	assert.Equal(t, 40, n)
+	assert.Empty(t, logs.String(), "a pass of fewer cards says nothing")
 }

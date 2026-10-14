@@ -188,6 +188,38 @@ func TestHealth_DocumentFields(t *testing.T) {
 	}
 }
 
+// failingStaleCount is a document index whose stale cards can't be
+// counted.
+type failingStaleCount struct{ store.DocumentIndex }
+
+func (failingStaleCount) CountStaleCards(context.Context, string) (int, error) { return 0, errInjected }
+
+// TestStats_CardsStale: stats counts the cards left to embed, the cards
+// job's backlog; one it can't count fails the whole answer, like the
+// other counts, and without a document index there are none.
+func TestStats_CardsStale(t *testing.T) {
+	stats := func(t *testing.T, s *testServer) map[string]any {
+		t.Helper()
+		resp := s.do(t, request{method: http.MethodGet, path: "/v1/stats"})
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		var got map[string]any
+		require.NoError(t, json.Unmarshal([]byte(resp.body), &got))
+		return got
+	}
+	s := newTestServer(t)
+	assert.InDelta(t, 0, stats(t, s)["cards_stale"], 0, "a new library has none, and says so")
+	s.seedDocument(t, "https://example.com/a", store.DocStateFetched)
+	s.seedDocument(t, "https://example.com/b", store.DocStatePending)
+	assert.InDelta(t, 2, stats(t, s)["cards_stale"], 0)
+
+	failing := newTestServer(t, func(d *Deps) { d.Index = failingStaleCount{d.Index} })
+	assertProblem(t, failing.do(t, request{method: http.MethodGet, path: "/v1/stats"}), http.StatusInternalServerError)
+
+	none := newTestServer(t, func(d *Deps) { d.Index = nil })
+	none.seedDocument(t, "https://example.com/a", store.DocStateFetched)
+	assert.InDelta(t, 0, stats(t, none)["cards_stale"], 0)
+}
+
 // driftMonitor is a DriftMonitor that reports report and counts
 // rebaselines, failing them with err.
 type driftMonitor struct {

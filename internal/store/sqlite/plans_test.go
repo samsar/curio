@@ -567,6 +567,15 @@ func documentIndexPlanCases(t *testing.T) []planCase {
 			avoid: []string{"idx_documents_tenant_"},
 		},
 		{
+			// The stale cards alone, never every document: 3 ms with the
+			// owner's 7,557 cards all stale.
+			name:  "CountStaleCards",
+			query: countStaleCardsSQL, args: []any{"local"},
+			first: "SCAN c USING INDEX idx_document_cards_stale",
+			want:  []string{document},
+			avoid: []string{"idx_documents_tenant_"},
+		},
+		{
 			name:  "PutCardVectors mark",
 			query: markCardEmbeddedSQL, args: []any{"text", "doc"},
 			first: cardByDoc,

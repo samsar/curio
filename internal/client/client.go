@@ -185,13 +185,15 @@ func (c *Client) Healthz(ctx context.Context) (*Health, error) {
 	return &h, nil
 }
 
-// Stats mirrors api.Stats.
+// Stats mirrors api.Stats. CardsStale is 0 from a daemon that predates
+// counting the cards left to embed.
 type Stats struct {
 	Version          string         `json:"version"`
 	BookmarksTotal   int            `json:"bookmarks_total"`
 	DocumentsTotal   int            `json:"documents_total"`
 	DocumentsByState map[string]int `json:"documents_by_state,omitempty"`
 	JobsByStatus     map[string]int `json:"jobs_by_status,omitempty"`
+	CardsStale       int            `json:"cards_stale"`
 }
 
 // Metrics mirrors api.MetricsResponse.

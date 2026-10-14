@@ -901,6 +901,9 @@ type DocumentIndex interface {
 	// StaleCards returns at most limit of the tenant's stale cards, by
 	// document ID, from the first after after ("" for the start).
 	StaleCards(ctx context.Context, tenantID, after string, limit int) ([]Card, error)
+	// CountStaleCards counts the tenant's stale cards: the cards left to
+	// embed.
+	CountStaleCards(ctx context.Context, tenantID string) (int, error)
 	// PutCardVectors stores each card's vector, in one transaction, for a
 	// card whose text is still the text the vector was made from; a card
 	// whose text changed since is left stale, without the vector. A

@@ -367,10 +367,14 @@ fields and its card again (`internal/docmeta`) in its own transaction,
 and a card whose text changed queues the cards job there too: at most one
 pending per tenant, due 10 s later (`sqlite.CardsJobDelay`), so the
 changes of a burst share it and it runs about 10 s after the change that
-queued it. The cards job embeds the stale cards in batches of
-32, under the queue gate like any job; an Ollama that doesn't answer
-defers it rather than failing it. See decisions.md "Metadata search: a
-fields index and a card per document".
+queued it. The cards job embeds the stale cards in batches of 32, under
+the queue gate like any job, logging how far it got every 500 cards; an
+Ollama that doesn't answer defers it, 1 to 5 minutes, rather than failing
+it, and one that fails for good queues the next an hour ahead while cards
+are stale. `/v1/stats` counts the cards left to embed (`cards_stale`),
+which `curio status` prints and `curio doctor` holds to a cards job
+pending or running. See decisions.md "Metadata search: a fields index and
+a card per document".
 
 ## Fetcher strategy selection
 

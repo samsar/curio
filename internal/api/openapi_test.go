@@ -191,7 +191,7 @@ func TestOpenAPI_StrictValidation(t *testing.T) {
 		assert.Error(t, jobRef.VisitJSON(v, validationOptions...), name)
 	}
 	var v any
-	require.NoError(t, json.Unmarshal([]byte(`{"documents_by_state":{"fetched":2},"version":"v","bookmarks_total":0,"documents_total":2}`), &v))
+	require.NoError(t, json.Unmarshal([]byte(`{"documents_by_state":{"fetched":2},"version":"v","bookmarks_total":0,"documents_total":2,"cards_stale":0}`), &v))
 	assert.NoError(t, schemas["Stats"].Value.VisitJSON(v, validationOptions...), "declared maps stay open")
 }
 

@@ -146,9 +146,9 @@ func (r *doctorReport) print(w io.Writer) {
 }
 
 // runOwnChecks adds the checks curio up has no part in: the upstreams
-// fetches depend on, the interests' rebuilds and the search fields, as the
-// daemon reports them, the fetcher, and whether the content directory is
-// writable. They
+// fetches depend on, the interests' rebuilds, the search fields and the
+// cards left to embed, as the daemon reports them, the fetcher, and
+// whether the content directory is writable. They
 // read config.yaml, or the defaults when it doesn't load (its own check
 // says why); with no home there is no daemon or content directory to
 // check.
@@ -174,7 +174,8 @@ func runOwnChecks(ctx context.Context, flags *rootFlags, d deps, r *doctorReport
 			cfg = loaded
 			githubToken = cfg.Fetcher.GitHub.Token != ""
 		}
-		health, err := client.New(daemonctl.BaseURL(cfg, *flags.daemonURL)).Healthz(ctx)
+		daemon := client.New(daemonctl.BaseURL(cfg, *flags.daemonURL))
+		health, err := daemon.Healthz(ctx)
 		if err == nil && daemonctl.SameHome(health.Home, path) {
 			// The services fetches depend on (the Jina fallback), as the
 			// daemon has seen them answer.
@@ -195,6 +196,9 @@ func runOwnChecks(ctx context.Context, flags *rootFlags, d deps, r *doctorReport
 				status, detail, hint := searchFieldsCheck(*f)
 				r.add("search fields", status, detail, hint)
 			}
+			// Whether the cards left to embed have a job to embed them.
+			status, detail, hint := cardsCheckOf(ctx, daemon)
+			r.add("cards", status, detail, hint)
 		}
 	}
 	status, detail, hint := githubCheck(githubToken, configPath)
@@ -242,6 +246,59 @@ func searchFieldsCheck(f client.DocumentFields) (status checkStatus, detail, hin
 			"and was rebuilt", at), ""
 	}
 	return statusOK, fmt.Sprintf("checked when the daemon started (%s)", at), ""
+}
+
+// cardsCheckOf asks c for the cards left to embed and the cards jobs
+// pending and running, and checks them (cardsCheck).
+func cardsCheckOf(ctx context.Context, c *client.Client) (status checkStatus, detail, hint string) {
+	stats, err := c.Stats(ctx)
+	if err != nil {
+		return statusWarn, "couldn't count the cards left to embed: " + err.Error(), ""
+	}
+	if stats.CardsStale == 0 {
+		return cardsCheck(0, nil, nil)
+	}
+	pending, err := cardsJobs(ctx, c, "pending")
+	if err != nil {
+		return statusWarn, "couldn't list the cards jobs: " + err.Error(), ""
+	}
+	running, err := cardsJobs(ctx, c, "running")
+	if err != nil {
+		return statusWarn, "couldn't list the cards jobs: " + err.Error(), ""
+	}
+	return cardsCheck(stats.CardsStale, pending, running)
+}
+
+// cardsJobs lists the cards jobs of status, the newest alone: a tenant has
+// at most one pending, and one runs at a time.
+func cardsJobs(ctx context.Context, c *client.Client, status string) ([]client.Job, error) {
+	list, err := c.ListJobs(ctx, client.JobListOpts{Kind: "cards", Status: status, Limit: 1})
+	if err != nil {
+		return nil, err
+	}
+	return list.Items, nil
+}
+
+// cardsCheck is doctor's check of the cards left to embed, stale of them,
+// given the cards jobs pending and running: fine while a job runs or waits
+// to run, a warning while the job waiting carries an error (deferred while
+// the embedding model doesn't answer, or retrying), and a warning when none
+// is queued, which a restart fixes: the daemon's start queues one.
+func cardsCheck(stale int, pending, running []client.Job) (status checkStatus, detail, hint string) {
+	left := fmt.Sprintf("%d cards to embed", stale)
+	switch {
+	case stale == 0:
+		return statusOK, "every card is embedded", ""
+	case len(running) > 0:
+		return statusOK, left + "; the cards job is running", ""
+	case len(pending) > 0 && pending[0].LastError == nil:
+		return statusOK, left + "; the cards job runs at " + localTime(pending[0].RunAfter), ""
+	case len(pending) > 0:
+		return statusWarn, left + "; the cards job waits to run at " + localTime(pending[0].RunAfter) + ": " +
+			*pending[0].LastError, "`curio jobs --status pending` shows it; it runs again by itself"
+	}
+	return statusWarn, left + ", and no cards job is queued to embed them",
+		"restart the daemon (`curio daemon stop`, then any curio command starts it): its start queues the job"
 }
 
 // githubCheck says whether GitHub requests carry a token. Without one

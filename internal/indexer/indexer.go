@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"time"
 
 	"github.com/samsar/curio/internal/embedder"
 	"github.com/samsar/curio/internal/store"
@@ -24,6 +26,7 @@ type Indexer struct {
 	opts      ChunkOptions
 	docPrefix string
 	batchSize int
+	log       *slog.Logger
 }
 
 // Options for constructing an Indexer.
@@ -38,6 +41,9 @@ type Options struct {
 	// EmbedBatchSize caps how many chunks go into one embed request.
 	// Default EmbedBatchSize.
 	EmbedBatchSize int
+	// Log is where EmbedStaleCards says how far a pass got. nil logs
+	// nothing.
+	Log *slog.Logger
 }
 
 // EmbedBatchSize bounds one embed request to at most 32 chunks of at most
@@ -58,7 +64,12 @@ func New(chunks store.ChunkStore, emb embedder.Embedder, opts Options) *Indexer 
 	if batch <= 0 {
 		batch = EmbedBatchSize
 	}
-	return &Indexer{chunks: chunks, embedder: emb, opts: co, docPrefix: opts.DocumentPrefix, batchSize: batch}
+	log := opts.Log
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
+	return &Indexer{chunks: chunks, embedder: emb, opts: co, docPrefix: opts.DocumentPrefix, batchSize: batch,
+		log: log}
 }
 
 // IndexInput is everything Index needs to do its work.
@@ -129,8 +140,14 @@ func (i *Indexer) EmbedChunks(ctx context.Context, texts []string) ([][]float32,
 // a vector only for a card that still holds the text embedded. A card that
 // changes behind the pass is left to the cards job its write queued. ctx
 // is checked before every batch; the batches stored before a failure stay
-// stored. embedded counts the vectors stored.
+// stored. embedded counts the vectors stored. A long pass says how far it
+// got (cardsProgress), against the stale cards counted as it began.
 func (i *Indexer) EmbedStaleCards(ctx context.Context, cards store.DocumentIndex, tenantID string) (int, error) {
+	of, err := cards.CountStaleCards(ctx, tenantID)
+	if err != nil {
+		return 0, fmt.Errorf("indexer: count stale cards: %w", err)
+	}
+	progress := cardsProgress{log: i.log, of: of, began: time.Now()}
 	embedded := 0
 	for after := ""; ; {
 		if err := ctx.Err(); err != nil {
@@ -160,8 +177,36 @@ func (i *Indexer) EmbedStaleCards(ctx context.Context, cards store.DocumentIndex
 			return embedded, fmt.Errorf("indexer: store card vectors: %w", err)
 		}
 		embedded += n
+		progress.stored(embedded)
 		after = batch[len(batch)-1].DocumentID
 	}
+}
+
+// cardsProgressEvery is how many cards stored apart a pass of
+// EmbedStaleCards says how far it got: about 7 s of embedding at the
+// owner's measured rate (7,557 cards in 108 s), so a fill of thousands
+// logs a line every few seconds and a job of a few cards none.
+const cardsProgressEvery = 500
+
+// cardsProgress says how far a pass of EmbedStaleCards got: one INFO
+// "cards embedding" each time the cards it stored pass a multiple of
+// cardsProgressEvery, with the stale cards it began with (of) and how long
+// it has run.
+type cardsProgress struct {
+	log   *slog.Logger
+	of    int
+	began time.Time
+	// logged is the multiple of cardsProgressEvery last logged.
+	logged int
+}
+
+// stored notes that the pass has stored embedded cards.
+func (p *cardsProgress) stored(embedded int) {
+	if embedded/cardsProgressEvery <= p.logged {
+		return
+	}
+	p.logged = embedded / cardsProgressEvery
+	p.log.Info("cards embedding", "embedded", embedded, "of", p.of, "took_ms", time.Since(p.began).Milliseconds())
 }
 
 // embed embeds texts in consecutive batches of at most batchSize, preserving

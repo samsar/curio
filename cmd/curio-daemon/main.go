@@ -429,6 +429,7 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 		ChunkSize:      cfg.Chunking.SizeTokens,
 		ChunkOverlap:   cfg.Chunking.OverlapTokens,
 		DocumentPrefix: cfg.Embedding.DocumentPrefix,
+		Log:            slog.Default(),
 	})
 	engine := search.New(chunks, docs, index, emb, search.ConfigFrom(cfg))
 

@@ -797,16 +797,21 @@ keywords alone (BM25, the fields and the titles) and says so
 
 The cards are embedded by queued work, the `cards` job, on a pool of its
 own: after an import, after a fetch changes what a page is saved as, and
-at the daemon's start when any card is stale. It runs about 10 s after
-the change that queued it, so the changes of an import share one job;
-until then the fields and title lists find the page. Like the other jobs
-it waits while the queue is paused or outside its schedule, and while
-Ollama doesn't answer it waits too, retrying for up to a day. `curio reindex
---all` embeds every card again. Upgrading to 2.7 derives every document's
-fields at the daemon's first start (seconds for thousands of documents)
-and queues the cards job, which embeds one card per document. If you set
-`vector_weight: 0` to keep search off Ollama, set `cards_weight: 0` too:
-the cards list embeds the query as well.
+at the daemon's start when any card is stale. It runs about 10 s after the
+change that queued it, so the changes of an import share one job; until
+then the fields and title lists find the page. Like the other jobs it
+waits while the queue is paused or outside its schedule, and while Ollama
+doesn't answer it waits too, trying again every few minutes (at most 5)
+for up to a day. One that fails for good, say a model that answers at
+another width, is tried again an hour later while cards are left. `curio
+status` prints a `cards:` line with the cards left to embed, and `curio
+doctor`'s `cards` check warns when cards are left with no cards job queued
+(restart the daemon: its start queues one) or when the job waiting carries
+an error. `curio reindex --all` embeds every card again. Upgrading to 2.7
+derives every document's fields at the daemon's first start (seconds for
+thousands of documents) and queues the cards job, which embeds one card
+per document. If you set `vector_weight: 0` to keep search off Ollama, set
+`cards_weight: 0` too: the cards list embeds the query as well.
 
 Going back to curio 2.6.x, remove `search.fields_weight`,
 `search.cards_weight` and `search.title_weight` from `config.yaml` first:

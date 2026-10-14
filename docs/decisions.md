@@ -13180,17 +13180,50 @@ transaction a batch, with the document prefix); `PutCardVectors` stores a
 vector only while the card still holds the text embedded, so a card
 changed meanwhile stays stale for the job its writer queued. An embed
 that got no answer (`ollama.ErrUnreachable`) defers the job, its attempt
-refunded, for half its age, between 1 and 30 minutes, within the day's
-deferral budget ("Waiting is not failing"); input too long and a wrong
-width are permanent; anything else retries through the queue. Cards are
-never marked failed: stale ones wait for the next job, which any card
-change, a reindex-all or the next start queues. `POST
-/v1/documents/reindex-all` makes every card stale (`ResetCards`, which
-queues the job), keeping the old vectors searchable until they are
-embedded again; the drift sampler stays chunks-only. `document_cards_vec`
-is created by `EnsureVectorIndex` at the home's width with its delete
-trigger, under the rules `chunks_vec` follows, and a new card vector
-table makes every card stale.
+refunded, for half its age, between 1 and 5 minutes, within the day's
+deferral budget ("Waiting is not failing"). Five minutes is what bounds
+the wait once Ollama answers again, since nothing tells the queue it came
+back, at a cost of at most 12 "job deferred" lines an hour through an
+outage; a deferred job is pending, so the card changes meanwhile join it.
+Input too long and a wrong width are permanent; anything else retries
+through the queue. `POST /v1/documents/reindex-all` makes every card stale
+(`ResetCards`, which queues the job), keeping the old vectors searchable
+until they are embedded again; the drift sampler stays chunks-only.
+`document_cards_vec` is created by `EnsureVectorIndex` at the home's
+width with its delete trigger, under the rules `chunks_vec` follows, and
+a new card vector table makes every card stale.
+
+**A cards job that fails for good queues the next an hour ahead.** It
+marks no document. Its permanent-failure hook (`retryCards`) queues the
+next cards job `cardsRetryDelay` (an hour) ahead through `EnqueueOnce`,
+which keeps a job already pending, while the tenant has stale cards, with
+one WARN naming the cause and when the next runs; so a job that failed for
+good (a verdict, its attempts spent, a day of deferrals, or an orphan out
+of attempts at start) never leaves stale cards without a job, where they
+used to wait for the next card change, reindex-all or start. An hour,
+after a verdict too: a model answering at another width stays one until
+it is fixed, which the drift monitor reports meanwhile, so the retry costs
+one failed job an hour and resumes by itself once it is. No periodic
+sweep instead: a loop queueing a job whenever stale cards have none would
+requeue every minute a job that fails at once for a verdict, and pacing
+it would need the backoff a job's `run_after` already gives; the interest
+scheduler doesn't run with insight off; and the drift monitor would couple
+two components for a convenience. Stale cards lack a job only when the
+hook's own write fails, which `curio doctor` shows.
+
+**The backlog is visible.** `GET /v1/stats` counts the cards left to
+embed (`cards_stale`, `DocumentIndex.CountStaleCards`: the stale index and
+each card's document by primary key, 3 ms with the owner's 7,557 cards
+all stale; a failure fails the answer, like the other counts). `curio
+status` prints a `cards:` line while any is left. `curio doctor`'s
+`cards` check passes while a cards job is running or pending without an
+error, warns while the pending job carries one (deferred or retrying),
+with the error and when it runs, and warns when stale cards have no job
+at all, its fix a restart, whose start queues one. A pass logs INFO
+"cards embedding" each 500 cards stored (embedded, of: the stale cards
+counted as it began, took_ms), through the indexer, so `searcheval`'s fill
+logs the same lines; a fill of the owner's 7,557 cards takes about 108 s,
+and used to log one line, at its end.
 
 **Card vectors are updated in place.** `PutCardVectors` UPDATEs a card's
 vector in `document_cards_vec` by its primary key, a vec0 point lookup,

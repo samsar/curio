@@ -381,3 +381,32 @@ func TestDocumentIndex_ReembedsDontGrowTheVectorTable(t *testing.T) {
 		assert.Equal(t, 1100, countRows(t, e.db, "document_cards_vec"))
 	}
 }
+
+// TestDocumentIndex_CountStaleCards: the count is the tenant's stale cards
+// alone, never an embedded one or another tenant's.
+func TestDocumentIndex_CountStaleCards(t *testing.T) {
+	e := newFieldsEnv(t)
+	ix := NewDocumentIndex(e.db, vecDim)
+	count := func(tenantID string) int {
+		t.Helper()
+		n, err := ix.CountStaleCards(e.ctx, tenantID)
+		require.NoError(t, err)
+		return n
+	}
+	assert.Zero(t, count("local"))
+	first := *e.ingest("https://example.com/0", store.SourceChrome, "Title 0", "").DocumentID
+	for i := 1; i < 3; i++ {
+		e.ingest(fmt.Sprintf("https://example.com/%d", i), store.SourceChrome, fmt.Sprint("Title ", i), "")
+	}
+	require.NoError(t, e.docs.Create(e.ctx, &store.Document{TenantID: "other", URL: "https://example.com/theirs"}))
+	assert.Equal(t, 3, count("local"))
+	assert.Equal(t, 1, count("other"))
+
+	_, err := ix.PutCardVectors(e.ctx, []store.CardVector{{DocumentID: first, Text: e.card(first),
+		Embedding: fillVec(0.1)}})
+	require.NoError(t, err)
+	assert.Equal(t, 2, count("local"), "an embedded card isn't stale")
+	e.embedStaleCards(ix, 0.2)
+	assert.Zero(t, count("local"))
+	assert.Equal(t, 1, count("other"), "another tenant's cards are theirs")
+}

@@ -104,6 +104,9 @@ func printStatus(ctx context.Context, w io.Writer, env *daemonctl.Env) (answerin
 		if len(stats.JobsByStatus) > 0 {
 			fmt.Fprintf(w, "jobs:      %s\n", formatMap(stats.JobsByStatus))
 		}
+		if stats.CardsStale > 0 {
+			fmt.Fprintf(w, "cards:     %d to embed\n", stats.CardsStale)
+		}
 	}
 	printQueue(ctx, w, env.Client)
 

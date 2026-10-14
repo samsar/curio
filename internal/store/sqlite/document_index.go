@@ -263,6 +263,23 @@ func (x *DocumentIndex) StaleCards(ctx context.Context, tenantID, after string, 
 	return out, nil
 }
 
+// countStaleCardsSQL counts the tenant's stale cards, walking
+// idx_document_cards_stale and each card's document by primary key, its
+// tenant checked there (+d.tenant_id), as staleCardsSQL does: written
+// plainly, SQLite walks the tenant's documents instead.
+const countStaleCardsSQL = `SELECT count(*) FROM document_cards c
+	JOIN documents d ON d.id = c.document_id
+	WHERE c.embedded_text IS NOT c.text AND +d.tenant_id = ?`
+
+// CountStaleCards implements store.DocumentIndex.
+func (x *DocumentIndex) CountStaleCards(ctx context.Context, tenantID string) (int, error) {
+	var n int
+	if err := x.db.QueryRowContext(ctx, countStaleCardsSQL, tenantID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count stale cards: %w", err)
+	}
+	return n, nil
+}
+
 // The statements of PutCardVectors. A card is marked embedded only while
 // its text is the text embedded, and only then does its vector change:
 // vec0 has no upsert, so the vector is updated in place, a point lookup by

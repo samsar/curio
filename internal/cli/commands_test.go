@@ -1026,7 +1026,7 @@ func TestDoctor(t *testing.T) {
 	out, err := w.run(t, "doctor")
 	require.NoError(t, err, out)
 	for _, name := range []string{"machine", "curio home", "config", "ollama", "models", "daemon", "launchd",
-		"embeddings", "interests", "search fields", "github", "fetcher", "content dir"} {
+		"embeddings", "interests", "search fields", "cards", "github", "fetcher", "content dir"} {
 		line, _ := doctorLine(t, out, name)
 		assert.Equal(t, "✓", markerOf(line), line)
 	}
@@ -1179,6 +1179,29 @@ func TestDoctor_SearchFields(t *testing.T) {
 		"disk I/O error; search may miss documents", "search fields", localTime(checked)), line)
 	assert.Contains(t, hint, "restart the daemon: `curio daemon stop`")
 	assert.Contains(t, out, "1 failure(s), 0 warning(s)")
+}
+
+// TestDoctor_Cards: cards left to embed pass doctor while their job waits
+// to run, and warn once no cards job is queued, with the restart that
+// queues one.
+func TestDoctor_Cards(t *testing.T) {
+	w := upWorld(t)
+	w.srv.AddDocument(t, "https://example.com/a", store.DocStateFetched)
+	w.srv.AddDocument(t, "https://example.com/b", store.DocStateFetched)
+	out, err := w.run(t, "doctor")
+	require.NoError(t, err, out)
+	line, hint := doctorLine(t, out, "cards")
+	assert.Equal(t, "✓", markerOf(line), line)
+	assert.Contains(t, line, "2 cards to embed; the cards job runs at ")
+	assert.Empty(t, hint)
+
+	_, err = w.srv.DB.Exec(`DELETE FROM jobs WHERE kind = 'cards'`)
+	require.NoError(t, err)
+	out, err = w.run(t, "doctor")
+	require.NoError(t, err, out)
+	line, hint = doctorLine(t, out, "cards")
+	assert.Equal(t, fmt.Sprintf("! %-22s 2 cards to embed, and no cards job is queued to embed them", "cards"), line)
+	assert.Contains(t, hint, "its start queues the job")
 }
 
 func TestReindex_HelpNamesDrift(t *testing.T) {

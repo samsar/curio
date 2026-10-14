@@ -37,8 +37,10 @@ const clusterPoolSize = 1
 //     recorded the interest scheduler is asked to check, so its state
 //     moves on from rebuilding at once.
 //   - cards: the stale document cards embedded on one goroutine, so card
-//     work never takes an index slot and runs once at a time. No hook: a
-//     cards job that fails marks no document.
+//     work never takes an index slot and runs once at a time. Its hook
+//     marks no document: it queues the next cards job an hour ahead while
+//     cards are stale, so a job that failed for good leaves none without
+//     a job.
 func NewPools(d Deps, sizes PoolSizes, opts WorkerOptions) []Pool {
 	fetch := NewWorker(d.Queue, opts)
 	fetch.Register(store.JobKindFetch, fetchHandler(d))
@@ -55,6 +57,7 @@ func NewPools(d Deps, sizes PoolSizes, opts WorkerOptions) []Pool {
 
 	cards := NewWorker(d.Queue, opts)
 	cards.Register(store.JobKindCards, cardsHandler(d))
+	cards.OnPermanentFailure(store.JobKindCards, retryCards(d))
 
 	return []Pool{
 		{Name: "fetch", Kind: store.JobKindFetch, Worker: fetch, Size: sizes.Fetch},

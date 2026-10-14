@@ -15,6 +15,7 @@ import (
 	"github.com/samsar/curio/internal/api"
 	"github.com/samsar/curio/internal/api/apitest"
 	"github.com/samsar/curio/internal/client"
+	"github.com/samsar/curio/internal/store"
 )
 
 func TestHomeMismatchWarning(t *testing.T) {
@@ -260,6 +261,51 @@ func TestSearchFieldsCheck(t *testing.T) {
 			}
 			assert.Contains(t, hint, tc.hintContains)
 			assert.Contains(t, hint, "docs/setup.md")
+		})
+	}
+}
+
+// TestStatus_Cards: status counts the cards left to embed, and prints no
+// line while none is.
+func TestStatus_Cards(t *testing.T) {
+	srv := apitest.Start(t)
+	assert.NotContains(t, mustRun(t, srv, "status"), "cards:")
+	srv.AddDocument(t, "https://example.com/a", store.DocStateFetched)
+	srv.AddDocument(t, "https://example.com/b", store.DocStatePending)
+	assert.Contains(t, mustRun(t, srv, "status"), "\ncards:     2 to embed\n")
+}
+
+// TestCardsCheck: doctor passes cards left to embed while a cards job runs
+// or waits to run, and warns while the job waiting carries an error or
+// none is queued.
+func TestCardsCheck(t *testing.T) {
+	due := time.Date(2026, 10, 14, 9, 30, 0, 0, time.UTC)
+	waiting := "waiting for the embedding model to answer"
+	for name, tc := range map[string]struct {
+		stale            int
+		pending, running []client.Job
+		status           checkStatus
+		detail, hint     string
+	}{
+		"none stale": {0, nil, nil, statusOK, "every card is embedded", ""},
+		"none stale, a job deferred": {0, []client.Job{{RunAfter: due, LastError: &waiting}}, nil, statusOK,
+			"every card is embedded", ""},
+		"a job running": {12, nil, []client.Job{{}}, statusOK, "12 cards to embed; the cards job is running", ""},
+		"a job pending": {12, []client.Job{{RunAfter: due}}, nil, statusOK,
+			"12 cards to embed; the cards job runs at " + localTime(due), ""},
+		"a job deferred": {12, []client.Job{{RunAfter: due, LastError: &waiting}}, nil, statusWarn,
+			"12 cards to embed; the cards job waits to run at " + localTime(due) + ": " + waiting,
+			"`curio jobs --status pending` shows it; it runs again by itself"},
+		"a job running, another deferred": {12, []client.Job{{RunAfter: due, LastError: &waiting}}, []client.Job{{}},
+			statusOK, "12 cards to embed; the cards job is running", ""},
+		"no job": {12, nil, nil, statusWarn, "12 cards to embed, and no cards job is queued to embed them",
+			"restart the daemon (`curio daemon stop`, then any curio command starts it): its start queues the job"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			status, detail, hint := cardsCheck(tc.stale, tc.pending, tc.running)
+			assert.Equal(t, tc.status, status)
+			assert.Equal(t, tc.detail, detail)
+			assert.Equal(t, tc.hint, hint)
 		})
 	}
 }

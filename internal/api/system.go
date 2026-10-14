@@ -277,13 +277,15 @@ func (d Deps) generationRoles() map[string]string {
 	return d.GenerationRoles
 }
 
-// Stats is the /v1/stats response.
+// Stats is the /v1/stats response. CardsStale is how many of the
+// documents' cards are left to embed: the cards job's backlog.
 type Stats struct {
 	Version          string         `json:"version"`
 	BookmarksTotal   int            `json:"bookmarks_total"`
 	DocumentsTotal   int            `json:"documents_total"`
 	DocumentsByState map[string]int `json:"documents_by_state,omitempty"`
 	JobsByStatus     map[string]int `json:"jobs_by_status,omitempty"`
+	CardsStale       int            `json:"cards_stale"`
 }
 
 func (d Deps) handleStats(w http.ResponseWriter, r *http.Request) {
@@ -311,6 +313,10 @@ func (d Deps) stats(ctx context.Context) (Stats, error) {
 	if err != nil {
 		return Stats{}, err
 	}
+	cardsStale, err := d.cardsStale(ctx)
+	if err != nil {
+		return Stats{}, err
+	}
 
 	docsTotal := 0
 	for _, n := range docsByState {
@@ -322,7 +328,17 @@ func (d Deps) stats(ctx context.Context) (Stats, error) {
 		DocumentsTotal:   docsTotal,
 		DocumentsByState: stringKeys(docsByState),
 		JobsByStatus:     stringKeys(jobsByStatus),
+		CardsStale:       cardsStale,
 	}, nil
+}
+
+// cardsStale counts the cards left to embed; none without a document
+// index, as reindex-all makes none stale without one.
+func (d Deps) cardsStale(ctx context.Context) (int, error) {
+	if d.Index == nil {
+		return 0, nil
+	}
+	return d.Index.CountStaleCards(ctx, d.TenantID)
 }
 
 // stringKeys converts a count map keyed by a store enum to the wire shape.

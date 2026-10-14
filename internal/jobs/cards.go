@@ -16,12 +16,19 @@ import (
 const cardsPoolSize = 1
 
 // A cards job that finds the embedding model not answering waits half its
-// age, between these: soon after an Ollama restart, and no more often than
-// twice an hour through a long outage, within the deferral budget.
+// age, between these, within the deferral budget: soon after an Ollama
+// restart, at most 5 minutes after Ollama answers again, which is what
+// bounds the wait once it does (nothing tells the queue it came back), and
+// so at most 12 "job deferred" lines an hour through a long outage. A
+// deferred job is pending, so the card changes meanwhile share it.
 const (
 	minCardsWait = time.Minute
-	maxCardsWait = 30 * time.Minute
+	maxCardsWait = 5 * time.Minute
 )
+
+// cardsRetryDelay is how long after a cards job fails for good the next
+// one runs, when cards are still stale (retryCards).
+const cardsRetryDelay = time.Hour
 
 // cardsWaitReason is what a deferred cards job waits for, worded to follow
 // "waiting for".
@@ -33,8 +40,9 @@ const cardsWaitReason = "the embedding model to answer"
 // (ollama.ErrUnreachable) is no verdict: the job is deferred, its attempt
 // refunded, for half its age (deferral), and the cards embedded before stay
 // embedded. Any other error is retried through the queue's backoff. A
-// failed cards job marks no document: stale cards wait for the next job,
-// which any card's change, a reindex-all or the next daemon start queues.
+// failed cards job marks no document; its permanent-failure hook queues the
+// next an hour ahead while cards are stale (retryCards), and any card's
+// change, a reindex-all or the next daemon start queues one sooner.
 func cardsHandler(d Deps) HandlerFunc {
 	return func(ctx context.Context, job *store.Job) error {
 		start := time.Now()
@@ -59,4 +67,34 @@ func cardsHandler(d Deps) HandlerFunc {
 // half its age, at least minCardsWait and at most maxCardsWait.
 func deferral(age time.Duration) time.Duration {
 	return min(max(age/2, minCardsWait), maxCardsWait)
+}
+
+// retryCards is the cards pool's permanent-failure hook. A cards job that
+// failed for good (a model answering at another width, its attempts spent,
+// a day of deferrals) leaves its stale cards with no job until a card
+// changes, a reindex-all or the next start; so while the tenant has stale
+// cards it queues the next job cardsRetryDelay ahead, through EnqueueOnce,
+// which keeps a job already pending. An hour, not sooner: a verdict stays
+// one until the model is fixed, and the drift monitor reports a model
+// answering at another width meanwhile, so the retry costs one failed job
+// an hour and resumes by itself once the model is fixed. It runs for an
+// orphan out of attempts too, when the daemon starts.
+func retryCards(d Deps) PermFailHook {
+	return func(ctx context.Context, job *store.Job, cause error) error {
+		stale, err := d.Cards.CountStaleCards(ctx, job.TenantID)
+		if err != nil {
+			return fmt.Errorf("retry the cards: %w", err)
+		}
+		if stale == 0 {
+			return nil
+		}
+		next := &store.Job{TenantID: job.TenantID, Kind: store.JobKindCards,
+			RunAfter: time.Now().UTC().Add(cardsRetryDelay)}
+		if _, err := d.Queue.EnqueueOnce(ctx, next); err != nil {
+			return fmt.Errorf("retry the cards: queue the next cards job: %w", err)
+		}
+		d.Log.Warn("cards: the cards job failed for good; the next runs later", "err", cause, "stale", stale,
+			"next_job", next.ID, "run_after", next.RunAfter)
+		return nil
+	}
 }

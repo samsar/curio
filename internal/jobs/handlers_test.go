@@ -684,8 +684,8 @@ func TestEnqueueRebuild(t *testing.T) {
 // --- pools ---
 
 // TestNewPools: the daemon's pools each claim one kind; the per-document
-// ones mark their document when a job gives up, and the cluster pool
-// records a rebuild left unfinished.
+// ones mark their document when a job gives up, the cluster pool records
+// a rebuild left unfinished, and the cards pool queues the next cards job.
 func TestNewPools(t *testing.T) {
 	deps, _, _ := newTestDeps(t)
 	type shape struct {
@@ -703,7 +703,7 @@ func TestNewPools(t *testing.T) {
 		{"fetch", []store.JobKind{store.JobKindFetch}, []store.JobKind{store.JobKindFetch}, 16},
 		{"index", []store.JobKind{store.JobKindIndex}, []store.JobKind{store.JobKindIndex}, 4},
 		{"cluster", []store.JobKind{store.JobKindCluster}, []store.JobKind{store.JobKindCluster}, 1},
-		{"cards", []store.JobKind{store.JobKindCards}, nil, 1},
+		{"cards", []store.JobKind{store.JobKindCards}, []store.JobKind{store.JobKindCards}, 1},
 	}, got)
 	assert.Equal(t, []store.JobKind{store.JobKindCluster}, slices.Sorted(maps.Keys(pools[2].Worker.onFinished)),
 		"the scheduler is kicked once a rebuild's outcome is recorded")

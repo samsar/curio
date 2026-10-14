@@ -188,15 +188,14 @@ func connectEmbedder(ctx context.Context, cfg config.Config) (*embedder.Ollama, 
 // fillCards embeds the copy's stale cards as the daemon's cards job does
 // (Indexer.EmbedStaleCards), through the query embedder, which config.yaml
 // configures as the daemon's, with its document prefix, logging how far it
-// got. Before it, OpenCopy derived the copy's fields; a copy filled before
-// has no stale card left.
+// got as the job does. Before it, OpenCopy derived the copy's fields; a
+// copy filled before has no stale card left.
 func fillCards(ctx context.Context, lib *devtool.Copy, emb *embedder.Ollama, cfg config.Config,
 	log *slog.Logger) (cardsFill, error) {
-	idx := indexer.New(lib.Chunks, emb, indexer.Options{DocumentPrefix: cfg.Embedding.DocumentPrefix})
+	idx := indexer.New(lib.Chunks, emb, indexer.Options{DocumentPrefix: cfg.Embedding.DocumentPrefix, Log: log})
 	log.Info("embedding the stale cards", "stale", lib.Fields.CardsStale)
 	start := time.Now()
-	n, err := idx.EmbedStaleCards(ctx, &cardsProgress{DocumentIndex: lib.Index, log: log, of: lib.Fields.CardsStale},
-		store.LocalTenantID)
+	n, err := idx.EmbedStaleCards(ctx, lib.Index, store.LocalTenantID)
 	took := time.Since(start)
 	if err != nil {
 		return cardsFill{}, fmt.Errorf("embed the copy's cards (%d embedded first): %w", n, err)
@@ -209,27 +208,6 @@ func fillCards(ctx context.Context, lib *devtool.Copy, emb *embedder.Ollama, cfg
 type cardsFill struct {
 	embedded int
 	took     time.Duration
-}
-
-// cardsProgressEvery is how many cards apart fillCards logs how far it got.
-const cardsProgressEvery = 500
-
-// cardsProgress is the copy's index, logging how many cards are stored
-// as the fill goes.
-type cardsProgress struct {
-	store.DocumentIndex
-	log      *slog.Logger
-	of, done int
-}
-
-func (p *cardsProgress) PutCardVectors(ctx context.Context, cards []store.CardVector) (int, error) {
-	n, err := p.DocumentIndex.PutCardVectors(ctx, cards)
-	before := p.done
-	p.done += n
-	if p.done/cardsProgressEvery > before/cardsProgressEvery {
-		p.log.Info("embedding the stale cards", "embedded", p.done, "of", p.of)
-	}
-	return n, err
 }
 
 // judgmentStatus is whether a variant's search can return a judged

@@ -201,12 +201,15 @@ func TestCardsJob_Failures(t *testing.T) {
 }
 
 // TestCardsJob_DeferralGrowsWithAge: a cards job waits half its age for
-// the embedding model, at least a minute and at most half an hour.
+// the embedding model, at least a minute and at most five, so it runs at
+// most five minutes after the model answers again.
 func TestCardsJob_DeferralGrowsWithAge(t *testing.T) {
+	assert.Equal(t, 5*time.Minute, maxCardsWait)
 	for age, want := range map[time.Duration]time.Duration{
 		0:                minCardsWait,
 		90 * time.Second: minCardsWait,
-		10 * time.Minute: 5 * time.Minute,
+		6 * time.Minute:  3 * time.Minute,
+		10 * time.Minute: maxCardsWait,
 		2 * time.Hour:    maxCardsWait,
 		23 * time.Hour:   maxCardsWait,
 	} {
@@ -216,13 +219,57 @@ func TestCardsJob_DeferralGrowsWithAge(t *testing.T) {
 	emb := &cardsEmbedder{err: fmt.Errorf("%w: timed out", ollama.ErrUnreachable)}
 	deps, db := newCardsDeps(t, 1, emb)
 	job := cardsJob(t, db)
-	job.CreatedAt = time.Now().Add(-10 * time.Minute)
+	job.CreatedAt = time.Now().Add(-2 * time.Hour)
 	err := cardsHandler(deps)(context.Background(), job)
 	de, ok := errors.AsType[*DeferError](err)
 	require.True(t, ok, "%v", err)
 	assert.Equal(t, cardsWaitReason, de.Reason)
 	assert.WithinDuration(t, time.Now().Add(5*time.Minute), de.Until, 5*time.Second)
 	assert.ErrorIs(t, de, ollama.ErrUnreachable)
+}
+
+// TestCardsJob_FailedForGoodQueuesTheNext: a cards job that fails for
+// good, by a verdict or as an orphan out of attempts, leaves the cards
+// still stale a job an hour ahead; with no card stale it queues nothing.
+func TestCardsJob_FailedForGoodQueuesTheNext(t *testing.T) {
+	ctx := context.Background()
+	assertNextAnHourAhead := func(t *testing.T, deps Deps, db *sqlitestore.DB, failed *store.Job) {
+		t.Helper()
+		assert.Equal(t, store.JobStatusFailed, getJob(t, deps.Queue, failed.ID).Status)
+		next := cardsJob(t, db)
+		assert.NotEqual(t, failed.ID, next.ID)
+		assert.WithinDuration(t, time.Now().Add(cardsRetryDelay), next.RunAfter, time.Minute)
+		assert.Equal(t, 3, staleCards(t, deps), "the cards wait for it")
+	}
+	t.Run("a verdict", func(t *testing.T) {
+		emb := &cardsEmbedder{err: fmt.Errorf("%w: got 768 dimensions, want 1024", embedder.ErrWrongDimension)}
+		deps, db := newCardsDeps(t, 3, emb)
+		job := cardsJob(t, db)
+		runPoolsUntil(t, deps, func(c *assert.CollectT) {
+			got, err := deps.Queue.GetByID(ctx, job.ID)
+			require.NoError(c, err)
+			assert.Equal(c, store.JobStatusFailed, got.Status)
+		})
+		assertNextAnHourAhead(t, deps, db, job)
+	})
+	t.Run("an orphan out of attempts", func(t *testing.T) {
+		deps, db := newCardsDeps(t, 3, &cardsEmbedder{})
+		job := cardsJob(t, db)
+		_, err := db.Exec(`UPDATE jobs SET status = ?, attempts = 5 WHERE id = ?`, store.JobStatusRunning, job.ID)
+		require.NoError(t, err)
+		for _, p := range NewPools(deps, PoolSizes{Fetch: 1, Index: 1}, WorkerOptions{Log: quietLog}) {
+			require.NoError(t, p.Worker.RecoverOrphans(ctx))
+		}
+		assertNextAnHourAhead(t, deps, db, job)
+	})
+	t.Run("no card stale", func(t *testing.T) {
+		deps, db := newCardsDeps(t, 0, &cardsEmbedder{})
+		failed := &store.Job{ID: "failed", TenantID: "local", Kind: store.JobKindCards}
+		require.NoError(t, retryCards(deps)(ctx, failed, embedder.ErrWrongDimension))
+		var n int
+		require.NoError(t, db.QueryRow(`SELECT count(*) FROM jobs WHERE kind = ?`, store.JobKindCards).Scan(&n))
+		assert.Zero(t, n)
+	})
 }
 
 // TestCardsJob_InterruptedKeepsWhatItEmbedded: a shutdown between two
