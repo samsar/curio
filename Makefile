@@ -172,7 +172,7 @@ tools:
 	$(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 	$(GO) install github.com/pressly/goose/v3/cmd/goose@$(GOOSE_VERSION)
 
-## migrate-up: apply pending migrations to ~/.curio/curio.db
+## migrate-up: apply pending migrations to ~/.curio/curio.db with the goose CLI, which has no sqlite-vec and fails on those that need it, 001 and 019 among them (the daemon migrates at start; see migrations/README.md)
 .PHONY: migrate-up
 migrate-up:
 	$(GOOSE) -dir migrations sqlite3 $${CURIO_HOME:-$$HOME/.curio}/curio.db up
