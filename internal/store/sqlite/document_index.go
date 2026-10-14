@@ -519,6 +519,23 @@ func (x *DocumentIndex) MarkUnembeddable(ctx context.Context, cards []store.Card
 	return marked, nil
 }
 
+// siteSQL reads a document's site from its fields row, by the document's
+// unique key.
+const siteSQL = `SELECT site_name, host FROM document_fields WHERE document_id = ? AND tenant_id = ?`
+
+// Site implements store.DocumentIndex.
+func (x *DocumentIndex) Site(ctx context.Context, tenantID, documentID string) (store.DocumentSite, error) {
+	var site store.DocumentSite
+	err := x.db.QueryRowContext(ctx, siteSQL, documentID, tenantID).Scan(&site.Name, &site.Host)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return store.DocumentSite{}, fmt.Errorf("site of document %s: %w", documentID, store.ErrNotFound)
+	case err != nil:
+		return store.DocumentSite{}, fmt.Errorf("site of document %s: %w", documentID, err)
+	}
+	return site, nil
+}
+
 // resetCardsSQL makes the tenant's embedded cards stale, reaching them
 // from the tenant's documents.
 const resetCardsSQL = `UPDATE document_cards SET embedded_text = NULL

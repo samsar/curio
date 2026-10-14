@@ -35,7 +35,10 @@ import (
 //
 // Documents 0 to 19 are fetched; 20 is pending with its chunk, which search
 // reads; 21 is pending without a chunk; 22 failed and 23 is dead, both with
-// their chunks, which the chunk lists leave out.
+// their chunks, which the chunk lists leave out. Every chunk was embedded
+// before chunk context, from its text alone, and each document's markdown,
+// its chunk's text, is under the content directory beside the copy, as a
+// home's is.
 //
 // The failed 22 and the dead 23 were bookmarked (savedAs), which the
 // document lists find them by: their fields hold the bookmark's title, and
@@ -69,8 +72,8 @@ var cardAt = map[string]float32{"Beta archive — example.com": 20.25, "Delta fi
 
 func docURL(i int) string { return fmt.Sprintf("https://example.com/doc/%02d", i) }
 
-// newLibrary writes the synthetic library's database at dir/copy.db and
-// returns its path.
+// newLibrary writes the synthetic library's database at dir/copy.db, and
+// its markdown under dir/content, and returns the database's path.
 func newLibrary(t *testing.T, dir string) string {
 	t.Helper()
 	ctx := context.Background()
@@ -94,15 +97,18 @@ func newLibrary(t *testing.T, dir string) string {
 		if i == 21 {
 			continue // pending, never fetched: no chunk
 		}
-		ext := &store.DocumentExtraction{DocumentID: doc.ID, Fetcher: "test", Status: store.ExtractionStatusOK,
-			FetchedAt: time.Now().UTC()}
-		require.NoError(t, extractions.Create(ctx, ext))
-		require.NoError(t, docs.SetCurrentExtraction(ctx, doc.ID, ext.ID))
 		words := keywords[i]
 		if words == "" {
 			words = "plain words"
 		}
 		text := fmt.Sprintf("%s note %02d about things", words, i)
+		markdown := filepath.Join(doc.ID, "extraction.md")
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, "content", doc.ID), 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "content", markdown), []byte(text), 0o600))
+		ext := &store.DocumentExtraction{DocumentID: doc.ID, Fetcher: "test", Status: store.ExtractionStatusOK,
+			FetchedAt: time.Now().UTC(), MarkdownPath: &markdown}
+		require.NoError(t, extractions.Create(ctx, ext))
+		require.NoError(t, docs.SetCurrentExtraction(ctx, doc.ID, ext.ID))
 		require.NoError(t, chunks.ReplaceForDocument(ctx, doc.ID, ext.ID, "", nil,
 			[]store.ChunkInput{{Text: text, Embedding: at(float32(i))}}))
 		switch i {
@@ -223,6 +229,20 @@ func (f *fakeOllama) embed(t *testing.T, w http.ResponseWriter, r *http.Request)
 	}
 }
 
+// reembedded is what the fake embedded as chunks with their context, the
+// context and the text a blank line apart, in order.
+func (f *fakeOllama) reembedded() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for _, text := range f.embeds {
+		if strings.Contains(text, "\n\n") {
+			out = append(out, text)
+		}
+	}
+	return out
+}
+
 // sent is what the fake embedded besides the cards: the warm-up and the
 // queries, in order. The cards, which name the library's host, are
 // embedded before any query.
@@ -286,18 +306,20 @@ func writeConfig(t *testing.T, dir, baseURL, search string) string {
 	return path
 }
 
-// fixture is a synthetic library, its config and its Ollama.
+// fixture is a synthetic library, its content directory, its config and
+// its Ollama.
 type fixture struct {
-	dir    string
-	db     string
-	config string
-	ollama *fakeOllama
+	dir     string
+	db      string
+	content string
+	config  string
+	ollama  *fakeOllama
 }
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
 	dir := t.TempDir()
-	f := &fixture{dir: dir, db: newLibrary(t, dir), ollama: newFakeOllama(t)}
+	f := &fixture{dir: dir, db: newLibrary(t, dir), content: filepath.Join(dir, "content"), ollama: newFakeOllama(t)}
 	f.config = writeConfig(t, dir, f.ollama.url, "")
 	return f
 }

@@ -104,7 +104,7 @@ does it, asking before each step:
      pages a minute with 16 fetch workers, at most 2 at a time from one
      site, so a site that holds many of the new pages is named as taking
      longer; indexing is Ollama-bound, measured on this Mac (one batch of
-     32 sample chunks, at about 23 chunks a page). GitHub pages without a
+     8 sample chunks, at about 23 chunks a page). GitHub pages without a
      `fetcher.github.token` in `config.yaml` are mentioned: GitHub allows
      60 API requests an hour without one, about 30 repositories, so they
      wait for its hourly limit, and the note says for about how long. Any
@@ -813,21 +813,66 @@ thousands of documents) and queues the cards job, which embeds one card
 per document. If you set `vector_weight: 0` to keep search off Ollama, set
 `cards_weight: 0` too: the cards list embeds the query as well.
 
+Each passage is embedded with its page's title, its site and the headings
+it sits under, so a passage deep in a long page knows what it is part of;
+what is searched by keywords and shown stays the passage's own text.
+Upgrading to 2.7 re-embeds every fetched page once. From its first start
+the daemon feeds the index workers the pages whose passages were embedded
+before, one at a time (one line in the log, "chunk context: re-embedding
+the library's chunks", with how many), under the queue's pause, throttle
+and schedule. On an M4 Max a library of 5,249 pages (50,938 passages)
+re-embeds at about 9 passages a second, slower while the cards an upgrade
+from 2.6 embeds take their half hour: about two hours in all; a slower Mac
+takes longer. Search works throughout: a page not re-embedded yet is
+searched by its earlier vectors, and a query waits for its embedding
+behind at most one batch of the re-embed's (half a second at the median
+there). A page saved meanwhile is found at once by what it was saved as,
+and by its text as soon as an index worker reaches it, beside the re-embed
+rather than behind it. `curio status` prints `chunks: N chunks in D of M
+documents to re-embed`, with about how long is left once the rate is
+measured; the Status page says the same, the log says how far it got every
+few minutes and when it is done, and `curio doctor`'s `chunk context`
+check warns when pages are left with no job to re-embed them, which a
+restart resumes. If Ollama stops answering, the index jobs wait for it
+without failing anything, and carry on once it answers; `curio status`
+and doctor say so meanwhile. If it answers every page with an error (its
+model runner crashing, the model missing, vectors of another width),
+the re-embed stops after three pages in a row, for 15 minutes, then
+longer while it keeps failing, up to 4 hours; `curio status` says until
+when, and doctor how to fix the model. The pages keep their earlier
+vectors meanwhile, and are re-embedded once it is fixed. A page whose
+re-embed fails for a reason of its own keeps its earlier vectors, is
+tried again after the others, and after its third failure keeps them for
+good, until a refetch. Once it is done the interests are
+rebuilt from scratch. A page whose markdown file was deleted keeps its vectors until it
+is refetched, and so does one with a passage the embedding model can't
+take even without its context; a passage it can take only without its
+context is embedded so (a model with a smaller context than the
+default's). Re-embedding leaves the order of the Library and `curio docs`
+alone.
+
 Going back to curio 2.6.x, remove `search.fields_weight`,
 `search.cards_weight` and `search.title_weight` from `config.yaml` first:
 2.6.x doesn't know the keys, so its daemon refuses to start and its
-commands refuse to run.
+commands refuse to run. It searches the passages as they are, and the
+pages it indexes are re-embedded with their context by the next 2.7
+start; but its drift check re-embeds passages without their context, so
+after an Ollama upgrade it may report a drift, which `curio reindex
+--all` clears.
 
 ## Config: time budgets for Ollama calls
 
 Each bounds how long one kind of work waits on Ollama; all are validated as
 positive. When a search or labeling budget runs out, the work degrades
 (keyword-only results, term labels) rather than failing. An embed timeout
-while indexing fails that index job, and the job queue retries it.
+while indexing fails that index job's attempt, and the job queue retries
+it, when Ollama answers a short embed meanwhile; when it doesn't, Ollama
+isn't answering at all, and the index jobs wait for it (see "embedding
+model not answering" under Troubleshooting).
 
 | Key | Default | Bounds |
 |---|---|---|
-| `embedding.timeout_seconds` | 60 | one embed request (the indexer sends at most 32 chunks per request), including the time it waits behind other requests inside Ollama |
+| `embedding.timeout_seconds` | 60 | one embed request (the indexer sends at most 8 chunks per request), including the time it waits behind other requests inside Ollama |
 | `search.embed_timeout_seconds` | 10 | embedding a search query; past it, search returns keyword-only results marked `degraded`. Keep it well under 30: the CLI and MCP give up on a request after 30 s, so a hung Ollama would surface as a client timeout instead |
 | `generation.timeout_seconds` | 120 | one LLM request; timeouts aren't retried. A role's `generation.roles.<role>.timeout_seconds` replaces it for that role |
 | `insight.labeling_timeout_seconds` | 900 | all LLM labeling in one rebuild of the interests; the rest get term labels |
@@ -849,6 +894,30 @@ every fetch and index attempt for it.
 **`vec_version()` not found** — sqlite-vec failed to load. This means cgo
 wasn't enabled. Ensure `CGO_ENABLED=1`; `make` forces this.
 
+**"embedding model not answering" in the log** — an index or cards job's
+embed got no answer from Ollama (not running, restarting, or too busy to
+answer within `embedding.timeout_seconds`). The jobs it caught are
+deferred, and no index or cards job starts until Ollama answers again,
+which the daemon checks every few seconds, then every minute; "embedding
+model answering again" says they resumed. Nothing fails meanwhile, however
+long it lasts. Start Ollama if it isn't running. While it lasts, `curio
+status` prints a warning, `curio doctor` an `index jobs` check, and a
+page's queued index job says it is waiting for the embedding model. A
+daemon stopping while a job embeds logs nothing of the kind: that job is
+put back for the next start.
+
+**"documents' re-embeds keep failing" in the log**, a warning in `curio
+status` that the re-embed for the new chunk context waits until a time,
+or a `chunk context` warning in `curio doctor` — the embedding model
+answered three pages in a row with an error, so the re-embed stopped for
+a while (15 minutes, then twice as long each time it stops again, up to 4
+hours); the error is in the warning, and doctor names the pages, which
+`curio docs show <id>` shows. Ollama's own log says more (`ollama
+serve`'s output, or `~/.ollama/logs/server.log`); `ollama list` shows
+whether the model is pulled. Once it answers, the re-embed tries one page
+at that time and carries on, or at once after a restart. Until then every
+page keeps its earlier vectors, and search works as before.
+
 **"model not loaded" from `/api/embed`** — Ollama answered 404: the
 embedding model isn't pulled. The daemon keeps retrying the pull in the
 background (see above), or run `ollama pull qwen3-embedding:0.6b`. On a
@@ -858,19 +927,20 @@ exist and answers 404 too: upgrade it.
 **`input longer than the embedding model's context`** on an index job —
 Ollama refused a chunk longer than the context (`num_ctx` 8192, or the
 model's own if smaller). curio asks Ollama never to truncate, since a
-truncated chunk gets a vector for text it doesn't hold, so the job fails at
-once and the document goes `failed`; its error names the chunks and the
-longest one's size. Chunks are capped at 3500 bytes, well inside the
+truncated chunk gets a vector for text it doesn't hold. A chunk refused
+with its context (its page's title, site and headings, up to 450 bytes) is
+embedded without it, with one warning in the log; one refused even without
+it fails the job at once and the document goes `failed`, its error naming
+the chunk and its size. Chunks are capped at 3500 bytes, well inside the
 context, so this means the home's embedding model has a small context.
 Lowering `chunking.size_tokens` and restarting the daemon helps only
 chunks bounded by word count: the 3500-byte cap is fixed, so for a model
 whose context is under about 3500 tokens, start a new home with a model
-that has a larger one (see "The embedding model is the
-home's"). Then bring the documents back: `curio reindex <id>` re-embeds
-one from the content it already has and returns it to `fetched`, and
-`curio refetch --all --state=failed` retries every failed document. A
-search query that long falls back to keyword results with the same reason
-in its warning.
+that has a larger one (see "The embedding model is the home's"). Then
+bring the documents back: `curio reindex <id>` re-embeds one from the
+content it already has and returns it to `fetched`, and `curio refetch
+--all --state=failed` retries every failed document. A search query that
+long falls back to keyword results with the same reason in its warning.
 
 **`database disk image is malformed`** on a save, a fetch or a delete,
 or **`search fields` failing in `curio doctor`** — the full-text index of

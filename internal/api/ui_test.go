@@ -237,6 +237,11 @@ func TestUI_Status(t *testing.T) {
 	assert.NotContains(t, body, `class="callout`, "a healthy daemon needs no attention")
 	assert.Contains(t, body, `<a class="more" href="/ui/failures">All failures →</a>`,
 		"the Failures tab, which counts the dead links the card counts too")
+	assert.NotContains(t, body, "to re-embed", "nothing to re-embed, no line")
+	reembedding(t, srv, fetched)
+	body = getPage(t, srv, "/ui/status", http.StatusOK)
+	assert.Contains(t, body, `<p class="muted mt-4">1 chunk in 1 of 1 fetched documents to re-embed for the new chunk `+
+		`context</p>`, "no time left without a re-embed running")
 
 	// Paused: the queue and the progress say why nothing starts, and the
 	// button resumes.
@@ -246,6 +251,17 @@ func TestUI_Status(t *testing.T) {
 	assert.Contains(t, body, `<span class="badge queue-closed">closed</span><span class="why">Paused</span>`)
 	assert.Contains(t, body, "1 job queued. Paused: none start until the queue opens.")
 	assert.Contains(t, body, `id="queue-pause" data-kind="resume"`)
+}
+
+// reembedding gives doc, fetched, a chunk embedded before chunk context:
+// one to re-embed.
+func reembedding(t *testing.T, srv *apitest.Server, doc *store.Document) {
+	t.Helper()
+	_, err := srv.DB.Exec(`INSERT INTO document_extractions (id, document_id, fetcher, status) VALUES (?, ?, 'test', 'ok');
+		UPDATE documents SET current_extraction_id = ? WHERE id = ?;
+		INSERT INTO chunks (id, document_id, extraction_id, ord, text) VALUES (?, ?, ?, 0, 'text')`,
+		doc.ID+"-ext", doc.ID, doc.ID+"-ext", doc.ID, doc.ID+"-chunk", doc.ID, doc.ID+"-ext")
+	require.NoError(t, err)
 }
 
 // TestUI_StatusWritingModel: the Writing model line names the model each
@@ -1592,7 +1608,7 @@ const hostileMarkdown = "# Hostile\n\n<script>alert(1)</script>\n\n<img src=x on
 func TestUI_Document(t *testing.T) {
 	srv := apitest.Start(t)
 	doc := titled(t, srv, "https://site.example/post", "A post", store.DocStateFetched)
-	srv.AddContent(t, doc, hostileMarkdown)
+	ext := srv.AddContent(t, doc, hostileMarkdown)
 	related := titled(t, srv, "https://site.example/other", "Hostile relative", store.DocStateFetched)
 	srv.AddContent(t, related, "# Hostile relative\n\nhostile script alert")
 	bookmark(t, srv, doc.URL, store.SourceChrome, "/Reading/Web", "security", "<b>tag</b>")
@@ -1615,7 +1631,8 @@ func TestUI_Document(t *testing.T) {
 	assert.Contains(t, body, "<code>curio refetch "+doc.ID+"</code>")
 	assert.Contains(t, body, "<code>curio reindex "+doc.ID+"</code>")
 	assert.NotContains(t, body, " words</span>", "no count before an index")
-	require.NoError(t, srv.Deps.Documents.MarkFetched(context.Background(), doc.ID, 1234))
+	require.NoError(t, srv.Deps.Documents.MarkIndexed(context.Background(), doc.ID,
+		store.IndexGuard{ExtractionID: ext.ID}, 1234))
 	assert.Contains(t, getPage(t, srv, "/ui/documents/"+doc.ID, http.StatusOK),
 		`<span class="text">1,234 words</span>`, "an index's count")
 

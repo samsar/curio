@@ -125,6 +125,189 @@ func TestChunks_ReplaceForDocument_IsIdempotent(t *testing.T) {
 	assert.Len(t, hits, 1)
 }
 
+// chunkKeys is each of a document's chunks' ID and seq, in order.
+func chunkKeys(t *testing.T, db *DB, documentID string) [][]any {
+	t.Helper()
+	return dumpRows(t, db, `SELECT id, seq FROM chunks WHERE document_id = ? ORDER BY ord`, documentID)
+}
+
+// vecSlots is how chunks_vec stores its vectors: its vec0 chunks, the
+// blocks of 1,024 slots it inserts into, and its rowids, a row per vector.
+func vecSlots(t *testing.T, db *DB) []any {
+	t.Helper()
+	return dumpRows(t, db, `SELECT (SELECT count(*) FROM chunks_vec_chunks), (SELECT count(*) FROM chunks_vec_rowids)`)[0]
+}
+
+// ftsShadows dumps chunks_fts's own tables, which any write to the index
+// changes.
+func ftsShadows(t *testing.T, db *DB) [][][]any {
+	t.Helper()
+	return [][][]any{dumpRows(t, db, `SELECT * FROM chunks_fts_data ORDER BY id`),
+		dumpRows(t, db, `SELECT * FROM chunks_fts_idx ORDER BY segid, term`),
+		dumpRows(t, db, `SELECT * FROM chunks_fts_docsize ORDER BY id`)}
+}
+
+// replaceTexts re-indexes documentID as texts, each chunk's vector
+// fillVec(base + its position).
+func replaceTexts(t *testing.T, ch *Chunks, documentID, extractionID string, base float32, texts ...string) {
+	t.Helper()
+	inputs := make([]store.ChunkInput, len(texts))
+	for i, text := range texts {
+		inputs[i] = store.ChunkInput{Text: text, TokenCount: len(strings.Fields(text)),
+			Context: "Doc — Example — " + text, ContextVersion: 1, Embedding: fillVec(base + float32(i)/1000)}
+	}
+	require.NoError(t, ch.ReplaceForDocument(context.Background(), documentID, extractionID, "Title", []string{"tag"},
+		inputs))
+}
+
+// TestChunks_ReplaceForDocument_InPlace: re-indexing a document with as
+// many chunks as it had rewrites each chunk where it is: its ID and seq
+// stay, the vector index takes no new slot however often it runs, and both
+// searches find the new text and vectors, never the old. sqlite-vec reuses
+// a freed slot in its newest vec0 chunk alone, so the library fills one
+// chunk and starts a second: deleting and inserting the first one's
+// vectors again would add a third.
+func TestChunks_ReplaceForDocument_InPlace(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	ch := NewChunks(db, vecDim)
+	docs := seedDocs(t, db, "local", "https://example.com/big", "https://example.com/a", "https://example.com/b",
+		"https://example.com/c")
+	texts := func(round, doc int) []string {
+		out := make([]string, 8)
+		if doc == 0 {
+			out = make([]string, 1024)
+		}
+		for i := range out {
+			out[i] = fmt.Sprintf("round%d doc%d part%d", round, doc, i)
+		}
+		return out
+	}
+	index := func(round int) {
+		t.Helper()
+		for d, id := range docs {
+			replaceTexts(t, ch, id, latestExtractionID(t, db, id), float32(round*10+d), texts(round, d)...)
+		}
+	}
+	index(0)
+	keys := make([][][]any, len(docs))
+	for d, id := range docs {
+		keys[d] = chunkKeys(t, db, id)
+	}
+	slots := vecSlots(t, db)
+	require.Equal(t, []any{int64(2), int64(1048)}, slots, "the first vec0 chunk full, and a second")
+
+	for round := 1; round <= 3; round++ {
+		index(round)
+	}
+	assert.Equal(t, slots, vecSlots(t, db), "no vector took a new slot")
+	for d, id := range docs {
+		assert.Equal(t, keys[d], chunkKeys(t, db, id), "every chunk kept its ID and seq")
+	}
+	assertDerivedRowsMatchChunks(t, db)
+
+	hits, err := ch.BM25Search(ctx, "local", "round0", 10, store.SearchFilters{})
+	require.NoError(t, err)
+	assert.Empty(t, hits, "the old text is gone from the index")
+	hits, err = ch.BM25Search(ctx, "local", "round3", 2000, store.SearchFilters{})
+	require.NoError(t, err)
+	assert.Len(t, hits, 1048)
+	nearest, err := ch.VectorSearch(ctx, "local", fillVec(32+0.003), 1, store.SearchFilters{})
+	require.NoError(t, err)
+	require.Len(t, nearest, 1)
+	got, err := ch.GetByIDs(ctx, []string{nearest[0].ChunkID})
+	require.NoError(t, err)
+	assert.Equal(t, "round3 doc2 part3", got[0].Text, "the new vectors are searched")
+	// Round 0's vector of doc2 part3 is gone: its nearest is now one of
+	// round 3's.
+	gone, err := ch.VectorSearch(ctx, "local", fillVec(2+0.003), 1, store.SearchFilters{})
+	require.NoError(t, err)
+	require.Len(t, gone, 1)
+	got, err = ch.GetByIDs(ctx, []string{gone[0].ChunkID})
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(got[0].Text, "round3 "), "no old vector is left to find: %s", got[0].Text)
+}
+
+// TestChunks_ReplaceForDocument_GrowsAndShrinks: a re-index that adds
+// chunks keeps the first ones' IDs and adds the rest; one that drops chunks
+// keeps the first ones' and deletes the rest, their FTS entries and vectors
+// with them; a refetch's extraction moves to every kept chunk; and every
+// chunk always has exactly one vector.
+func TestChunks_ReplaceForDocument_GrowsAndShrinks(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	ch := NewChunks(db, vecDim)
+	exts := NewExtractions(db)
+	docs := seedDocs(t, db, "local", "https://example.com/a", "https://example.com/b")
+	id, other := docs[0], docs[1]
+	replaceTexts(t, ch, other, latestExtractionID(t, db, other), 9, "bystander one", "bystander two")
+	bystander := chunkKeys(t, db, other)
+
+	extraction := latestExtractionID(t, db, id)
+	var prev [][]any
+	for step, n := range []int{3, 5, 2, 0, 4, 4, 1} {
+		if step%2 == 1 { // a refetch's new extraction
+			e := &store.DocumentExtraction{DocumentID: id, Fetcher: "test", Status: store.ExtractionStatusOK,
+				FetchedAt: time.Now().UTC()}
+			require.NoError(t, exts.Create(ctx, e))
+			extraction = e.ID
+		}
+		texts := make([]string, n)
+		for i := range texts {
+			texts[i] = fmt.Sprintf("step%d part%d", step, i)
+		}
+		replaceTexts(t, ch, id, extraction, float32(step), texts...)
+
+		keys := chunkKeys(t, db, id)
+		require.Len(t, keys, n, "step %d", step)
+		for i := range min(len(prev), n) {
+			assert.Equal(t, prev[i], keys[i], "step %d: the chunk kept at %d keeps its ID and seq", step, i)
+		}
+		assert.Equal(t, [][]any{{int64(n)}}, dumpRows(t, db,
+			`SELECT count(*) FROM chunks WHERE document_id = ? AND extraction_id = ?`, id, extraction),
+			"step %d: every chunk is of the extraction indexed", step)
+		assert.Equal(t, [][]any{{int64(n)}}, dumpRows(t, db,
+			`SELECT count(*) FROM chunks WHERE document_id = ? AND ord BETWEEN 0 AND ?`, id, n-1),
+			"step %d: in order from 0", step)
+		assertDerivedRowsMatchChunks(t, db)
+		hits, err := ch.BM25Search(ctx, "local", fmt.Sprintf("step%d", step), 50, store.SearchFilters{})
+		require.NoError(t, err)
+		assert.Len(t, hits, n, "step %d", step)
+		if step > 0 {
+			hits, err = ch.BM25Search(ctx, "local", fmt.Sprintf("step%d", step-1), 50, store.SearchFilters{})
+			require.NoError(t, err)
+			assert.Empty(t, hits, "step %d: the step before's text is gone", step)
+		}
+		prev = keys
+	}
+	assert.Equal(t, bystander, chunkKeys(t, db, other), "another document's chunks are untouched")
+}
+
+// TestChunks_ReplaceForDocument_SameTextWritesNoIndex: a re-index whose
+// texts, title and tags are those stored, a re-embed, writes nothing to
+// chunks_fts, whatever else changes.
+func TestChunks_ReplaceForDocument_SameTextWritesNoIndex(t *testing.T) {
+	db := newTestDB(t)
+	ch := NewChunks(db, vecDim)
+	id := seedDocs(t, db, "local", "https://example.com/a")[0]
+	ext := latestExtractionID(t, db, id)
+	texts := []string{"kafka streams", "consumer groups", "retention"}
+	replaceTexts(t, ch, id, ext, 1, texts...)
+	before := ftsShadows(t, db)
+
+	inputs := make([]store.ChunkInput, len(texts))
+	for i, text := range texts {
+		inputs[i] = store.ChunkInput{Text: text, TokenCount: 7, Context: "another context", ContextVersion: 2,
+			Embedding: fillVec(0.5)}
+	}
+	require.NoError(t, ch.ReplaceForDocument(context.Background(), id, ext, "Title", []string{"tag"}, inputs))
+	assert.Equal(t, before, ftsShadows(t, db), "chunks_fts is as it was")
+	assert.Equal(t, [][]any{{"another context", int64(2), int64(7)}, {"another context", int64(2), int64(7)},
+		{"another context", int64(2), int64(7)}},
+		dumpRows(t, db, `SELECT context, context_version, token_count FROM chunks ORDER BY ord`))
+	assertDerivedRowsMatchChunks(t, db)
+}
+
 func TestChunks_BM25_FiltersByTenant(t *testing.T) {
 	ctx := context.Background()
 	db := newTestDB(t)
@@ -733,15 +916,25 @@ func newSampleLibrary(t *testing.T) *sampleLibrary {
 }
 
 // add writes a document of tenant in state whose chunks are texts, in
-// order, and returns its ID.
+// order, with no context, and returns its ID.
 func (l *sampleLibrary) add(tenant string, state store.DocState, texts ...string) string {
+	l.t.Helper()
+	inputs := make([]store.ChunkInput, len(texts))
+	for i, text := range texts {
+		inputs[i] = store.ChunkInput{Text: text}
+	}
+	return l.addChunks(tenant, state, inputs...)
+}
+
+// addChunks writes a document of tenant in state whose chunks are inputs,
+// in order, each given a vector of its own, and returns its ID.
+func (l *sampleLibrary) addChunks(tenant string, state store.DocState, inputs ...store.ChunkInput) string {
 	l.t.Helper()
 	ctx := context.Background()
 	l.n++
 	id := seedDocs(l.t, l.db, tenant, fmt.Sprintf("https://example.com/%d", l.n))[0]
-	inputs := make([]store.ChunkInput, len(texts))
-	for i, text := range texts {
-		inputs[i] = store.ChunkInput{Text: text, Embedding: sampleVector(l.n*100 + i)}
+	for i := range inputs {
+		inputs[i].Embedding = sampleVector(l.n*100 + i)
 	}
 	require.NoError(l.t, l.chunks.ReplaceForDocument(ctx, id, latestExtractionID(l.t, l.db, id), "", nil, inputs))
 	switch state {
@@ -850,6 +1043,15 @@ func TestSampleChunks_Longest(t *testing.T) {
 			assert.ElementsMatch(t, tc.want, slices.Collect(maps.Values(got)))
 		})
 	}
+
+	t.Run("the bytes embedded: text and context", func(t *testing.T) {
+		l := newSampleLibrary(t)
+		l.addChunks("local", store.DocStateFetched, store.ChunkInput{Text: "a longer text, alone"},
+			store.ChunkInput{Text: "short", Context: "Title — Site — a long heading path"})
+		l.addChunks("local", store.DocStateFetched, store.ChunkInput{Text: "twenty-one bytes long"})
+		got := textsOf(t, l.sample(store.ChunkSample{Longest: 1}))
+		assert.ElementsMatch(t, []string{"short"}, slices.Collect(maps.Values(got)))
+	})
 }
 
 // TestSampleChunks_Random: the random chunks come from documents the
@@ -913,17 +1115,22 @@ func TestSampleChunks_EmptyLibrary(t *testing.T) {
 }
 
 // TestSampleChunks_TextAndVectorAsStored: a sampled chunk carries its ID,
-// its document, its text exactly as stored and its vector bit for bit.
+// its document, its text and context exactly as stored and its vector bit
+// for bit.
 func TestSampleChunks_TextAndVectorAsStored(t *testing.T) {
 	l := newSampleLibrary(t)
-	const text = "  Ada Lovelace — «the first algorithm»\n\nwith trailing space "
-	doc := l.add("local", store.DocStateFetched, text)
+	const (
+		text  = "  Ada Lovelace — «the first algorithm»\n\nwith trailing space "
+		about = "Notes — Example — Analytical Engine › Note G"
+	)
+	doc := l.addChunks("local", store.DocStateFetched, store.ChunkInput{Text: text, Context: about, ContextVersion: 1})
 	want := sampleVector(l.n * 100)
 
 	got := l.sample(store.ChunkSample{Longest: 1})
 	require.Len(t, got, 1)
 	assert.Equal(t, doc, got[0].DocumentID)
 	assert.Equal(t, text, got[0].Text)
+	assert.Equal(t, about, got[0].Context)
 	stored, err := l.chunks.EmbeddingsForDocument(context.Background(), doc)
 	require.NoError(t, err)
 	require.Len(t, stored, 1)

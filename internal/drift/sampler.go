@@ -69,10 +69,10 @@ type ChunkSampler interface {
 	SampleChunks(ctx context.Context, tenantID string, n store.ChunkSample) ([]store.SampledChunk, error)
 }
 
-// ChunkEmbedder embeds stored chunk texts exactly as indexing did;
-// *indexer.Indexer is one.
+// ChunkEmbedder embeds stored chunks, each its context and text, exactly
+// as indexing did; *indexer.Indexer is one.
 type ChunkEmbedder interface {
-	EmbedChunks(ctx context.Context, texts []string) ([][]float32, error)
+	EmbedChunks(ctx context.Context, inputs []indexer.EmbedInput) ([][]float32, error)
 }
 
 // Sampler is the daemon's Verifier: it re-embeds a sample of the library's
@@ -103,9 +103,9 @@ func sampleBound(requestTimeout time.Duration) time.Duration {
 	return time.Duration(batches) * requestTimeout
 }
 
-// Verify re-embeds a sample of the library's chunks and compares each
-// vector with its stored one. An empty library is an empty sample, which
-// matches.
+// Verify re-embeds a sample of the library's chunks, each with the
+// context stored with it, and compares each vector with its stored one. An
+// empty library is an empty sample, which matches.
 func (s *Sampler) Verify(ctx context.Context) (Comparison, error) {
 	ctx, cancel := context.WithTimeout(ctx, s.bound)
 	defer cancel()
@@ -117,11 +117,11 @@ func (s *Sampler) Verify(ctx context.Context) (Comparison, error) {
 	if len(sample) == 0 {
 		return Comparison{MinCosine: 1}, nil
 	}
-	texts := make([]string, len(sample))
+	inputs := make([]indexer.EmbedInput, len(sample))
 	for i, c := range sample {
-		texts[i] = c.Text
+		inputs[i] = indexer.EmbedInput{Context: c.Context, Text: c.Text}
 	}
-	vectors, err := s.embed.EmbedChunks(ctx, texts)
+	vectors, err := s.embed.EmbedChunks(ctx, inputs)
 	if err != nil {
 		err = fmt.Errorf("re-embed %d sampled chunks: %w", len(sample), err)
 		if unverifiable(err) {

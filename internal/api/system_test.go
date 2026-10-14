@@ -16,7 +16,9 @@ import (
 	"github.com/samsar/curio/internal/drift"
 	"github.com/samsar/curio/internal/embedder"
 	"github.com/samsar/curio/internal/fetcher"
+	"github.com/samsar/curio/internal/indexer"
 	"github.com/samsar/curio/internal/insight"
+	"github.com/samsar/curio/internal/jobs"
 	"github.com/samsar/curio/internal/ollama"
 	"github.com/samsar/curio/internal/store"
 )
@@ -218,6 +220,123 @@ func TestStats_CardsStale(t *testing.T) {
 	none := newTestServer(t, func(d *Deps) { d.Index = nil })
 	none.seedDocument(t, "https://example.com/a", store.DocStateFetched)
 	assert.InDelta(t, 0, stats(t, none)["cards_stale"], 0)
+}
+
+// failingReembedCount is a document store whose documents to re-embed
+// can't be counted.
+type failingReembedCount struct{ store.DocumentStore }
+
+func (failingReembedCount) CountToReembed(context.Context, string, int) (store.ReembedCount, error) {
+	return store.ReembedCount{}, errInjected
+}
+
+// reembedAt is a re-embed that reports progress.
+type reembedAt struct{ progress jobs.ReembedProgress }
+
+func (r reembedAt) Progress() jobs.ReembedProgress { return r.progress }
+
+// holdAt is an embedder hold in a fixed state.
+type holdAt struct{ state jobs.HoldState }
+
+func (h holdAt) State() jobs.HoldState { return h.state }
+
+// TestHealth_HoldAndBrake: healthz reports the embedder hold and the
+// re-embed's brake only while each holds, in UTC, and neither changes its
+// status.
+func TestHealth_HoldAndBrake(t *testing.T) {
+	health := func(t *testing.T, s *testServer) map[string]any {
+		t.Helper()
+		resp := s.do(t, request{method: http.MethodGet, path: "/v1/healthz"})
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		var got map[string]any
+		require.NoError(t, json.Unmarshal([]byte(resp.body), &got))
+		assert.Equal(t, "ok", got["status"])
+		return got
+	}
+	east := time.FixedZone("EDT", -4*3600)
+	since := time.Date(2026, 10, 14, 10, 2, 0, 0, east)
+	until := time.Now().Add(time.Hour).Truncate(time.Second).In(east)
+
+	for name, d := range map[string]func(*Deps){
+		"none":      func(*Deps) {},
+		"open, off": func(d *Deps) { d.Hold, d.Reembed = holdAt{}, reembedAt{jobs.ReembedProgress{Active: true}} },
+		"typed nil": func(d *Deps) { d.Hold, d.Reembed = (*jobs.EmbedderHold)(nil), (*jobs.Reembed)(nil) },
+		"daemon-made": func(d *Deps) {
+			d.Hold, d.Reembed = jobs.NewEmbedderHold(nil, nil), jobs.NewReembed(jobs.ReembedOptions{})
+		},
+		"a brake whose time has passed": func(d *Deps) {
+			d.Reembed = reembedAt{jobs.ReembedProgress{Active: true,
+				Brake: jobs.ReembedBrake{Until: time.Now().Add(-time.Second), Failures: 3, Documents: []string{"d1"}}}}
+		},
+	} {
+		got := health(t, newTestServer(t, d))
+		assert.NotContains(t, got, "embedder_hold", name)
+		assert.NotContains(t, got, "reembed_brake", name)
+	}
+
+	got := health(t, newTestServer(t, func(d *Deps) {
+		d.Hold = holdAt{jobs.HoldState{Held: true, Since: since, Err: "ollama unreachable: connection refused"}}
+		d.Reembed = reembedAt{jobs.ReembedProgress{Active: true,
+			Brake: jobs.ReembedBrake{Until: until, Failures: 3, Documents: []string{"d1", "d2", "d3"},
+				Err: "HTTP 500: boom"}}}
+	}))
+	assert.Equal(t, map[string]any{"since": "2026-10-14T14:02:00Z", "error": "ollama unreachable: connection refused"},
+		got["embedder_hold"])
+	assert.Equal(t, map[string]any{"until": until.UTC().Format(time.RFC3339), "failures": 3.0,
+		"documents": []any{"d1", "d2", "d3"}, "error": "HTTP 500: boom"}, got["reembed_brake"])
+}
+
+// TestStats_Reembed: stats counts the fetched documents whose chunks
+// predate the chunk context, and those chunks, the re-embed's backlog,
+// with its rate and the time left at it while it runs and has one; it
+// leaves the object out when nothing is left, and one it can't count fails
+// the whole answer, like the other counts.
+func TestStats_Reembed(t *testing.T) {
+	stats := func(t *testing.T, s *testServer) map[string]any {
+		t.Helper()
+		resp := s.do(t, request{method: http.MethodGet, path: "/v1/stats"})
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		var got map[string]any
+		require.NoError(t, json.Unmarshal([]byte(resp.body), &got))
+		return got
+	}
+	seed := func(t *testing.T, s *testServer) {
+		t.Helper()
+		ctx := context.Background()
+		for i, versions := range [][]int{{0, 0, 0}, {indexer.ContextVersion}, {0}} {
+			doc := s.seedDocument(t, fmt.Sprintf("https://example.com/%d", i), store.DocStateFetched)
+			ext := &store.DocumentExtraction{DocumentID: doc.ID, Fetcher: "test", Status: store.ExtractionStatusOK,
+				FetchedAt: time.Now().UTC()}
+			require.NoError(t, s.deps.Extractions.Create(ctx, ext))
+			require.NoError(t, s.deps.Documents.SetCurrentExtraction(ctx, doc.ID, ext.ID))
+			inputs := make([]store.ChunkInput, len(versions))
+			for j, v := range versions {
+				inputs[j] = store.ChunkInput{Text: "text", ContextVersion: v, Embedding: unitVec()}
+			}
+			require.NoError(t, s.deps.Chunks.ReplaceForDocument(ctx, doc.ID, ext.ID, "", nil, inputs))
+		}
+	}
+	s := newTestServer(t)
+	assert.NotContains(t, stats(t, s), "reembed", "a new library has none")
+	seed(t, s)
+	assert.Equal(t, map[string]any{"documents": 2.0, "chunks": 4.0}, stats(t, s)["reembed"],
+		"the two embedded before chunk context, and their chunks; no rate without a re-embed running")
+
+	running := newTestServer(t, func(d *Deps) {
+		d.Reembed = reembedAt{jobs.ReembedProgress{Active: true, ChunksPerSecond: 0.5}}
+	})
+	seed(t, running)
+	assert.Equal(t, map[string]any{"documents": 2.0, "chunks": 4.0, "chunks_per_second": 0.5, "eta_seconds": 8.0},
+		stats(t, running)["reembed"], "4 chunks at half a chunk a second")
+	done := newTestServer(t, func(d *Deps) {
+		d.Reembed = reembedAt{jobs.ReembedProgress{ChunksPerSecond: 0.5}}
+	})
+	seed(t, done)
+	assert.Equal(t, map[string]any{"documents": 2.0, "chunks": 4.0}, stats(t, done)["reembed"],
+		"no rate from a re-embed that isn't running")
+
+	failing := newTestServer(t, func(d *Deps) { d.Documents = failingReembedCount{d.Documents} })
+	assertProblem(t, failing.do(t, request{method: http.MethodGet, path: "/v1/stats"}), http.StatusInternalServerError)
 }
 
 // driftMonitor is a DriftMonitor that reports report and counts

@@ -1411,6 +1411,8 @@ func TestDocument_JobLines(t *testing.T) {
 		textOf(byID(parse(t, deferred), "doc-jobs")))
 	held := jobsOf(DocumentJobs{State: "pending", Jobs: []JobLine{{Kind: "fetch"}}, Hold: "paused"})
 	assert.Contains(t, held, `<a id="doc-jobs-hold" href="/ui/status">The queue is closed: Paused</a>`)
+	assert.Contains(t, jobsOf(DocumentJobs{State: "pending", Jobs: []JobLine{{Kind: "index"}}, Hold: HoldEmbedder}),
+		`<a id="doc-jobs-hold" href="/ui/status">Waiting for the embedding model to answer</a>`)
 	assert.NotContains(t, jobsOf(DocumentJobs{State: "pending", Jobs: []JobLine{{Kind: "fetch", Running: true}},
 		Hold: "paused"}), "closed", "a running job isn't held")
 

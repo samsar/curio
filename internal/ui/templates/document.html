@@ -144,7 +144,7 @@ a poll; no live role.
 {{- with .LastError}}<span class="visually-hidden">: </span><span class="job-why" title="{{.}}">{{shortError .}}</span>{{end}}
 {{- else}}queued{{if .Attempts}} · attempt {{.Attempt}} of {{$.AttemptLimit}}{{end}}{{end}}</li>
 {{- end}}</ul>{{end}}
-{{- if and .Queued .Hold}}<p class="job-hold"><a id="doc-jobs-hold" href="{{navHref "status"}}">The queue is closed: {{queueReason .Hold}}</a></p>{{end}}
+{{- if and .Queued .Hold}}<p class="job-hold"><a id="doc-jobs-hold" href="{{navHref "status"}}">{{jobHold .Hold}}</a></p>{{end}}
 {{- if eq .Outcome "text-changed"}}<p class="job-outcome">The text changed: <a id="doc-reload" href="{{documentHref .DocumentID}}">reload</a></p>
 {{- else if eq .Outcome "failed"}}<p class="job-outcome">It failed: <a id="doc-reload" href="{{documentHref .DocumentID}}">reload to see why</a></p>
 {{- else if eq .Outcome "updated"}}<p class="job-outcome">Updated: <a id="doc-reload" href="{{documentHref .DocumentID}}">reload</a></p>{{end}}

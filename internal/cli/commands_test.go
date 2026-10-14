@@ -27,6 +27,7 @@ import (
 	"github.com/samsar/curio/internal/drift"
 	"github.com/samsar/curio/internal/fetcher"
 	"github.com/samsar/curio/internal/insight"
+	"github.com/samsar/curio/internal/jobs"
 	"github.com/samsar/curio/internal/service/servicetest"
 	"github.com/samsar/curio/internal/setup"
 	"github.com/samsar/curio/internal/setup/setuptest"
@@ -1202,6 +1203,134 @@ func TestDoctor_Cards(t *testing.T) {
 	line, hint = doctorLine(t, out, "cards")
 	assert.Equal(t, fmt.Sprintf("! %-22s 2 cards to embed, and no cards job is queued to embed them", "cards"), line)
 	assert.Contains(t, hint, "its start queues the job")
+}
+
+// TestDoctor_ChunkContext: documents left to re-embed for the chunk
+// context pass doctor while index jobs are queued, and warn once none is,
+// with the restart that resumes their re-embed; a count or a listing the
+// daemon can't make is a warning that says which.
+func TestDoctor_ChunkContext(t *testing.T) {
+	w := upWorld(t)
+	doc := w.srv.AddDocument(t, "https://example.com/a", store.DocStateFetched)
+	w.srv.AddContent(t, doc, "indexed")
+	out, err := w.run(t, "doctor")
+	require.NoError(t, err, out)
+	line, _ := doctorLine(t, out, "chunk context")
+	assert.Equal(t, fmt.Sprintf("✓ %-22s every document's chunks are embedded with their context", "chunk context"), line)
+
+	_, err = w.srv.DB.Exec(`UPDATE chunks SET context_version = 0`)
+	require.NoError(t, err)
+	out, err = w.run(t, "doctor")
+	require.NoError(t, err, out)
+	line, hint := doctorLine(t, out, "chunk context")
+	assert.Equal(t, fmt.Sprintf("! %-22s 1 document (1 chunk) to re-embed for the new chunk context, and no index "+
+		"job is queued to re-embed it", "chunk context"), line)
+	assert.Contains(t, hint, "its start resumes the re-embed")
+
+	job, err := store.NewDocumentJob("local", store.JobKindIndex, doc.ID)
+	require.NoError(t, err)
+	require.NoError(t, w.srv.Deps.Queue.Enqueue(context.Background(), job))
+	out, err = w.run(t, "doctor")
+	require.NoError(t, err, out)
+	line, _ = doctorLine(t, out, "chunk context")
+	assert.Equal(t, "✓", markerOf(line), line)
+
+	t.Run("a count the daemon can't make", func(t *testing.T) {
+		w := upWorld(t, func(d *api.Deps) { d.Documents = uncountable{d.Documents} })
+		out, err := w.run(t, "doctor")
+		require.NoError(t, err, out)
+		line, hint := doctorLine(t, out, "chunk context")
+		assert.Equal(t, "!", markerOf(line), line)
+		assert.Contains(t, line, "couldn't count the documents left to re-embed: ")
+		assert.Empty(t, hint)
+		line, _ = doctorLine(t, out, "cards")
+		assert.Contains(t, line, "couldn't count the cards left to embed: ", "the same read, failed once")
+	})
+	t.Run("index jobs the daemon can't list", func(t *testing.T) {
+		w := upWorld(t, func(d *api.Deps) { d.Queue = unlistable{d.Queue} })
+		doc := w.srv.AddDocument(t, "https://example.com/a", store.DocStateFetched)
+		w.srv.AddContent(t, doc, "indexed")
+		_, err := w.srv.DB.Exec(`UPDATE chunks SET context_version = 0`)
+		require.NoError(t, err)
+		out, err := w.run(t, "doctor")
+		require.NoError(t, err, out)
+		line, hint := doctorLine(t, out, "chunk context")
+		assert.Equal(t, "!", markerOf(line), line)
+		assert.Contains(t, line, "couldn't list the index jobs: ")
+		assert.Empty(t, hint)
+	})
+}
+
+// heldEmbedder is an embedder hold in a fixed state.
+type heldEmbedder struct{ state jobs.HoldState }
+
+func (h heldEmbedder) State() jobs.HoldState { return h.state }
+
+// TestDoctorAndStatus_HoldAndBrake: while the daemon holds its index and
+// cards jobs for an embedding model that doesn't answer, and while the
+// re-embed's brake stops it, status says each in one warning line, and
+// doctor warns of each with what fixes the model; neither shows without
+// them.
+func TestDoctorAndStatus_HoldAndBrake(t *testing.T) {
+	since := time.Date(2026, 10, 14, 14, 2, 0, 0, time.UTC)
+	until := time.Now().Add(time.Hour)
+	w := upWorld(t, func(d *api.Deps) {
+		d.Hold = heldEmbedder{jobs.HoldState{Held: true, Since: since, Err: "ollama unreachable: connection refused"}}
+		d.Reembed = reembedAt{jobs.ReembedProgress{Active: true, Brake: jobs.ReembedBrake{Until: until, Failures: 3,
+			Documents: []string{"d1", "d2", "d3"}, Err: "HTTP 500: llama runner process has terminated"}}}
+	})
+	doc := w.srv.AddDocument(t, "https://example.com/a", store.DocStateFetched)
+	w.srv.AddContent(t, doc, "indexed")
+	_, err := w.srv.DB.Exec(`UPDATE chunks SET context_version = 0`)
+	require.NoError(t, err)
+
+	out, err := w.run(t, "status")
+	require.NoError(t, err)
+	assert.Contains(t, out, "warning: the embedding model hasn't answered since "+localTime(since)+
+		" (ollama unreachable: connection refused); index and cards jobs wait for it; run `curio doctor`\n")
+	assert.Contains(t, out, "warning: the re-embed for the new chunk context waits until "+localTime(until)+
+		": the re-embeds of 3 documents failed in a row (HTTP 500: llama runner process has terminated); run "+
+		"`curio doctor`\n")
+
+	out, err = w.run(t, "doctor")
+	require.NoError(t, err, out)
+	line, hint := doctorLine(t, out, "index jobs")
+	assert.Equal(t, fmt.Sprintf("! %-22s held since %s: the embedding model doesn't answer (ollama unreachable: "+
+		"connection refused); index and cards jobs wait for it, failing nothing", "index jobs", localTime(since)), line)
+	assert.Equal(t, embedderFix, hint)
+	line, hint = doctorLine(t, out, "chunk context")
+	assert.Equal(t, "!", markerOf(line), line)
+	assert.Contains(t, line, "the re-embed waits until "+localTime(until)+", the re-embeds of 3 documents having "+
+		"failed in a row (d1, d2 and d3): HTTP 500: llama runner process has terminated")
+	assert.Equal(t, reembedBrakeFix, hint)
+
+	quiet := upWorld(t)
+	out, err = quiet.run(t, "status")
+	require.NoError(t, err)
+	assert.NotContains(t, out, "embedding model hasn't answered")
+	assert.NotContains(t, out, "waits until")
+	out, err = quiet.run(t, "doctor")
+	require.NoError(t, err, out)
+	assert.NotContains(t, out, "index jobs")
+}
+
+// uncountable is a document store that can't count what is left to
+// re-embed, so /v1/stats fails.
+type uncountable struct{ store.DocumentStore }
+
+func (uncountable) CountToReembed(context.Context, string, int) (store.ReembedCount, error) {
+	return store.ReembedCount{}, errors.New("database is locked")
+}
+
+// unlistable is a job store that can't list the index jobs.
+type unlistable struct{ store.JobStore }
+
+func (u unlistable) ListWithDoc(ctx context.Context, tenantID string, opts store.ListJobsOpts) ([]store.JobWithDoc,
+	error) {
+	if opts.Kind == store.JobKindIndex {
+		return nil, errors.New("database is locked")
+	}
+	return u.JobStore.ListWithDoc(ctx, tenantID, opts)
 }
 
 func TestReindex_HelpNamesDrift(t *testing.T) {

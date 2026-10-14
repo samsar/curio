@@ -95,15 +95,16 @@ func newTestDeps(t *testing.T) (Deps, *sqlitestore.DB, *fakeFetcher) {
 	idx := indexer.New(chunks, &fakeEmbedder{dim: dim}, indexer.Options{})
 
 	return Deps{
-		Home:        home,
-		Documents:   docs,
-		Extractions: exts,
-		Bookmarks:   bms,
-		Queue:       queue,
-		Dispatcher:  dispatcher,
-		Indexer:     idx,
-		Cards:       sqlitestore.NewDocumentIndex(db, dim),
-		Log:         quietLog,
+		ContentDir:    home.ContentDir(),
+		Documents:     docs,
+		Extractions:   exts,
+		Bookmarks:     bms,
+		Queue:         queue,
+		Dispatcher:    dispatcher,
+		Indexer:       idx,
+		Chunks:        chunks,
+		DocumentIndex: sqlitestore.NewDocumentIndex(db, dim),
+		Log:           quietLog,
 	}, db, ff
 }
 
@@ -144,7 +145,7 @@ func TestFetchHandler_HappyPath(t *testing.T) {
 	assert.Contains(t, *ext.MarkdownPath, doc.ID)
 
 	// File written to disk.
-	fullPath := deps.Home.ContentDir() + "/" + *ext.MarkdownPath
+	fullPath := deps.ContentDir + "/" + *ext.MarkdownPath
 	info, err := os.Stat(fullPath)
 	require.NoError(t, err)
 	assert.Greater(t, info.Size(), int64(0))
@@ -322,7 +323,7 @@ func TestFetchHandler_HeldFetchIsDeferred(t *testing.T) {
 	require.NoError(t, db.QueryRow(`SELECT count(*) FROM jobs WHERE kind = ?`, store.JobKindIndex).Scan(&indexJobs))
 	assert.Zero(t, extractions)
 	assert.Zero(t, indexJobs)
-	_, err = os.Stat(filepath.Join(deps.Home.ContentDir(), doc.ID))
+	_, err = os.Stat(filepath.Join(deps.ContentDir, doc.ID))
 	assert.ErrorIs(t, err, fs.ErrNotExist, "no markdown written")
 
 	ff.err = &fetcher.PermanentError{Err: held}
@@ -561,6 +562,136 @@ func TestIndexHandler_BookmarkTagsAreSearchable(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, hits, "bookmark tag should be searchable via chunks_fts")
 	assert.Equal(t, doc.ID, hits[0].DocumentID)
+}
+
+// chunkContexts is each of a document's chunks' context and context
+// version, in order.
+func chunkContexts(t *testing.T, db *sqlitestore.DB, docID string) [][2]any {
+	t.Helper()
+	rows, err := db.Query(`SELECT context, context_version FROM chunks WHERE document_id = ? ORDER BY ord`, docID)
+	require.NoError(t, err)
+	defer rows.Close()
+	var out [][2]any
+	for rows.Next() {
+		var (
+			about   string
+			version int
+		)
+		require.NoError(t, rows.Scan(&about, &version))
+		out = append(out, [2]any{about, version})
+	}
+	require.NoError(t, rows.Err())
+	return out
+}
+
+// TestIndexHandler_ChunkContext: each chunk is stored with the context its
+// document gives it: its title, else the title it was saved as; its site's
+// name, else its host, from its fields, else from its URL; and the
+// headings the chunk sits under.
+func TestIndexHandler_ChunkContext(t *testing.T) {
+	for name, tc := range map[string]struct {
+		url, title, saved string
+		noFields          bool
+		want              string
+	}{
+		"titled":                     {url: "https://example.com/a", title: "Article Title", want: "Article Title — example.com — Title"},
+		"untitled, saved as a title": {url: "https://example.com/b", saved: "Saved as this", want: "Saved as this — example.com — Title"},
+		"no fields row":              {url: "https://www.example.org/c", title: "T", noFields: true, want: "T — example.org — Title"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			deps, db, ff := newTestDeps(t)
+			ctx := context.Background()
+			ff.res.Title = tc.title
+			doc := &store.Document{TenantID: "local", URL: tc.url}
+			require.NoError(t, deps.Documents.Create(ctx, doc))
+			if tc.saved != "" {
+				docID := doc.ID
+				require.NoError(t, deps.Bookmarks.Create(ctx, &store.Bookmark{TenantID: "local", DocumentID: &docID,
+					URL: doc.URL, Source: store.SourceChrome, SavedAt: time.Now().UTC(), Title: &tc.saved}))
+			}
+			require.NoError(t, fetchHandler(deps)(ctx, docJob(t, store.JobKindFetch, doc.ID)))
+			if tc.noFields {
+				_, err := db.Exec(`DELETE FROM document_fields WHERE document_id = ?`, doc.ID)
+				require.NoError(t, err)
+			}
+
+			require.NoError(t, indexHandler(deps)(ctx, docJob(t, store.JobKindIndex, doc.ID)))
+			assert.Equal(t, [][2]any{{tc.want, indexer.ContextVersion}}, chunkContexts(t, db, doc.ID))
+		})
+	}
+}
+
+// failingBookmarks fails ListByDocument.
+type failingBookmarks struct{ store.BookmarkStore }
+
+func (failingBookmarks) ListByDocument(context.Context, string, string) ([]*store.Bookmark, error) {
+	return nil, errors.New("database is locked")
+}
+
+// failingSites fails Site.
+type failingSites struct{ store.DocumentIndex }
+
+func (failingSites) Site(context.Context, string, string) (store.DocumentSite, error) {
+	return store.DocumentSite{}, errors.New("database is locked")
+}
+
+// TestIndexHandler_AFailedContextReadIsRetried: a document whose
+// bookmarks or site can't be read is retried, never indexed with a
+// context missing what they would give it: nothing is written.
+func TestIndexHandler_AFailedContextReadIsRetried(t *testing.T) {
+	for name, fail := range map[string]func(*Deps){
+		"bookmarks": func(d *Deps) { d.Bookmarks = failingBookmarks{d.Bookmarks} },
+		"site":      func(d *Deps) { d.DocumentIndex = failingSites{d.DocumentIndex} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			deps, db, _ := newTestDeps(t)
+			ctx := context.Background()
+			doc := &store.Document{TenantID: "local", URL: "https://example.com/a"}
+			require.NoError(t, deps.Documents.Create(ctx, doc))
+			require.NoError(t, fetchHandler(deps)(ctx, docJob(t, store.JobKindFetch, doc.ID)))
+			fail(&deps)
+
+			err := indexHandler(deps)(ctx, docJob(t, store.JobKindIndex, doc.ID))
+			require.ErrorContains(t, err, "database is locked")
+			assert.NotErrorIs(t, err, ErrPermanent)
+			assert.Empty(t, chunkContexts(t, db, doc.ID), "no chunk written")
+			got, err := deps.Documents.GetByID(ctx, doc.ID)
+			require.NoError(t, err)
+			assert.Equal(t, store.DocStatePending, got.State)
+		})
+	}
+}
+
+// TestIndexHandler_MissingMarkdownIsPermanent: an extraction whose
+// markdown file is gone, or that names none, fails the index job at once:
+// retrying can't bring the file back.
+func TestIndexHandler_MissingMarkdownIsPermanent(t *testing.T) {
+	for name, lose := range map[string]func(t *testing.T, db *sqlitestore.DB, deps Deps, ext *store.DocumentExtraction){
+		"the file is gone": func(t *testing.T, _ *sqlitestore.DB, deps Deps, ext *store.DocumentExtraction) {
+			require.NoError(t, os.Remove(filepath.Join(deps.ContentDir, *ext.MarkdownPath)))
+		},
+		"no markdown path": func(t *testing.T, db *sqlitestore.DB, _ Deps, ext *store.DocumentExtraction) {
+			_, err := db.Exec(`UPDATE document_extractions SET markdown_path = NULL WHERE id = ?`, ext.ID)
+			require.NoError(t, err)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			deps, db, _ := newTestDeps(t)
+			ctx := context.Background()
+			doc := &store.Document{TenantID: "local", URL: "https://example.com/a"}
+			require.NoError(t, deps.Documents.Create(ctx, doc))
+			require.NoError(t, fetchHandler(deps)(ctx, docJob(t, store.JobKindFetch, doc.ID)))
+			got, err := deps.Documents.GetByID(ctx, doc.ID)
+			require.NoError(t, err)
+			ext, err := deps.Extractions.GetByID(ctx, *got.CurrentExtractionID)
+			require.NoError(t, err)
+			lose(t, db, deps, ext)
+
+			err = indexHandler(deps)(ctx, docJob(t, store.JobKindIndex, doc.ID))
+			require.ErrorIs(t, err, ErrPermanent)
+			require.ErrorIs(t, err, ErrNoMarkdown)
+		})
+	}
 }
 
 func TestIndexHandler_MissingExtraction_Permanent(t *testing.T) {
@@ -846,18 +977,19 @@ func (e refusingEmbedder) Embed(context.Context, []string) ([][]float32, error) 
 // chunk the model refuses as too long, or whose vectors come back at the
 // wrong width, fails on its first attempt instead of repeating the same
 // request, and its document goes failed for index, not dead. last_error
-// says which chunks and why.
+// says which chunks and why: the chunk refused alone, even without its
+// context, or the batch whose vectors are the wrong width.
 func TestWorker_DeterministicEmbedFailureIsPermanent(t *testing.T) {
 	cases := []struct {
-		name   string
-		err    error
-		reason string
+		name          string
+		err           error
+		where, reason string
 	}{
 		{"input too long", fmt.Errorf("ollama embed: %w: %w", embedder.ErrInputTooLong,
 			&ollama.StatusError{Code: http.StatusBadRequest, Body: `{"error":"the input length exceeds the context length"}`}),
-			"the input length exceeds the context length"},
+			"embed chunk 0 of 1", "the input length exceeds the context length"},
 		{"wrong dimension", fmt.Errorf("ollama embed: %w: embedding[0] has dim 768, expected 1024",
-			embedder.ErrWrongDimension), "has dim 768, expected 1024"},
+			embedder.ErrWrongDimension), "embed chunks 0-0 of 1", "has dim 768, expected 1024"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -882,7 +1014,7 @@ func TestWorker_DeterministicEmbedFailureIsPermanent(t *testing.T) {
 			require.NoError(t, db.QueryRow(`SELECT attempts, last_error FROM jobs WHERE kind = ?`, store.JobKindIndex).
 				Scan(&attempts, &lastError))
 			assert.Equal(t, 1, attempts, "not retried")
-			assert.Contains(t, lastError, "embed chunks 0-0 of 1")
+			assert.Contains(t, lastError, tc.where)
 			assert.Contains(t, lastError, tc.reason)
 			got, err := deps.Documents.GetByID(ctx, doc.ID)
 			require.NoError(t, err)

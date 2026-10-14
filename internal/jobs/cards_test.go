@@ -79,14 +79,15 @@ func cardsJob(t *testing.T, db *sqlitestore.DB) *store.Job {
 
 func staleCards(t *testing.T, deps Deps) int {
 	t.Helper()
-	stale, err := deps.Cards.StaleCards(context.Background(), "local", "", 1000)
+	stale, err := deps.DocumentIndex.StaleCards(context.Background(), "local", "", 1000)
 	require.NoError(t, err)
 	return len(stale)
 }
 
 // TestCardsJob_EmbedsTheStaleCards: the cards pool runs the queued job to
-// done, every stale card embedded with the document prefix, 32 to a
-// request; a job with nothing stale is done without calling the embedder.
+// done, every stale card embedded with the document prefix,
+// indexer.EmbedBatchSize to a request; a job with nothing stale is done
+// without calling the embedder.
 func TestCardsJob_EmbedsTheStaleCards(t *testing.T) {
 	emb := &cardsEmbedder{}
 	deps, db := newCardsDeps(t, 70, emb)
@@ -97,8 +98,11 @@ func TestCardsJob_EmbedsTheStaleCards(t *testing.T) {
 		assert.Equal(c, store.JobStatusDone, got.Status)
 	})
 	sent := emb.sent()
-	require.Len(t, sent, 3, "ceil(70/32) requests")
-	assert.Equal(t, []int{32, 32, 6}, []int{len(sent[0]), len(sent[1]), len(sent[2])})
+	sizes := make([]int, len(sent))
+	for i, b := range sent {
+		sizes[i] = len(b)
+	}
+	assert.Equal(t, append(slices.Repeat([]int{indexer.EmbedBatchSize}, 8), 6), sizes, "70 cards in batches")
 	for _, b := range sent {
 		for _, text := range b {
 			assert.Regexp(t, `^doc: Page \d+ — example\.com$`, text)
@@ -113,7 +117,7 @@ func TestCardsJob_EmbedsTheStaleCards(t *testing.T) {
 		require.NoError(c, err)
 		assert.Equal(c, store.JobStatusDone, got.Status)
 	})
-	assert.Len(t, emb.sent(), 3, "nothing stale, nothing sent")
+	assert.Len(t, emb.sent(), len(sent), "nothing stale, nothing sent")
 }
 
 // TestCardsJob_SharedByABurst: an import's burst of card changes, 60
@@ -229,14 +233,14 @@ func TestCardsJob_ACardTooLong(t *testing.T) {
 // the embedding model, at least a minute and at most five, so it runs at
 // most five minutes after the model answers again.
 func TestCardsJob_DeferralGrowsWithAge(t *testing.T) {
-	assert.Equal(t, 5*time.Minute, maxCardsWait)
+	assert.Equal(t, 5*time.Minute, maxEmbedWait)
 	for age, want := range map[time.Duration]time.Duration{
-		0:                minCardsWait,
-		90 * time.Second: minCardsWait,
+		0:                minEmbedWait,
+		90 * time.Second: minEmbedWait,
 		6 * time.Minute:  3 * time.Minute,
-		10 * time.Minute: maxCardsWait,
-		2 * time.Hour:    maxCardsWait,
-		23 * time.Hour:   maxCardsWait,
+		10 * time.Minute: maxEmbedWait,
+		2 * time.Hour:    maxEmbedWait,
+		23 * time.Hour:   maxEmbedWait,
 	} {
 		assert.Equal(t, want, deferral(age), age)
 	}
@@ -248,7 +252,7 @@ func TestCardsJob_DeferralGrowsWithAge(t *testing.T) {
 	err := cardsHandler(deps)(context.Background(), job)
 	de, ok := errors.AsType[*DeferError](err)
 	require.True(t, ok, "%v", err)
-	assert.Equal(t, cardsWaitReason, de.Reason)
+	assert.Equal(t, embedWaitReason, de.Reason)
 	assert.WithinDuration(t, time.Now().Add(5*time.Minute), de.Until, 5*time.Second)
 	assert.ErrorIs(t, de, ollama.ErrUnreachable)
 }
@@ -305,7 +309,7 @@ func TestCardsJob_InterruptedKeepsWhatItEmbedded(t *testing.T) {
 	deps, db := newCardsDeps(t, 40, emb)
 	job := cardsJob(t, db)
 	ctx, cancel := context.WithCancel(context.Background())
-	deps.Cards = cancelAfterPut{DocumentIndex: deps.Cards, cancel: cancel}
+	deps.DocumentIndex = cancelAfterPut{DocumentIndex: deps.DocumentIndex, cancel: cancel}
 	w := NewWorker(deps.Queue, WorkerOptions{PollInterval: 10 * time.Millisecond, Log: quietLog})
 	w.Register(store.JobKindCards, cardsHandler(deps))
 	require.ErrorIs(t, w.Run(ctx), context.Canceled)
@@ -314,7 +318,7 @@ func TestCardsJob_InterruptedKeepsWhatItEmbedded(t *testing.T) {
 	assert.Equal(t, store.JobStatusPending, got.Status)
 	assert.Zero(t, got.Attempts, "the attempt is refunded")
 	assert.Len(t, emb.sent(), 1, "no batch is sent after the shutdown")
-	assert.Equal(t, 8, staleCards(t, deps), "the first batch stays embedded")
+	assert.Equal(t, 40-indexer.EmbedBatchSize, staleCards(t, deps), "the first batch stays embedded")
 }
 
 // cancelAfterPut is a card index that cancels a run once it stores a

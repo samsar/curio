@@ -28,6 +28,10 @@ func TestRun_Usage(t *testing.T) {
 			`variant "bm25" named twice`},
 		{"no variant", []string{"-db", "x.db", "-queries", "q.yaml", "-variants", ""}, exitUsage, `unknown variant ""`},
 		{"an argument", []string{"-db", "x.db", "-queries", "q.yaml", "extra"}, exitUsage, `unexpected argument "extra"`},
+		{"-reindex alone", []string{"-db", "x.db", "-queries", "q.yaml", "-reindex"}, exitUsage,
+			"-reindex needs -content"},
+		{"-content alone", []string{"-db", "x.db", "-queries", "q.yaml", "-content", "dir"}, exitUsage,
+			"-content is read only with -reindex"},
 		{"help", []string{"-h"}, exitOK, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -36,7 +40,8 @@ func TestRun_Usage(t *testing.T) {
 			assert.Empty(t, res.stdout)
 			assert.Contains(t, res.stderr, tc.says)
 			assert.Contains(t, res.stderr, "usage: searcheval -db <copy of curio.db> -queries <file> "+
-				"[-config <config.yaml>] [-json <file>] [-baseline <previous -json>] [-variants hybrid,bm25,vector,fields,cards,titles]")
+				"[-config <config.yaml>] [-json <file>] [-baseline <previous -json>] "+
+				"[-variants hybrid,bm25,vector,fields,cards,titles] [-reindex -content <dir>]")
 		})
 	}
 }

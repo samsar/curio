@@ -44,7 +44,7 @@ when the entry was first committed.
 - 2026-05-23 — [Chunker enforces a 3500-char hard cap (not just 384 words)](#chunker-enforces-a-3500-char-hard-cap-not-just-384-words) (revised)
 - 2026-05-23 — [Embedder passes num_ctx=8192 to Ollama, chunker defaults to 384 words](#embedder-passes-num_ctx8192-to-ollama-chunker-defaults-to-384-words) (revised)
 - 2026-09-24 — [Indexer: embed in batches of 32; `embedding.timeout_seconds`](#indexer-embed-in-batches-of-32-embeddingtimeout_seconds) (revised)
-- 2026-05-24 — [Document state follows job outcome via OnPermanentFailure hook](#document-state-follows-job-outcome-via-onpermanentfailure-hook)
+- 2026-05-24 — [Document state follows job outcome via OnPermanentFailure hook](#document-state-follows-job-outcome-via-onpermanentfailure-hook) (revised)
 - 2026-05-24 — [Fallback strategy: only Jina for content-came-back cases](#fallback-strategy-only-jina-for-content-came-back-cases)
 - 2026-05-24 — [Anti-bot mitigation: browser-thorough headers, not just User-Agent](#anti-bot-mitigation-browser-thorough-headers-not-just-user-agent)
 - 2026-06-04 — [Anti-bot mitigation: pluggable TLS/HTTP2 fingerprint backend (uTLS)](#anti-bot-mitigation-pluggable-tlshttp2-fingerprint-backend-utls) (revised)
@@ -94,7 +94,7 @@ when the entry was first committed.
 - 2026-09-24 — [Migrate: goose's Provider, and a context all the way down](#migrate-gooses-provider-and-a-context-all-the-way-down) (revised)
 - 2026-09-24 — [Folder and host filters: literal input, segment-boundary folders](#folder-and-host-filters-literal-input-segment-boundary-folders) (revised)
 - 2026-09-24 — [API: handler edge cases found by coverage](#api-handler-edge-cases-found-by-coverage) (revised)
-- 2026-09-25 — [updated_at: written by each statement, not by triggers](#updated_at-written-by-each-statement-not-by-triggers)
+- 2026-09-25 — [updated_at: written by each statement, not by triggers](#updated_at-written-by-each-statement-not-by-triggers) (revised)
 - 2026-09-25 — [Jobs reference their document through a column](#jobs-reference-their-document-through-a-column)
 - 2026-09-25 — [Indexes follow the queries; plans are pinned by tests](#indexes-follow-the-queries-plans-are-pinned-by-tests) (revised)
 - 2026-09-25 — [Chunks: external-content FTS, derived rows kept by triggers](#chunks-external-content-fts-derived-rows-kept-by-triggers) (revised)
@@ -128,7 +128,7 @@ when the entry was first committed.
 - 2026-09-27 — [Jina requests identify as curio](#jina-requests-identify-as-curio) (revised)
 - 2026-09-27 — [Fetch upstream health: Jina's calls are tracked and reported](#fetch-upstream-health-jinas-calls-are-tracked-and-reported) (revised)
 - 2026-09-27 — [Jina refusing a target is a verdict](#jina-refusing-a-target-is-a-verdict) (revised)
-- 2026-09-27 — [Queue gate: pause, throttle and schedule, persisted in SQLite](#queue-gate-pause-throttle-and-schedule-persisted-in-sqlite)
+- 2026-09-27 — [Queue gate: pause, throttle and schedule, persisted in SQLite](#queue-gate-pause-throttle-and-schedule-persisted-in-sqlite) (revised)
 - 2026-09-27 — [Embedding model and per-home width](#embedding-model-and-per-home-width)
 - 2026-09-27 — [Embedding drift: the marker records the build, healthz reports a change](#embedding-drift-the-marker-records-the-build-healthz-reports-a-change) (revised)
 - 2026-09-27 — [Embeddings never truncate; an over-long chunk fails at once](#embeddings-never-truncate-an-over-long-chunk-fails-at-once)
@@ -163,6 +163,7 @@ when the entry was first committed.
 - 2026-10-13 — [Model roles: a provider and model per use, inheriting generation's](#model-roles-a-provider-and-model-per-use-inheriting-generations)
 - 2026-10-13 — [Metadata search: a fields index and a card per document](#metadata-search-a-fields-index-and-a-card-per-document) (revised)
 - 2026-10-14 — [Saved dates and search filters](#saved-dates-and-search-filters)
+- 2026-10-14 — [Chunks embedded with their context](#chunks-embedded-with-their-context)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -1115,6 +1116,18 @@ timeout. How long a 32-chunk batch takes with the new model is unmeasured;
 `curio up` is to measure one to estimate an import, and the batch size and
 the default timeout are to be re-checked against that number.
 
+**Revised (2026-10-14):** batches of 8 (`indexer.EmbedBatchSize`), for
+chunks, cards and the drift sample alike. Ollama embeds a batch's inputs
+one after another, so the size sets how long a search's query embedding
+waits behind indexing, not how fast it goes. Re-embedding the owner's
+chunks with 4 index workers, query embeds waited 6.0 s at the 95th
+percentile in batches of 32, 3.6 s at the median, and four workers in
+long documents at once (4 × ~2.9 s) passed search's 10 s timeout; in
+batches of 8, 3.35 s at the 95th percentile, at the same 11.2 chunks a
+second (11.73 against 11.75 single-stream, cards 4% slower). `curio up`
+times one batch of 8 to estimate an import. See "Chunks embedded with
+their context".
+
 ---
 
 ## Document state follows job outcome via OnPermanentFailure hook
@@ -1142,6 +1155,19 @@ a fresh attempts counter.
 `dead` is reserved in the constants but unused. Eventually it'd mean
 "don't even allow refetch" — saved for when we have a retention or
 give-up-permanently policy.
+
+**Revised (2026-10-14):** one index job is the exception: the re-embed the
+daemon feeds for a new chunk context (payload `reembed`). Its failure
+leaves the document fetched and searchable by its earlier vectors, with a
+WARN, and the re-embed queues it again; at its third failure for good,
+once another document was indexed since its first, the document keeps
+those vectors, recorded as current, while a failure every document's
+embed meets indexes nobody, keeps none, and stops the re-embed for a
+while. An index
+job's embed that gets no answer from Ollama, re-embed or not, is
+deferred and holds the index jobs back rather than spending their
+retries, so an outage fails no document. See "Chunks embedded with their
+context".
 
 ---
 
@@ -3587,6 +3613,15 @@ The triggers migration 008 adds on `chunks` are a different kind (see
 "Chunks: external-content FTS"): they keep derived tables in step with
 their source, and nothing reads those back through RETURNING.
 
+**Revised (2026-10-14):** one UPDATE leaves `updated_at` alone on
+purpose: a re-embed's record of its new vectors (`MarkIndexed` for a
+re-embed writes `word_count` and `indexed_at` alone). The document didn't
+change; `updated_at` orders the Library, `curio docs` and their keyset
+pages, which a re-embed of every document would otherwise reshuffle for
+its whole run, and `indexed_at` is what the interests read of new
+vectors. Every other UPDATE still writes it in the same statement. See
+"Chunks embedded with their context".
+
 ---
 
 ## Jobs reference their document through a column
@@ -3827,6 +3862,30 @@ pinned as vec0's KNN-rowid-IN plan over a `LIST SUBQUERY`, never a scan
 of `chunks`; the over-fetch at k = 4,096 keeps the unfiltered KNN's plan.
 See "Saved dates and search filters".
 
+**Revised (2026-10-14):** migration 021 adds `idx_chunks_context_version
+(context_version, document_id)`, which makes the chunks embedded under an
+older chunk context one covering range. The re-embed's reads are pinned
+on it: `DocumentsToReembed` lists the range for the tenant's fetched
+documents (`idx_documents_tenant_state_updated`) to be checked against,
+and `CountToReembed` walks it, checking each chunk's document against a
+list of those documents (its document term written `+c.document_id`, so
+it never seeks `idx_chunks_document` per document and reads each row for
+its version); the top-up counts the re-embed jobs running and pending as
+ranges of `idx_jobs_claim`, the pending read once for both the due and
+the rest, then walks the range in order, each chunk's document by its
+key, and its index jobs pending or running and its re-embeds failed
+within the wait a seek of `idx_jobs_document` each, stopping at the
+documents it needs. A document's failed re-embeds (`ReembedFailures`)
+are a seek of `idx_jobs_document`, its kind written `+kind` so
+`idx_jobs_claim` can't serve it as a walk of every failed index job, and
+whether another document was indexed since the first a range of
+`idx_documents_tenant_indexed`; whether its chunks are stale
+(`StaleContext`), its chunks for a re-index (`ReplaceForDocument`'s read,
+its kept rows' update by `seq`, the delete of those past the new count)
+and `KeepEmbedded` seek `idx_chunks_document`; the index guard,
+`MarkIndexed` and its existence check read the document by its key. See
+"Chunks embedded with their context".
+
 ---
 
 ## Chunks: external-content FTS, derived rows kept by triggers
@@ -3910,6 +3969,14 @@ daemon now answers as starting while it migrates, clients wait on its
 progress rather than a fixed time, and the log names each migration as
 it starts and finishes. See "Daemon startup: a starting API while
 migrating, clients that wait on progress".
+
+**Revised (2026-10-14):** migration 021 narrows `trg_chunks_update` to
+fire only when `seq`, `text`, `title` or `tags` changes value, as 019's
+fields trigger does, and a re-index updates a document's chunks in place,
+by position, rather than deleting and inserting them: sqlite-vec never
+reused the slots the deletes freed, so every re-index grew `chunks_vec`
+and slowed every vector search. A re-embed whose texts are unchanged
+writes nothing to `chunks_fts`. See "Chunks embedded with their context".
 
 ---
 
@@ -6091,6 +6158,15 @@ finishes as usual.
 - Pausing one kind, index only, say.
 - Configurable gentle caps.
 - A paused-since time in `GET /v1/queue`.
+
+**Revised (2026-10-14):** a second gate holds the index and cards pools,
+composed with this one through `jobs.All`: `jobs.EmbedderHold`, closed
+from the first embed that gets no answer from Ollama until its probe gets
+one, so an outage leaves those jobs pending rather than claiming and
+deferring each in turn. `GET /v1/queue` doesn't report it: it says what
+the queue's settings do; healthz reports it while it holds
+(`embedder_hold`), and a document's page names it over a queued index
+job. See "Chunks embedded with their context".
 
 ---
 
@@ -9386,6 +9462,16 @@ deferral: it names when Jina will read the site again and decides nothing
 about the page, which is the case the rule above is for. See "A site's
 block is not its pages' verdict".
 
+**Revised (2026-10-14):** an index job whose embed gets no answer from
+Ollama is deferred, half its age (1 to 5 minutes), as the cards job's
+already was, rather than spending its retries and failing its document
+after 15 minutes; and the first such embed holds the index and cards
+pools back until Ollama answers (`jobs.EmbedderHold`), so the deferrals
+are the jobs it caught running, not the whole backlog in turn. An embed a
+shutdown cancelled is no such answer, and neither is a timeout while the
+model answers a probe: that one is the document's, a failed attempt. See
+"Chunks embedded with their context".
+
 ---
 
 ## A site's block is not its pages' verdict
@@ -9747,6 +9833,18 @@ embeddings drifted. `reindex-all` also owes the interests a fresh rebuild,
 which waits for the re-embedding to drain. A change the sample shows to
 be the same build changes nothing. See "Interests: two levels, stable
 identities, automatic rebuilds".
+
+**Revised (2026-10-14):** chunks are embedded with their context (their
+document's title and site and their headings), and the sample re-sends
+each chunk's stored context with its text (`SampledChunk.Context`, through
+`Indexer.EmbedChunks`, which takes the pairs), so it re-embeds what each
+vector was made from; a chunk embedded before chunk context has none and
+is re-sent as its text alone. The longest chunks are ranked by the bytes
+embedded besides the prefix, text and context. Batches are 8 inputs, so a
+verification may take 8 requests' timeouts. A re-index now keeps each
+chunk's `seq`, so the tie-break to the lower `seq` keeps the sample the
+same from one verification to the next rather than preferring chunks not
+re-embedded since. See "Chunks embedded with their context".
 
 ---
 
@@ -14168,6 +14266,555 @@ on a copy, before moving it. The cards share it, and their crossover was
 measured against an over-fetch at 4,096: a bound of their own, measured
 against the sized over-fetch, may take a broad filter's cards off the
 exact path.
+
+---
+
+## Chunks embedded with their context
+
+**Decision:** every chunk is embedded with its context: the embedder is
+sent the configured document prefix, then `<title> — <site> — <heading
+path>`, a blank line, and the chunk's text. The context is built by one
+rule, `indexer.Context`, under one version, `indexer.ContextVersion`
+(1), and stored with the chunk (`chunks.context`, `context_version`,
+migration 021). The text BM25, snippets and passages read stays the
+chunk's own. A daemon whose rules are newer than a library's chunks
+re-embeds them from its first start on, one index job per document, fed
+to the index pool one at a time; every index write is held to the
+extraction it read, and every re-index writes a document's chunks in
+place, by position, never deleting and inserting them again. Embed
+requests carry 8 inputs, not 32; while the embedding model doesn't
+answer, the index and cards jobs wait without failing; and a failure
+every document's embed meets stops the re-embed for a while, parking a
+few documents, never ending it.
+
+**Why:** a chunk's vector knew only its own words. A passage deep in a
+long page shares nothing with the article, the site or the section a
+query names, and the pool A/B of the research (the first five chunks of
+1,773 documents) measured +0.035 nDCG@10 for a "title — site" prefix. The
+heading path is the section that passage is in, which a page's own text
+says once, at its heading.
+
+**The rules** (`internal/indexer/context.go`; `testdata/context_v1.golden`
+records the limits, the separators, the headings the chunker gives a
+synthetic corpus, and the context of every case; a change to any output
+fails until `ContextVersion` is bumped, and `-update` records only a new
+version's file):
+
+- **Title**: the document's, whitespace collapsed, else the title it was
+  saved as (`docmeta.SavedAs`: its newest bookmark with a title), cut to
+  200 bytes on a rune boundary.
+- **Site**: its fields' site name, else their host (`docmeta.SiteOrHost`,
+  the rule the card names its site by), else, with no fields row, its
+  URL's host (`docmeta.Host`), cut to 120 bytes. The title is not
+  stripped of its site suffix: that is the configuration measured.
+- **Heading path**: the chunk's headings (below) without those that repeat
+  the title or the site (equal to either, case-insensitively with
+  whitespace collapsed, or the title's beginning followed by " | ", " – ",
+  " — ", " - ", " · " or ": "; in 47% of the owner's documents with an
+  H1, the H1 repeats the title), then the nearest one, preceded by its
+  parent and " › " when both fit in 120 bytes, else the nearest alone,
+  cut to 120 bytes.
+- The parts, trimmed, the empty ones dropped, are joined by " — ". Each
+  is bounded, so a context is at most 450 bytes, and with a chunk of at
+  most 3,500 a byte-level tokenizer like Qwen3's takes under 4,000
+  tokens, against `num_ctx` 8,192.
+
+A chunk's context is fixed when the chunk is indexed. A later change of
+its host's agreed site name, or of the bookmark title that names an
+untitled page, reaches the document's card at once but its chunks'
+context only at their next index (a refetch, or `curio reindex --all`):
+re-embedding a whole document for a part of its context that its card
+already carries isn't worth it.
+
+**Headings.** The chunker reads which headings are open beside its
+paragraph boundaries, which stay byte for byte what they were: a golden
+of the boundaries, recorded on the old chunker in a commit of its own,
+pins every chunk of a synthetic corpus, and the old and new chunkers cut
+5,249 of 5,249 of the owner's documents (50,938 chunks) identically, so a
+re-embed rewrites every stored chunk in place. The rules, narrowed where
+the web's markdown would fool CommonMark's (48,557 ATX headings in the
+owner's corpus, 21% holding links; 2,794 '#' lines inside code fences;
+394 '#hashtag' lines):
+
+- A fence (up to 3 spaces of indentation, then 3 or more backticks or
+  tildes) runs to a line of only its character, at least as many, or to
+  the end; nothing in it is a heading.
+- An ATX heading is up to 3 spaces of indentation, 1 to 6 '#', then a
+  space, a tab or the line's end; a closing run of '#' after a space or a
+  tab is dropped. "#hashtag", "#include" and code indented 4 spaces are
+  none.
+- A setext underline (only '=' for level 1, only '-' for level 2, up to
+  3 spaces of indentation, trailing spaces allowed) is a heading only
+  under a text line that is its paragraph's only line so far: 226 of the
+  corpus's 822 setext-shaped underlines sit under longer paragraphs, as
+  thematic breaks (the largest such "heading" 109 KB). A text line isn't
+  blank, a list item, a quote or a table row.
+- A heading's text is reduced to plain text: images dropped; links and
+  reference links to their text; autolinks and HTML tags dropped; "**",
+  "__", "*" and backticks dropped (a single "_" kept); a backslash before
+  ASCII punctuation dropped; whitespace collapsed; spaces, '#', '¶', '§',
+  '🔗' and '|' trimmed from the ends; cut to 256 bytes on a rune boundary.
+  The order leaves two quirks, rare enough to keep (a fix is a new
+  version, which re-embeds every home): escapes resolve after emphasis is
+  dropped, so `\*x\*` becomes `\x\`, and "C#" loses its '#' (16 of the
+  owner's 48,557 ATX headings between them).
+- A heading of level L closes every open heading of level L or deeper,
+  then opens, unless its text reduced to nothing. It applies from its
+  own line on and never relabels the text before it.
+- A chunk's headings are those of the paragraph holding its **first new
+  word**, the first word past every earlier chunk's end. A chunk opens
+  with 48 words carried from the one before, often of the section before,
+  and its headings name what it adds; the rule differs from the chunk's
+  first word for 15% of the owner's chunks. The packer, the windows of a
+  long paragraph and the byte cap carry each draft's word offsets for it;
+  the later pieces of a word longer than the cap are their word's.
+
+On the owner's library 67.8% of chunks get a heading path, 31 bytes at
+the median and 74 at the 90th percentile.
+
+**Storage** (021): `chunks.context`, exactly what was sent before the
+blank line, without the document prefix, and `context_version`, the
+rules that built it; the defaults, '' and 0, mean "embedded before chunk
+context", and 021 rewrites no row. Staleness is never inferred from an
+empty context: a chunk may have none, and a later change of the rules
+would go unseen. `idx_chunks_context_version (context_version,
+document_id)` makes the chunks of an older version one range, so finding
+and counting the documents and chunks left is cheap enough for the
+Status page's 2-second poll: the count walks the range against a list of
+the fetched documents, 13 to 20 ms over the 50,938 chunks of a library
+not yet re-embedded (the whole `/v1/stats` 19 ms at the median on a
+scratch daemon re-embedding, 40 ms beside the cards fill an upgrade from
+2.6 runs). Once a library is re-embedded, the range
+still holds the chunks of the documents no re-embed reaches (failed, dead
+or pending, until a fetch indexes them again): 114 chunks of 69 documents
+on the owner's re-embedded copy, counted in about 2 ms.
+`trg_chunks_update` re-tokenized a chunk on any UPDATE; it now fires only
+when `seq`, `text`, `title` or `tags` changes value, as 019's fields
+trigger does. At a scratch daemon's first start on a fresh copy of the
+owner's database (schema 18), 019 ran in 393 ms, 020 (saved dates) in 49
+ms and 021 in 690 ms, and the daemon was ready in 2.0 s.
+
+**Every embed path.** One function, `Indexer.embedText`, builds every
+embed input: the document prefix, then the context and a blank line when
+there is one, then the text. `EmbedChunks` takes (context, text) pairs,
+so no caller can forget the context. The cards go through it with none,
+byte for byte as before; the drift check's sample carries each chunk's
+stored context (`SampledChunk.Context`) and re-sends it, so a re-embedded
+library isn't reported drifted at the next Ollama upgrade; and its
+longest chunks are ranked by the bytes embedded besides the prefix, text
+and context.
+
+**The re-embed, fed a job at a time.** After the orphans are recovered (a
+re-embed job a crash left running is pending again, not queued twice) and
+before the interests' check, the daemon counts the fetched documents with
+a current extraction holding a chunk of an older version, and those
+chunks (`DocumentStore.CountToReembed`). When there are any it owes the
+interests a fresh rebuild (`FreshReindex`), as `curio reindex --all`
+does, queues the first re-embed job, an index job marked `reembed` in its
+payload, and logs one INFO "chunk context: re-embedding the library's
+chunks" with the counts; then `jobs.Reembed` feeds the rest. Each time an
+index job's outcome is recorded (the index pool's `OnFinished`) and every
+30 s, one transaction (`EnqueueReembed`) counts the re-embed jobs running
+and pending, due and not, and, while fewer than one runs or waits due
+(`reembedInFlight`) and fewer than five run or wait at all (that one and
+`reembedWaiting`, 4, waiting out a retry or a deferral), queues one for
+the next document to re-embed that has no index job pending or running
+and no re-embed that failed for good in the last 15 minutes
+(`reembedFailedWait`), in the order of `idx_chunks_context_version`. A
+re-embed job waiting out a retry or a deferral holds no place in flight,
+so a document that keeps failing holds the others back no longer than its
+own run; the cap on those waiting is what keeps a failure every document
+meets from queueing the library ("A failure every document meets",
+below). Everything is read from the chunks and the jobs table, so a
+restart resumes where the last left off, and no document is queued
+twice. A failure to begin is one ERROR and the
+start goes on; the next start tries again. It leaves the cards alone
+(their text and model are unchanged) and the drift baseline too (the
+cards keep the build that embedded them, so a drift reported stays
+reported until `reindex --all`). A start whose search fields couldn't be
+checked (`ensureDocumentFields` failed) doesn't begin it: a chunk's
+context names its site from the document's fields, and a document left
+without its row would have its bare host embedded for good; one WARN says
+the next start begins it.
+
+- **Fed, not queued whole.** An earlier draft queued an index job for
+  every document at start, in one transaction of 0.5 s. Claims go in the
+  order jobs became runnable, so a page saved meanwhile waited behind the
+  whole backlog, up to the whole re-embed; the 4 index workers re-embedded
+  at once, so a search's query embedding waited behind four batches; and
+  an Ollama outage caught every job queued. One job in flight bounds each:
+  a saved page's index job is claimed next by an idle worker, a query
+  embedding waits behind at most one batch of 8, and an outage catches one
+  job. Measured on a scratch daemon re-embedding a fresh copy of the
+  owner's library, a search every 8 s through its API and a query
+  embedding sent straight to Ollama every 8 s between them, the cards
+  fill done, 8 minutes each back to back on the same Ollama (idle, the
+  queue paused: searches 0.18 s at the median and 0.49 s at the 95th
+  percentile, a query embedding 58 ms):
+
+  | In flight | Chunks a second | Search p50 / p95 / max | Query embedding p50 / p95 / max | A page saved, to fetched (its chunks) |
+  |---|---|---|---|---|
+  | 4 | 8.4 | 2.60 / 5.96 / 7.76 s | 2.57 / 6.23 / 8.63 s | 14.8 s (42), 12.5 s (21) |
+  | 2 | 9.3 | 0.93 / 2.01 / 2.24 s | 0.75 / 1.69 / 1.89 s | 4.1 s (13), 3.3 s (10) |
+  | 1 | 8.9 | 0.52 / 1.87 / 4.12 s | 0.37 / 2.12 / 3.01 s | 4.3 s (11), 4.3 s (15) |
+
+  The rate holds: Ollama embeds a batch at a time, however many requests
+  wait, so four streams add only waiting. Two were 5% faster than one but
+  doubled the median wait, so one it is (`reembedInFlight`). The saved
+  pages (public pages, fetched in 0.2 to 2 s) had their index jobs
+  claimed within 2 s in every run, the index taking the rest; queued
+  whole, they would have waited behind the whole backlog. The first 26
+  minutes of the same re-embed, beside the cards fill an upgrade from 2.6
+  runs (7,072 of 7,557 cards in that time), went at 2.9 chunks a second,
+  with searches at 1.70 s at the median, 4.77 s at the 95th percentile
+  and 10.0 s at worst (2 of 195 degraded at search's 10 s timeout), and
+  four pages saved fetched in 1.3 to 25.8 s, their index jobs claimed at
+  once. Ollama ran slower that day than when the batches were measured
+  (below): 8.4 to 9.3 chunks a second in steady state against 11.2 to
+  11.7, so compare the rows above with each other, not with those.
+- **One job per document**, not a corpus-wide job or a new kind: the
+  queue's pause and schedule hold between documents, the index pool runs
+  them with no new machinery, and a jobs CHECK rebuild isn't needed.
+- **A re-embed never fails its document.** The index pool's failure hook
+  marks a document failed when its index job gives up. A re-embed nobody
+  asked for that did so would drop its document from search. A re-embed
+  job that fails for good (its attempts spent, a verdict, a panic, an
+  orphan out of attempts) leaves its document as it was, searchable by
+  its earlier vectors, with one WARN, and the re-embed queues it again 15
+  minutes later. Its chunks are recorded as current, their context and
+  vectors untouched (`ChunkStore.KeepEmbedded`), with one WARN saying a
+  refetch re-indexes it, at its third failure for good once another
+  document was indexed since its first (`DocumentStore.ReembedFailures`:
+  the count from the jobs table, a seek of `idx_jobs_document`, then
+  whether any of the tenant's documents has an `indexed_at` past the first
+  failure, a range of `idx_documents_tenant_indexed`), whatever the
+  failure. Another document indexed meanwhile is what shows the failures
+  are the document's own: a failure every document meets (vectors of the
+  wrong width, the model missing, a model runner crashing at every embed)
+  indexes nobody while it lasts, so it keeps no document it alone
+  failed, and the brake below stops the feed until the model is fixed. A
+  document an earlier outage also failed can be kept once others were
+  indexed in between, if a long outage then meets it again: the cap and
+  the brake hold that to a few documents an outage, each still
+  searchable and embedded again by a refetch. The condition is read from `indexed_at`
+  rather than from re-embed jobs done: a re-embed job is done, too, for a
+  document it had no need to re-embed (current already, refetched
+  meanwhile) or kept the earlier vectors of, while `indexed_at` is
+  written only with vectors, by a re-embed or any index, each proof that
+  the model embeds. A failure that passes gets three jobs' retries; one
+  that recurs whatever is tried costs those, about an hour and a quarter
+  of backoff and waiting while the others go on, not every start's, and
+  no restart is needed to clear it. An earlier round also read the cause,
+  keeping nothing for one every document would meet (a 5xx among them);
+  but a 5xx can be one document's alone (Ollama answers 500 when it can't
+  encode a vector holding NaN), which then never left the stale range and
+  was queued again every half hour for good, so the cause is left to the
+  brake and the hold. The cost: a document that failed during an outage
+  and fails again, for whatever reason, after another was indexed can be
+  kept at its third failure; one document, never the library (each needs
+  three failures for good, and a failure every document meets indexes
+  nobody), and it keeps vectors that search anyway.
+- **Not fetched any more, or current already** (a refetch in flight, a
+  failure since, or a refetch or `curio reindex` that indexed it with its
+  context since): done, nothing written. Whether any of its chunks is of
+  an older version is one seek of `idx_chunks_document`
+  (`ChunkStore.StaleContext`).
+- **Markdown gone** (content files may be deleted) or never named by the
+  extraction: the document keeps its chunks as current, with one WARN
+  saying a refetch re-indexes it. A regular index job with no markdown
+  fails at once, not five times.
+- **A chunk the model can't take even without its context**
+  (`embedder.ErrInputTooLong` from the bare text, below): the same, since
+  every try would fail it the same way.
+- **Its record leaves `updated_at` alone.** A re-embed records its new
+  vectors' `indexed_at` and the word count, and nothing else
+  (`DocumentStore.MarkIndexed` for a re-embed): the document stays
+  fetched, and its `updated_at`, which orders the Library and `curio docs`
+  and their keyset pages, stays as it was. The draft wrote it for every
+  document, reordering the Library and shifting its pages for the
+  re-embed's hour and a half. `indexed_at` is what the interests read and
+  what they need: their change count (a re-embedded document the prior run
+  assigned counts as reindexed, as after `reindex --all`), their settling
+  (nothing indexed for 10 minutes, which holds the fresh rebuild owed
+  until the re-embed is done) and the placement sweep (documents indexed
+  since the run read its vectors that it neither assigned nor placed);
+  placement holds meanwhile, the `reindex` rebuild being owed.
+- **Progress, in chunks.** A document holds 1 to 1,094 chunks, so
+  documents left say little of the time left. `/v1/stats` `reembed`
+  counts the documents and chunks left from stored state, with the
+  re-embed's rate over its last 10 minutes and the time left at it while
+  it runs (`jobs.ReembedProgress`, sampled every 30 s); `curio status`
+  ("chunks: N chunks in D of M documents to re-embed (new chunk context),
+  about T left at R chunks/s"), `curio doctor`'s `chunk context` check
+  (which warns when documents are left with no index job pending or
+  running, whose restart resumes the re-embed, and while the brake below
+  stops it) and the Status page say the same. The log says "chunk
+  context: re-embedding" (documents and chunks left, of, chunks a second,
+  the time left, took) when the chunks left changed and 5 minutes passed,
+  then the end.
+
+**Index writes held to what they read.** An index job reads its
+document's current extraction, embeds for seconds, then writes. A
+refetch that made another extraction current meanwhile, and indexed it,
+would be overwritten by the old extraction's chunks, and a re-embed's
+document that failed meanwhile flipped back to fetched, its cause
+cleared. Every index write is held to what the index read
+(`store.IndexGuard`): the chunks (`ChunkStore.ReplaceIndexed`, its check
+in the write's own transaction, which holds the write lock from its
+BEGIN) and the record (`MarkIndexed`, its WHERE) are written only while
+the extraction read is the document's current one, and, for a re-embed,
+while the document is fetched. One that loses the race at the chunks
+writes nothing (`store.ErrSuperseded`) and its job is done, with a DEBUG
+line: the write that moved the document on stands. One that loses it
+between the two, at the record, leaves the chunks it wrote, of the
+extraction that was current then, and records nothing; its DEBUG line
+says so, and that the document's next index, its refetch's, rewrites
+them (a refetch that fails leaves a failed document, whose chunks search
+leaves out). `ReplaceForDocument` stays the store's unguarded chunk
+write, which `apitest` and tests seed with; the unguarded record,
+`MarkFetched`, left `store.DocumentStore`, where nothing but tests and
+fixtures called it, and stays a method of the sqlite store for them.
+
+**An embedding model that doesn't answer.** An index job's embed that
+got no answer (`ollama.ErrUnreachable`: Ollama stopped, restarting, or
+too wedged to answer within the embedder's timeout) as an ordinary
+retryable error would, past the retries' 15 minutes (60, 120, 240 and
+480 s), fail every index job for good, its document with it, with
+thousands of WARN lines. It defers the job, its attempt refunded, half its age (1
+to 5 minutes), as the cards job does, and closes `jobs.EmbedderHold`, a
+gate the index and cards pools claim through (`jobs.All` with the queue
+gate). While it is closed nothing of those kinds is claimed, so the jobs
+waiting stay pending, their attempts and deferral budgets untouched,
+however long the outage: without it each pending job would be claimed,
+fail and be deferred in turn, two lines apiece, through an import's
+backlog. Its probe embeds one short text, 5 s after it closed and then
+less often, doubling to a minute, and the first answer of any kind opens
+it: one WARN when it closes, one INFO when it opens. The jobs it caught
+running come back within their deferral (at most 5 minutes after Ollama
+answers); the rest at once. The deferral budget's rules stand: a job
+deferred for a day fails its attempt like any error.
+
+- **A shutdown is no outage.** An embed the shutdown cancels comes back
+  as `ErrUnreachable` too ("context canceled"), which closed the hold and
+  logged "embedding model not answering" at every shutdown mid-embed. The
+  index and cards handlers close it only while the job's own context is
+  live; otherwise the worker puts the job back, as for any interrupted
+  job.
+- **A timeout is the document's unless nothing answers.** The client's
+  timeout (`embedding.timeout_seconds`, 60 s) wraps `ErrUnreachable` too,
+  so a document whose batch is more than the model gets through in that
+  time was deferred, for up to a day, where it used to fail after five
+  attempts. Now an index embed that timed out probes the model once
+  (`EmbedderHold.Answers`, the hold's own short embed): one that answers
+  makes the timeout the document's, an attempt that failed like any other
+  (`errSlowEmbed`: retried, then failing a regular index job's document
+  as before the hold, and a re-embed's like any other failure), and one
+  that gets no answer either is an outage, the hold closed and the job
+  deferred. Deferring every timeout could hide a document for a day,
+  failing them all could fail a library through a wedged Ollama; the
+  probe tells the two apart at the cost of one short embed per timeout.
+  The cards job still defers on any timeout: it is one job, retried
+  hourly when it fails, and its batches hold short cards.
+- **Seen, not only logged.** `/v1/healthz` reports the hold while it holds
+  (`embedder_hold`: since, and the last error, the probe's once it has
+  probed), `curio status` prints one warning line, `curio doctor` adds an
+  `index jobs` check (a warning, with the fix: start Ollama, see that it
+  serves the model, which its `ollama` and `models` checks say how to do),
+  and a document's page names the hold over its queued index job
+  ("Waiting for the embedding model to answer") where it would name a
+  closed queue. `GET /v1/queue` still doesn't report it: it says what the
+  queue's settings do.
+- **Keep-awake during an outage.** Keep-awake holds the Mac awake while
+  jobs of the pools' kinds are pending, which the hold's are; it stays on
+  through an outage. Left so: keep-awake is opt-in and on AC power only,
+  an outage that outlasts minutes is reported where the user looks, and a
+  keeper that read the hold would wake the Mac late once Ollama answers.
+
+**A failure every document meets.** The hold covers an Ollama that
+answers nothing. One that answers with an error for every document (its
+model runner crashing, a 5xx; the model missing, a 404; vectors of
+another width) failed each re-embed job in milliseconds, which freed its
+place, so the next was queued at once: on the review's run, through the
+daemon's pools with 4 index workers, 20 of 20 stale documents were queued
+into retry backoff within 2 seconds (500 or 404), each re-embed failed
+for good was queued again at the next top-up, and with a wrong width the
+third failure kept each document's earlier vectors as current: 60 failed
+jobs and the whole library recorded as re-embedded with its old vectors,
+which status, doctor and the Status page then reported done. In
+production a 45-minute outage of that kind would have ended the re-embed
+for good, and the retries came due in waves ahead of pages saved
+meanwhile. Three bounds now, each a backstop for the others:
+
+- **At most four waiting.** The top-up counts every pending re-embed job,
+  due or not, and stops at five running or pending (`reembedWaiting`,
+  4, beside the one in flight): one document failing for its own reasons
+  still can't stall the feed, and one failure of every document parks a
+  handful, which also bounds the retries that can come due ahead of a
+  page saved meanwhile.
+- **A wait after a failure for good.** A document whose re-embed failed
+  for good isn't queued again for 15 minutes (`reembedFailedWait`), so a
+  verdict that fails at once can't requeue its document in a hot loop.
+- **Never-failed documents first.** A document that fails for its own
+  reasons stays in the stale range at its place in the walk's order, the
+  order of its ID, so it came up first at every top-up once its wait was
+  over, and at every start. On the review's run, three documents first in
+  that order failing every embed (a 400, or a 500 of their own), put the
+  brake on, and at each lift one of them was queued again, failed, and
+  put it back on for twice as long: none of the nine healthy documents
+  got a job. The top-up now walks the range for the documents none of
+  whose re-embeds failed for good first, and only when that finds too
+  few, again for those whose wait is over (the same pinned walk, run with
+  no failure allowed, then with the wait's).
+- **The brake.** The index handler tells the re-embed each re-embed's
+  outcome: re-embedded (`Reembed.Reembedded`), or an attempt that failed
+  (`Reembed.Failed`; a deferral, a shutdown, a document current already
+  and one it keeps the earlier vectors of are neither). Only a document's
+  first failure since the daemon started counts: one that failed before
+  may be failing for its own reasons, and its failing again says nothing
+  of the library. After three documents' first failures in a row, none
+  re-embedded in between, it stops queueing for 15 minutes, then twice as
+  long each time it stops again, up to 4 hours (`reembedBrake*`), with
+  one WARN naming the documents; once that time has passed it is off,
+  with one INFO, and the next top-up queues one document, one that never
+  failed if any is left, whose failure puts it straight back on, while a
+  document re-embedded meanwhile (that one, or a retry that succeeds) ends
+  the stop, with one INFO, and the next stop is 15 minutes again. In
+  memory, off at every start. `/v1/healthz` reports it while it is on
+  (`reembed_brake`: until, failures, the first five documents by ID, the
+  last error), and never once its time has passed (it is turned off when
+  read, as the next check would), `curio status` prints one warning line,
+  and doctor's `chunk context` check names the documents and warns with
+  the fix. Three documents in a row, because one document failing again
+  and again is its own trouble, which the first bullets and its own count
+  handle, and two could be chance.
+
+So a failure every document's embed meets parks a handful and keeps
+nobody's earlier vectors, and once the model is fixed every document is
+re-embedded; a few documents failing for their own reasons hold none of
+the others back, and are kept at their third failure. Tested through the
+real pools and feed: with an embedder that always answers 500, 404 or
+the wrong width (`TestReembed_FailureOfEveryDocument`), three jobs
+queued, none more while the brake is on, nothing recorded re-embedded,
+the brake on once, and every document re-embedded once the model answers
+(the run before these bounds queued every document on a 500 or 404, and
+kept every document's earlier vectors on a wrong width); with the three
+documents first in the walk failing every embed, by a 400 or a 500 of
+their own (`TestReembed_FewDocumentsFailingOnTheirOwn`), the brake on
+once, the nine others re-embedded, the three kept at their third failure
+and the brake off at the end (the round before re-embedded none of the
+nine within 10 seconds, or put the brake on five times and still showed
+it at the end).
+
+**A chunk too long with its context.** A model whose context is smaller
+than Qwen3's can take a chunk at the 3,500-byte cap but not with its
+context's up to 450 bytes more, and failing the whole document for it
+would fail one that indexed fine before chunks had a context. A batch the
+model refuses as too long (`embedder.ErrInputTooLong`, which fails the
+whole batch) is embedded again a chunk at a time, and a chunk refused
+with its context is embedded without it, stored with an empty context at
+the current version, since the stored context is what its vector was made
+from: the drift check re-sends exactly that. One WARN per document says
+how many. Only a chunk refused even without its context fails the
+document, as before chunks had one.
+
+**In place, by position.** `ReplaceForDocument` deleted a document's
+chunks, which took their vectors, and inserted the new set under new IDs.
+sqlite-vec (v0.1.6) inserts only into its newest vec0 chunk, a block of
+1,024 slots, and never reuses a slot freed in an older one. Re-indexing
+every fetched document of a copy of the owner's library with its own
+chunks and vectors grew `chunks_vec` from 50 vec0 chunks to 100 (200 to
+400 MB of vectors), the file from 464 to 704 MB, and every vector search's
+p50 from 68 to 91 ms (+34%), for good. Now the chunk at each position the
+document keeps is updated where it is, its row by `seq` with its ID and
+`seq` kept and its vector by chunk ID (inserted only if it has none, as
+the cards' are), positions past the old count are inserted, and chunks
+past the new count deleted. On the copy that kept 50 vec0 chunks and
+67 ms; with the narrowed trigger, a re-embed whose texts are unchanged
+writes nothing to `chunks_fts` either. A document's rows are always
+0..n-1 of one extraction, written here alone, so a refetch's new
+extraction never collides on `(extraction_id, ord)`. The remainder: a
+document that shrinks, or is deleted, still strands its slots;
+compacting `chunks_vec` is future work.
+
+**Batches of 8.** Ollama serves one embed request at a time and embeds a
+batch's inputs one after another, so a search's query embedding waits
+behind every index request queued before it, and the batch size sets how
+much. Re-embedding the owner's chunks with 4 workers in batches of 32,
+query embeds waited 3.6 s at the median and 6.0 s at the 95th percentile
+(14 ms idle); 226 documents of more than 32 chunks hold a third of the
+chunks, and 4 workers in them at once (4 × ~2.9 s) pass search's 10 s
+timeout, degrading the search to keywords, for the whole re-embed. In
+batches of 8: 3.35 s at the 95th percentile at the same 11.2 chunks a
+second (11.73 against 11.75 single-stream; cards 4% slower). A constant
+bounds the wait for every indexing load, imports included, where a gate
+capping the index pool would need a cross-pool "re-embedding" signal, a
+semaphore would park claimed jobs as running, and a lower priority would
+change the claim order or add a job kind. Measured again on a scratch
+daemon upgrading a copy of the owner's home (4 index workers, a search
+every 8 s): idle, searches took 137 ms at the median and 241 ms at the
+95th percentile; re-embedding in batches of 32, beside the cards fill an
+upgrade from 2.6 also runs, 3.4 s and 8.3 s, two of 127 searches degraded
+at the 10 s timeout, and 9.2 chunks a second; restarted on a build with
+batches of 8 (the re-embed resumed where it was, no job queued twice),
+2.0 s and 3.3 s, at most 4.7 s, none of 158 degraded, and 10.4 chunks a
+second. The re-embed is now fed one job at a time ("Fed, not queued
+whole", above), so its share is one batch however many index workers
+there are; the batch size still bounds what any indexing, an import's
+included, puts ahead of a query.
+
+**What it costs.** The re-embed of the owner's library, 50,938 chunks of
+5,249 documents, runs at about 9 chunks a second on an M4 Max once the
+cards an upgrade from 2.6 embeds are done (about half an hour, beside
+them, at 3), so about two hours in all at the rate measured above, 80 to
+90 minutes at the earlier one; a slower Mac takes longer. Search works
+throughout: each query's embedding waits behind at most one batch of the
+re-embed's, half a second at the median and 2 s at the 95th percentile in
+steady state; pages not yet re-embedded are searched by their earlier
+vectors. A page saved meanwhile is indexed beside the re-embed, found at
+once by what it was saved as (its title, fields and card) and by its
+text within seconds. The Library's order is left alone. The interests
+rebuild fresh once the index queue drains and 10 minutes pass, and their
+map is drawn cold.
+
+**Measured** with `make search-eval REINDEX=1 CONTENT=…` on a fresh copy
+of the owner's library (schema 18, 50 graded queries), re-embedded
+through the daemon's own index path, against PR 2a's report:
+
+- **All 50 queries**: nDCG@10 0.655 → 0.671 (+0.017), R@10 0.599 →
+  0.585, R@100 0.799 → 0.805; 6 queries rose by 0.05 or more and 4 fell.
+  The research's pool A/B had led to expect +0.02 to +0.03.
+- **By kind**, nDCG@10: vague reference 0.761 → 0.841, world hop 0.489 →
+  0.521, temporal 0.406 → 0.434, site or person 0.554 → 0.569, list 0.725
+  → 0.733, keyword 0.929 → 0.923 (R@10 0.864, unchanged), code 0.815 →
+  0.800, evidence 0.669 → 0.651, analytic (one query) 0 → 0.
+- **The owner's own queries** (tag owner): nDCG@10 0.342 → 0.347, though
+  R@10 0.297 → 0.228 and R@100 0.466 → 0.442.
+- **The bars** it had to clear, all met: all queries' nDCG@10 at least
+  0.655, the owner's at least 0.342, keyword R@10 at least 0.84, and no
+  kind more than 0.05 below PR 2a (the worst, evidence, 0.018).
+- **The re-embed**: 50,938 chunks of 5,249 documents in 88 minutes (9.7
+  chunks a second, on a machine shared with other work); `chunks_vec`
+  held 50 vec0 chunks before and after, and the file grew 6 MB (530.1 to
+  536.2 MB). The vector stage took 72 to 79 ms at the median over three
+  runs, as the same copy before the re-embed did run back to back (PR
+  2a's report: 73.6 ms). The same build on the copy's old vectors scored
+  PR 2a's numbers exactly, so every change measured is the context's;
+  merged with saved dates and filters, and with the re-embed fed a job at
+  a time, it still ranks all 50 queries as PR 2a did, query by query.
+
+**Going back to 2.6.x:** nothing to remove from `config.yaml`. 2.6.x
+ignores the two columns and migration 021 (goose ignores versions it
+doesn't know); the chunks it indexes get context '' and version 0, which
+the next 2.7 start re-embeds. Its drift check, though, re-sends the
+chunks embedded with their context without it, so after an Ollama change
+it can report a drift; `curio reindex --all` on 2.6.x re-embeds them as
+it embeds and clears it.
+
+**How to revisit:** a rule change (a separator, a limit, the heading
+rules) is a change in `internal/indexer` and a `ContextVersion` bump with
+a new golden; every home's next start re-embeds its library. Measure it
+first with `make search-eval REINDEX=1` on a copy. The batch size is a
+constant, measured the same way.
 
 ---
 

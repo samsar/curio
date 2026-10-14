@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/samsar/curio/internal/config"
+	"github.com/samsar/curio/internal/indexer"
 	"github.com/samsar/curio/internal/store"
 )
 
@@ -180,18 +181,19 @@ func (f *fakeEmbedder) Embed(_ context.Context, texts []string) ([][]float32, er
 func (*fakeEmbedder) Dimensions() int { return 1024 }
 func (*fakeEmbedder) Model() string   { return "fake" }
 
-// TestMeasureIndexRate: a warm-up batch, then a timed one, of 32 prefixed
-// chunks of 2,300 to 2,500 characters, all different.
+// TestMeasureIndexRate: a warm-up batch, then a timed one, each of
+// indexer.EmbedBatchSize prefixed chunks of 2,300 to 2,500 characters, all
+// different.
 func TestMeasureIndexRate(t *testing.T) {
 	clock := at(27, 12, 0)
 	emb := &fakeEmbedder{clock: &clock, took: 800 * time.Millisecond}
 	rate, err := measureIndexRate(context.Background(), emb, "passage: ", func() time.Time { return clock })
 	require.NoError(t, err)
-	assert.InDelta(t, 40, rate, 0.001, "32 chunks in 0.8s")
+	assert.InDelta(t, float64(indexer.EmbedBatchSize)/0.8, rate, 0.001, "a batch in 0.8s")
 	require.Len(t, emb.texts, 2)
 	seen := map[string]bool{}
 	for _, batch := range emb.texts {
-		require.Len(t, batch, 32)
+		require.Len(t, batch, indexer.EmbedBatchSize)
 		for _, text := range batch {
 			assert.True(t, strings.HasPrefix(text, "passage: "))
 			assert.GreaterOrEqual(t, len(text), 2300)

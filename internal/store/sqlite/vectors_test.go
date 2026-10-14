@@ -201,6 +201,21 @@ func TestEnsureVectorIndex_RebuiltTableWorksWithTheStore(t *testing.T) {
 	assert.ErrorContains(t, err, "Dimension mismatch")
 }
 
+// TestChunkVectorBlocks: the blocks chunks_vec stores its vectors in, one
+// once it holds a vector.
+func TestChunkVectorBlocks(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	n, err := ChunkVectorBlocks(ctx, db)
+	require.NoError(t, err)
+	assert.Zero(t, n)
+	l := &reembedLibrary{t: t, ctx: ctx, db: db, docs: NewDocuments(db), chunks: NewChunks(db, vecDim), jobs: NewJobs(db)}
+	l.add("local", store.DocStateFetched, 1, 1)
+	n, err = ChunkVectorBlocks(ctx, db)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+}
+
 // TestVec0_KNNBehaviour pins what the KNN lists rely on of sqlite-vec, so
 // an upgrade that changes it fails here: k is at most vec0MaxK, and a KNN
 // whose primary-key IN list names a row with no vector returns no rows

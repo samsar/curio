@@ -255,6 +255,12 @@ func start(ctx context.Context, cfg config.Config, home *curiohome.Home, meta cu
 			return nil, err
 		}
 	}
+	// After the orphans: a re-embed job a crash left running is pending
+	// again, and isn't queued twice. Before the interests' check, so it
+	// sees the fresh rebuild the re-embed owes.
+	if d.reembedding, err = startReembed(ctx, d.reembed, fields); err != nil {
+		return nil, err
+	}
 	// One check of the interests before the full API is up, so its first
 	// healthz has the scheduler's state. A rebuild that is due (a library
 	// whose interests an upgrade dropped) is queued once the drift monitor
@@ -265,6 +271,34 @@ func start(ctx context.Context, cfg config.Config, home *curiohome.Home, meta cu
 		d.scheduler.Check(ctx)
 	}
 	return d, nil
+}
+
+// startReembed begins the re-embed of the documents whose chunks were
+// embedded under an older chunk context (jobs.Reembed.Start), and reports
+// whether there is one for serve to feed. Not on a start whose search
+// fields couldn't be checked: a chunk's context names its document's site
+// by those fields, so a document left without its row would have its bare
+// host embedded for good; the re-embed waits for a start that derives them,
+// with one WARN. Like ensureDocumentFields, it never fails the start but
+// for a shutdown during it: a daemon that can't begin the re-embed still
+// serves everything, searching the chunks as they are, and the next start
+// tries again.
+func startReembed(ctx context.Context, r *jobs.Reembed, fields api.DocumentFields) (bool, error) {
+	if fields.Error != "" {
+		slog.Warn("chunk context: the re-embed of the library's chunks waits for a start that can derive the " +
+			"documents' search fields, which their context names their site by; the next start begins it")
+		return false, nil
+	}
+	began, err := r.Start(ctx)
+	switch {
+	case err != nil && ctx.Err() != nil:
+		return false, err
+	case err != nil:
+		slog.Error("chunk context: couldn't begin the re-embed of the library's chunks; search reads them as "+
+			"they are, and the next start tries again", "err", err)
+		return false, nil
+	}
+	return began, nil
 }
 
 // ensureDocumentFields makes the documents' search fields right before any
@@ -420,6 +454,13 @@ type daemon struct {
 	keeper     *keepawake.Keeper
 	scheduler  *insight.Scheduler // nil with insight off
 	savedDates *api.SavedDateClassifier
+	// hold holds the index and cards jobs back while the embedding model
+	// doesn't answer.
+	hold *jobs.EmbedderHold
+	// reembed feeds the re-embed for a new chunk context, which serve runs
+	// while reembedding: start began one.
+	reembed     *jobs.Reembed
+	reembedding bool
 }
 
 // started is what the start did to the derived rows, which healthz
@@ -492,16 +533,27 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 	drifted := driftHold(driftMonitor)
 	checked := driftChecked(driftMonitor.Report, time.Now(), time.Now)
 
+	// The hold's probe is one short embed, through the embedder the jobs
+	// use, so it reopens the hold only for an Ollama that embeds.
+	hold := jobs.NewEmbedderHold(func(ctx context.Context) error {
+		_, err := emb.Embed(ctx, []string{"curio"})
+		return err
+	}, slog.Default())
+	reembed := jobs.NewReembed(jobs.ReembedOptions{Documents: docs, Insights: insights, TenantID: store.LocalTenantID,
+		Log: slog.Default()})
 	jobDeps := jobs.Deps{
-		Home:        home,
-		Documents:   docs,
-		Extractions: exts,
-		Bookmarks:   bms,
-		Queue:       queue,
-		Dispatcher:  dispatcher,
-		Indexer:     idx,
-		Cards:       index,
-		Log:         slog.Default(),
+		ContentDir:    home.ContentDir(),
+		Documents:     docs,
+		Extractions:   exts,
+		Bookmarks:     bms,
+		Queue:         queue,
+		Dispatcher:    dispatcher,
+		Indexer:       idx,
+		Chunks:        chunks,
+		DocumentIndex: index,
+		Hold:          hold,
+		Reembed:       reembed,
+		Log:           slog.Default(),
 	}
 	// With insight off nothing is rebuilt or placed on its own: there is
 	// no placer and no scheduler, and a rebuild can't be asked for.
@@ -527,7 +579,7 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 		jobDeps.KickInterests = scheduler.Kick
 	}
 
-	pools := jobs.NewPools(jobDeps, sizes, jobs.WorkerOptions{Gate: gate, Log: slog.Default()})
+	pools := jobs.NewPools(jobDeps, sizes, jobs.WorkerOptions{Gate: jobs.All(gate, hold), Log: slog.Default()})
 	// The Jina fallback is the one upstream whose health is tracked.
 	upstreams := func() []fetcher.UpstreamHealth { return []fetcher.UpstreamHealth{native.JinaHealth()} }
 	keeper := newKeeper(gate, queue, pools)
@@ -557,13 +609,15 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 		GitHubToken:     routed.githubToken,
 		DocumentFields:  done.fields,
 		SavedDates:      savedDates,
+		Reembed:         reembed,
+		Hold:            hold,
 		Log:             slog.Default(),
 	}
 	if scheduler != nil {
 		apiDeps.Interests = scheduler
 	}
 	return &daemon{apiDeps: apiDeps, pools: pools, drift: driftMonitor, keeper: keeper, scheduler: scheduler,
-		savedDates: savedDates}, nil
+		savedDates: savedDates, hold: hold, reembed: reembed}, nil
 }
 
 // driftHold says how the embeddings drifted, as the monitor last reported
@@ -876,10 +930,11 @@ func indexing(queue store.JobStore) func(context.Context) (bool, error) {
 }
 
 // serve runs the worker pools, the embedding drift monitor, the interest
-// scheduler, the keep-awake keeper and the retries of the saved-date
-// classifications owed alongside the API until ctx is cancelled or the API
-// fails, then shuts them down within the documented budget: the keeper
-// releases its hold as its context ends.
+// scheduler, the keep-awake keeper, the retries of the saved-date
+// classifications owed, the embedder hold's probes and the re-embed's feed
+// alongside the API until ctx is cancelled or the API fails, then shuts
+// them down within the documented budget: the keeper releases its hold as
+// its context ends.
 func (d *daemon) serve(ctx context.Context, served *servingAPI) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -890,6 +945,10 @@ func (d *daemon) serve(ctx context.Context, served *servingAPI) error {
 	workers.Go(func() { d.savedDates.Run(ctx) })
 	if d.scheduler != nil {
 		workers.Go(func() { d.scheduler.Run(ctx) })
+	}
+	workers.Go(func() { d.hold.Run(ctx) })
+	if d.reembedding {
+		workers.Go(func() { d.reembed.Run(ctx) })
 	}
 	for _, p := range d.pools {
 		for range p.Size {

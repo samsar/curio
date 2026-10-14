@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/samsar/curio/internal/eval"
+	"github.com/samsar/curio/internal/indexer"
 	"github.com/samsar/curio/internal/store"
 )
 
@@ -252,7 +253,8 @@ func TestRun_TextReport(t *testing.T) {
 	out := res.stdout
 	assert.Contains(t, out, "Search evaluation of "+fx.db)
 	assert.Contains(t, out, "4 queries, 12 judgments: 1 missing, 3 the chunk lists can't return")
-	assert.Regexp(t, `\nLibrary: document fields derived in \d+ ms; 24 cards embedded in \d+\.\d s\n`, out)
+	assert.Regexp(t, `\nLibrary: document fields derived in \d+ ms; 24 cards embedded in \d+\.\d s; `+
+		`20 documents to re-embed for the chunk context\n`, out)
 	assert.Regexp(t, `\nSaved dates: 2 exact, 0 approx, 0 unknown, classified in \d+ ms\n`, out)
 	assert.Contains(t, out, "variants hybrid, bm25")
 	assert.Contains(t, out, "\nhybrid: the daemon's search")
@@ -497,4 +499,61 @@ func TestRun_ComparesWithAFormerReport(t *testing.T) {
 	assert.Equal(t, 3, strings.Count(res.stdout, "nDCG@10: none moved by 0.05 or more"))
 	assert.Equal(t, 3, strings.Count(res.stdout,
 		"\nrankings: 4 of 4 matched queries rank the same documents in the same order as the baseline\n"))
+}
+
+// TestRun_Reindex: -reindex re-embeds the fetched documents whose chunks
+// predate the chunk context, each chunk with its context, through the
+// daemon's index path, before any query, and reports it; a run after it
+// re-embeds nothing, and neither warns.
+func TestRun_Reindex(t *testing.T) {
+	fx := newFixture(t)
+	first := filepath.Join(fx.dir, "first.json")
+	res := runEval(t, fx.args(queries, "-json", first, "-variants", "bm25", "-reindex", "-content", fx.content)...)
+	require.Equal(t, exitOK, res.code, res.stderr)
+	rep := readReport(t, first)
+	require.NotNil(t, rep.Reindex)
+	assert.Equal(t, reindexReport{Documents: 20, Chunks: 20, TookMS: rep.Reindex.TookMS,
+		ChunksPerSecond: rep.Reindex.ChunksPerSecond, ContextVersion: indexer.ContextVersion, VectorBlocksBefore: 1,
+		VectorBlocksAfter: 1}, *rep.Reindex, "the fetched documents, in place")
+	assert.Positive(t, rep.Reindex.ChunksPerSecond)
+	assert.Zero(t, rep.Library.DocumentsToReembed)
+	reembedded := fx.ollama.reembedded()
+	assert.Len(t, reembedded, 20)
+	assert.Contains(t, reembedded, "example.com\n\nalpha words note 03 about things")
+	assert.Contains(t, res.stdout, "Re-embedded: 20 documents, 20 chunks in ")
+	assert.NotContains(t, res.stderr, "measuring vectors from before the chunk context")
+
+	second := filepath.Join(fx.dir, "second.json")
+	res = runEval(t, fx.args(queries, "-json", second, "-variants", "bm25", "-reindex", "-content", fx.content)...)
+	require.Equal(t, exitOK, res.code, res.stderr)
+	assert.Equal(t, 0, readReport(t, second).Reindex.Documents)
+	assert.Len(t, fx.ollama.reembedded(), 20, "nothing re-embedded twice")
+}
+
+// TestRun_ReindexChecksTheMarkdownFirst: a document whose markdown isn't
+// under -content fails the run, naming how many and the first, before
+// anything is re-embedded.
+func TestRun_ReindexChecksTheMarkdownFirst(t *testing.T) {
+	fx := newFixture(t)
+	gone := filepath.Join(fx.content, "doc-07", "extraction.md")
+	require.NoError(t, os.Remove(gone))
+	res := runEval(t, fx.args(queries, "-reindex", "-content", fx.content)...)
+	assert.Equal(t, exitFailure, res.code)
+	assert.Contains(t, res.stderr, "the markdown of 1 of the 20 documents to re-embed is missing under "+fx.content+
+		" (the first: "+gone+")")
+	assert.Empty(t, fx.ollama.reembedded())
+}
+
+// TestRun_WarnsOfVectorsFromBeforeChunkContext: a run without -reindex on
+// a copy embedded before chunk context counts its documents to re-embed
+// and warns that it measures their old vectors.
+func TestRun_WarnsOfVectorsFromBeforeChunkContext(t *testing.T) {
+	fx := newFixture(t)
+	out := filepath.Join(fx.dir, "report.json")
+	res := runEval(t, fx.args(queries, "-json", out, "-variants", "bm25")...)
+	require.Equal(t, exitOK, res.code, res.stderr)
+	assert.Equal(t, 1, strings.Count(res.stderr, "measuring vectors from before the chunk context"))
+	assert.Equal(t, 20, readReport(t, out).Library.DocumentsToReembed)
+	assert.Contains(t, res.stdout, "; 20 documents to re-embed for the chunk context\n")
+	assert.Empty(t, fx.ollama.reembedded())
 }

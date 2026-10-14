@@ -218,14 +218,31 @@ func scanDocument(row interface{ Scan(...any) error }, extra ...any) (*store.Doc
 
 // markFailedSQL and markFetchedSQL write a document's state and failure
 // cause together, so no write can leave the one without the other.
-// markFetchedSQL is also the one write of indexed_at and word_count: the
-// count describes the text whose chunks were just indexed, and SQLite
-// reads 'now' once per statement, so indexed_at equals the updated_at
-// written with it.
+// markFetchedSQL and markIndexedSQL are also the writes of indexed_at and
+// word_count: the count describes the text whose chunks were just indexed,
+// and SQLite reads 'now' once per statement, so indexed_at equals the
+// updated_at written with it. markIndexedSQL is markFetchedSQL held to the
+// extraction indexed (?4).
+//
+// markReembeddedSQL is a re-embed's: new vectors of a document that is
+// fetched and stays so, held to the extraction indexed (?3) and the
+// fetched state (?4). Unlike every other UPDATE the store runs, it leaves
+// updated_at alone: the document didn't change, and updated_at orders the
+// library's lists and their keyset pages, which a re-embed of every
+// document would otherwise reshuffle for its whole run. indexed_at, which
+// the interests' change counts, their settling and the placement sweep
+// read, records the new vectors.
 const (
 	markFailedSQL  = `UPDATE documents SET state = ?, failure_cause = ?, updated_at = ` + sqlNow + ` WHERE id = ?`
 	markFetchedSQL = `UPDATE documents SET state = ?, failure_cause = NULL, word_count = ?, updated_at = ` + sqlNow +
 		`, indexed_at = ` + sqlNow + ` WHERE id = ?`
+	markIndexedSQL = `UPDATE documents SET state = ?1, failure_cause = NULL, word_count = ?2, updated_at = ` + sqlNow +
+		`, indexed_at = ` + sqlNow + ` WHERE id = ?3 AND current_extraction_id = ?4`
+	markReembeddedSQL = `UPDATE documents SET word_count = ?1, indexed_at = ` + sqlNow + `
+		WHERE id = ?2 AND current_extraction_id = ?3 AND state = ?4`
+	// documentExistsSQL tells a write its guard refused from one whose
+	// document is gone.
+	documentExistsSQL = `SELECT EXISTS (SELECT 1 FROM documents WHERE id = ?)`
 )
 
 func (s *Documents) MarkFailed(ctx context.Context, id string, cause store.FailureCause) error {
@@ -239,6 +256,13 @@ func (s *Documents) MarkFailed(ctx context.Context, id string, cause store.Failu
 	return ensureRow(res, "document")
 }
 
+// MarkFetched is MarkIndexed for no extraction in particular: the document
+// becomes fetched, with no failure cause, a word count of words and its
+// indexed_at now, whatever its current extraction. It isn't in
+// store.DocumentStore: the index job writes through MarkIndexed, held to
+// what it read, and this is how tests and fixtures seed a document as
+// indexed. A negative count is an error, and nothing is written.
+// ErrNotFound if there is no such document.
 func (s *Documents) MarkFetched(ctx context.Context, id string, words int) error {
 	if words < 0 {
 		return fmt.Errorf("mark document %s fetched: a word count of %d", id, words)
@@ -248,6 +272,40 @@ func (s *Documents) MarkFetched(ctx context.Context, id string, words int) error
 		return fmt.Errorf("mark document %s fetched: %w", id, err)
 	}
 	return ensureRow(res, "document")
+}
+
+// MarkIndexed implements store.DocumentStore.
+func (s *Documents) MarkIndexed(ctx context.Context, id string, guard store.IndexGuard, words int) error {
+	if words < 0 {
+		return fmt.Errorf("mark document %s indexed: a word count of %d", id, words)
+	}
+	var (
+		res sql.Result
+		err error
+	)
+	if guard.Reembed {
+		res, err = s.db.ExecContext(ctx, markReembeddedSQL, words, id, guard.ExtractionID, store.DocStateFetched)
+	} else {
+		res, err = s.db.ExecContext(ctx, markIndexedSQL, store.DocStateFetched, words, id, guard.ExtractionID)
+	}
+	if err != nil {
+		return fmt.Errorf("mark document %s indexed: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("mark document %s indexed: %w", id, err)
+	}
+	if n > 0 {
+		return nil
+	}
+	var exists bool
+	if err := s.db.QueryRowContext(ctx, documentExistsSQL, id).Scan(&exists); err != nil {
+		return fmt.Errorf("mark document %s indexed: %w", id, err)
+	}
+	if !exists {
+		return fmt.Errorf("mark document %s indexed: %w", id, store.ErrNotFound)
+	}
+	return fmt.Errorf("mark document %s indexed from extraction %s: %w", id, guard.ExtractionID, store.ErrSuperseded)
 }
 
 // ListWithLastError looks up, for each document, the error of the most
@@ -452,6 +510,217 @@ func (s *Documents) ListIDsWithContent(ctx context.Context, tenantID string, sta
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("list document ids with content: %w", err)
+	}
+	return out, nil
+}
+
+// The reads and the write of the documents to re-embed for a new chunk
+// context. The chunks of an older version are one range of
+// idx_chunks_context_version (covering), which once the library is
+// re-embedded holds only the chunks of documents no re-embed reaches
+// (failed, dead or pending, until a fetch indexes them again).
+//
+//   - The list and the count read that range whole, the one into a list
+//     the tenant's fetched documents (idx_documents_tenant_state_updated)
+//     are checked against, the other checked against a list of those
+//     documents: a few milliseconds over the owner's 50,938 chunks to
+//     re-embed, less as they go, cheap enough for the Status page's
+//     2-second poll.
+//   - The top-up counts the re-embed jobs running and pending, due and
+//     not, the running and the pending index jobs (idx_jobs_claim), each
+//     one's payload read by its rowid; then walks the range in order, each
+//     chunk's document by its primary key and its index jobs, and its
+//     re-embeds failed for good within the wait, a seek of
+//     idx_jobs_document each, stopping at the documents it needs; first
+//     past every document a re-embed of failed for good, then, only when
+//     that finds too few, past those it failed within the wait. The
+//     documents it walks past are those no re-embed reaches, those in
+//     flight and those that failed: a few hundred chunks.
+const (
+	reembedWhereSQL = `
+		WHERE d.id IN (SELECT document_id FROM chunks WHERE context_version < ?1)
+		  AND d.tenant_id = ?2 AND d.state = ?3 AND d.current_extraction_id IS NOT NULL`
+	documentsToReembedSQL = `SELECT d.id FROM documents d` + reembedWhereSQL
+	// countToReembedSQL's document term is written +c.document_id, so that
+	// it is checked against the list of fetched documents rather than
+	// seeking idx_chunks_document for each of them, whose rows it would
+	// then read for their version.
+	countToReembedSQL = `SELECT count(DISTINCT c.document_id), count(*) FROM chunks c
+		WHERE c.context_version < ?1 AND +c.document_id IN (SELECT d.id FROM documents d
+			WHERE d.tenant_id = ?2 AND d.state = ?3 AND d.current_extraction_id IS NOT NULL)`
+	// reembedQueuedSQL counts the re-embed index jobs (kind ?3): those
+	// running (?1), those pending (?2), and those pending and due by ?4.
+	reembedQueuedSQL = `SELECT
+		(SELECT count(*) FROM jobs WHERE status = ?1 AND kind = ?3 AND json_extract(payload, '$.reembed')),
+		count(*), coalesce(sum(run_after <= ?4), 0)
+		FROM jobs WHERE status = ?2 AND kind = ?3 AND json_extract(payload, '$.reembed')`
+	// nextToReembedSQL is the next ?5 of the tenant's documents to
+	// re-embed for version ?1 with no index job (?6) pending (?4) or
+	// running (?7), and no re-embed job failed (?8) for good after ?9, in
+	// the range's order.
+	nextToReembedSQL = `SELECT DISTINCT c.document_id FROM chunks c CROSS JOIN documents d ON d.id = c.document_id
+		WHERE c.context_version < ?1 AND d.tenant_id = ?2 AND d.state = ?3 AND d.current_extraction_id IS NOT NULL
+		  AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.document_id = d.id AND j.status IN (?4, ?7) AND j.kind = ?6)
+		  AND NOT EXISTS (SELECT 1 FROM jobs f WHERE f.document_id = d.id AND f.status = ?8 AND f.updated_at > ?9
+			AND +f.kind = ?6 AND json_extract(f.payload, '$.reembed'))
+		LIMIT ?5`
+	// reembedFailuresSQL counts a document's re-embed jobs failed for
+	// good, and reads when the first of them failed, a seek of
+	// idx_jobs_document; its kind is written +kind, so that idx_jobs_claim
+	// can't serve it as a walk of every failed index job.
+	reembedFailuresSQL = `SELECT count(*), min(updated_at) FROM jobs
+		WHERE document_id = ?1 AND status = ?2 AND +kind = ?3 AND json_extract(payload, '$.reembed')`
+	// othersIndexedSQL asks whether another of the tenant's (?1) documents
+	// than ?3 was indexed after ?2: a range of idx_documents_tenant_indexed,
+	// its first row past the document itself the answer.
+	othersIndexedSQL = `SELECT EXISTS (SELECT 1 FROM documents WHERE tenant_id = ?1 AND indexed_at > ?2 AND id <> ?3)`
+)
+
+// DocumentsToReembed implements store.DocumentStore.
+func (s *Documents) DocumentsToReembed(ctx context.Context, tenantID string, version int) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, documentsToReembedSQL, version, tenantID, store.DocStateFetched)
+	if err != nil {
+		return nil, fmt.Errorf("list the documents to re-embed: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("list the documents to re-embed: %w", err)
+		}
+		out = append(out, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list the documents to re-embed: %w", err)
+	}
+	return out, nil
+}
+
+// CountToReembed implements store.DocumentStore.
+func (s *Documents) CountToReembed(ctx context.Context, tenantID string, version int) (store.ReembedCount, error) {
+	var n store.ReembedCount
+	if err := s.db.QueryRowContext(ctx, countToReembedSQL, version, tenantID, store.DocStateFetched).Scan(
+		&n.Documents, &n.Chunks); err != nil {
+		return store.ReembedCount{}, fmt.Errorf("count the documents to re-embed: %w", err)
+	}
+	return n, nil
+}
+
+// EnqueueReembed implements store.DocumentStore. Its transaction takes the
+// write lock at BEGIN, so two top-ups never both count a place free.
+func (s *Documents) EnqueueReembed(ctx context.Context, tenantID string, version int,
+	limits store.ReembedLimits) (int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("queue the re-embed: begin: %w", err)
+	}
+	defer tx.Rollback()
+	now := time.Now()
+	var running, pending, due int
+	if err := tx.QueryRowContext(ctx, reembedQueuedSQL, store.JobStatusRunning, store.JobStatusPending,
+		store.JobKindIndex, formatTime(now)).Scan(&running, &pending, &due); err != nil {
+		return 0, fmt.Errorf("queue the re-embed: count the jobs queued: %w", err)
+	}
+	n := min(limits.InFlight-running-due, limits.InFlight+limits.Waiting-running-pending)
+	if n <= 0 {
+		return 0, nil
+	}
+	ids, err := nextToQueue(ctx, tx, tenantID, version, n, now.Add(-limits.FailedWait))
+	if err != nil {
+		return 0, err
+	}
+	for _, id := range ids {
+		payload, err := json.Marshal(store.DocumentJobPayload{DocumentID: id, Reembed: true})
+		if err != nil {
+			return 0, fmt.Errorf("queue the re-embed of document %s: %w", id, err)
+		}
+		job := &store.Job{TenantID: tenantID, Kind: store.JobKindIndex, Payload: payload}
+		if err := insertJob(ctx, tx, job); err != nil {
+			return 0, fmt.Errorf("queue the re-embed of document %s: %w", id, err)
+		}
+	}
+	var wake []store.JobKind
+	if len(ids) > 0 {
+		wake = []store.JobKind{store.JobKindIndex}
+	}
+	if err := s.db.commitNotify(tx, wake...); err != nil {
+		return 0, fmt.Errorf("queue the re-embed: commit: %w", err)
+	}
+	return len(ids), nil
+}
+
+// nextToQueue reads the next n documents to re-embed for version, the
+// documents none of whose re-embeds failed for good first, then those whose
+// last failed before failedAfter. A document that fails for its own
+// reasons stays in the stale range, at its place in the walk's order,
+// which is the order of its ID: queued first, it would come up first at
+// every top-up and every start, and, failing again, put the brake back on
+// before any document that would re-embed got a job. Both passes are the
+// one pinned walk; the second runs only once the first finds fewer than n,
+// and finds those again, which are left out.
+func nextToQueue(ctx context.Context, tx *sql.Tx, tenantID string, version, n int, failedAfter time.Time) (
+	[]string, error) {
+	ids, err := nextToReembed(ctx, tx, tenantID, version, n, time.Time{})
+	if err != nil || len(ids) == n {
+		return ids, err
+	}
+	again, err := nextToReembed(ctx, tx, tenantID, version, n, failedAfter)
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range again {
+		if len(ids) < n && !slices.Contains(ids, id) {
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
+}
+
+// nextToReembed reads the next n documents to re-embed for version with no
+// index job pending or running, and no re-embed job failed for good after
+// failedAfter: none at all for the zero time.
+func nextToReembed(ctx context.Context, tx *sql.Tx, tenantID string, version, n int,
+	failedAfter time.Time) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, nextToReembedSQL, version, tenantID, store.DocStateFetched,
+		store.JobStatusPending, n, store.JobKindIndex, store.JobStatusRunning, store.JobStatusFailed,
+		formatTime(failedAfter))
+	if err != nil {
+		return nil, fmt.Errorf("queue the re-embed: read the next documents: %w", err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("queue the re-embed: read the next documents: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("queue the re-embed: read the next documents: %w", err)
+	}
+	return ids, nil
+}
+
+// ReembedFailures implements store.DocumentStore.
+func (s *Documents) ReembedFailures(ctx context.Context, tenantID, documentID string) (store.ReembedFailures,
+	error) {
+	var (
+		out   store.ReembedFailures
+		first sql.NullString
+	)
+	if err := s.db.QueryRowContext(ctx, reembedFailuresSQL, documentID, store.JobStatusFailed,
+		store.JobKindIndex).Scan(&out.Failed, &first); err != nil {
+		return store.ReembedFailures{}, fmt.Errorf("count the failed re-embeds of document %s: %w", documentID, err)
+	}
+	if !first.Valid {
+		return out, nil
+	}
+	if err := s.db.QueryRowContext(ctx, othersIndexedSQL, tenantID, first.String, documentID).Scan(
+		&out.OthersIndexed); err != nil {
+		return store.ReembedFailures{}, fmt.Errorf("read whether others were indexed since document %s's "+
+			"re-embed failed: %w", documentID, err)
 	}
 	return out, nil
 }

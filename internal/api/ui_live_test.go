@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -584,6 +585,54 @@ func TestUI_DocumentJobs(t *testing.T) {
 	body = getPage(t, srv, "/ui/documents/"+doc.ID, http.StatusOK)
 	assert.Regexp(t, `<li>Fetch waiting, due <time datetime="[^"]+" title="[^"]+">in 2[34] min</time> · attempt 2 of 5`+
 		`<span class="visually-hidden">: </span><span class="job-why" title="waiting for GitHub&#39;s API rate limit to reset">`, body)
+}
+
+// switchedHold is an embedder hold a test closes and opens.
+type switchedHold struct{ held atomic.Bool }
+
+func (h *switchedHold) State() jobs.HoldState {
+	if !h.held.Load() {
+		return jobs.HoldState{}
+	}
+	return jobs.HoldState{Held: true, Since: time.Now(), Err: "ollama unreachable: connection refused"}
+}
+
+// TestUI_DocumentJobs_EmbedderHold: a document's queued index job names the
+// embedder hold while it holds it; a fetch, which embeds nothing, doesn't,
+// and a closed queue is named first.
+func TestUI_DocumentJobs_EmbedderHold(t *testing.T) {
+	assert.Equal(t, string(jobs.ReasonEmbedderUnreachable), ui.HoldEmbedder)
+	ctx := context.Background()
+	hold := &switchedHold{}
+	srv := apitest.Start(t, func(d *api.Deps) { d.Hold = hold })
+	doc := srv.AddDocument(t, "https://example.com/a", store.DocStateFetched)
+	srv.AddContent(t, doc, "# A")
+	const held = `<a id="doc-jobs-hold" href="/ui/status">Waiting for the embedding model to answer</a>`
+
+	_, err := srv.Deps.Documents.RequeueFetch(ctx, apitest.TenantID, doc.ID)
+	require.NoError(t, err)
+	hold.held.Store(true)
+	assert.NotContains(t, getPage(t, srv, "/ui/documents/"+doc.ID, http.StatusOK), "doc-jobs-hold",
+		"a fetch isn't held")
+
+	_, err = srv.DB.ExecContext(ctx, `UPDATE jobs SET status = 'done' WHERE document_id = ?`, doc.ID)
+	require.NoError(t, err)
+	index, err := store.NewDocumentJob(apitest.TenantID, store.JobKindIndex, doc.ID)
+	require.NoError(t, err)
+	require.NoError(t, srv.Deps.Queue.Enqueue(ctx, index))
+	body := getPage(t, srv, "/ui/documents/"+doc.ID, http.StatusOK)
+	assert.Contains(t, body, `<li>Index queued</li>`)
+	assert.Contains(t, body, held)
+
+	_, err = srv.Deps.Gate.Update(ctx, jobsPause())
+	require.NoError(t, err)
+	assert.Contains(t, getPage(t, srv, "/ui/documents/"+doc.ID, http.StatusOK),
+		`<a id="doc-jobs-hold" href="/ui/status">The queue is closed: Paused</a>`, "the queue's first")
+	_, err = srv.Deps.Gate.Update(ctx, jobs.QueueUpdate{Paused: new(false)})
+	require.NoError(t, err)
+
+	hold.held.Store(false)
+	assert.NotContains(t, getPage(t, srv, "/ui/documents/"+doc.ID, http.StatusOK), "doc-jobs-hold")
 }
 
 // TestUI_DocumentPoll: a poll's answer is the jobs' region and its poller,

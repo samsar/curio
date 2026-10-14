@@ -30,7 +30,9 @@ const clusterPoolSize = 1
 //
 //   - fetch: the fetch handler, plus the hook that marks the document
 //     failed, or dead, when its job gives up.
-//   - index: the index handler and the same hook.
+//   - index: the index handler and the same hook, and once a job's outcome
+//     is recorded the re-embed is topped up (Deps.Reembed), so the next
+//     document follows at once.
 //   - cluster: corpus-wide clustering on one goroutine, so it neither
 //     starves the others nor runs twice at once. Its hook records a
 //     rebuild the daemon left unfinished, and once a job's outcome is
@@ -49,6 +51,7 @@ func NewPools(d Deps, sizes PoolSizes, opts WorkerOptions) []Pool {
 	index := NewWorker(d.Queue, opts)
 	index.Register(store.JobKindIndex, indexHandler(d))
 	index.OnPermanentFailure(store.JobKindIndex, markDocFailed(d))
+	index.OnFinished(store.JobKindIndex, d.Reembed.Kick)
 
 	cluster := NewWorker(d.Queue, opts)
 	cluster.Register(store.JobKindCluster, clusterHandler(d))

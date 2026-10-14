@@ -511,3 +511,10 @@ func renderTables(b *strings.Builder) {
 		fmt.Fprintf(b, "curated %q %q\n", host, curatedSiteNames[host])
 	}
 }
+
+// TestSiteOrHost: a site is named by its name, else its host.
+func TestSiteOrHost(t *testing.T) {
+	assert.Equal(t, "Example Times", SiteOrHost("Example Times", "example.com"))
+	assert.Equal(t, "example.com", SiteOrHost("", "example.com"))
+	assert.Empty(t, SiteOrHost("", ""))
+}

@@ -17,6 +17,7 @@ import (
 	"github.com/samsar/curio/internal/api"
 	"github.com/samsar/curio/internal/api/apitest"
 	"github.com/samsar/curio/internal/client"
+	"github.com/samsar/curio/internal/jobs"
 	"github.com/samsar/curio/internal/store"
 )
 
@@ -362,6 +363,94 @@ func TestStatus_Cards(t *testing.T) {
 	srv.AddDocument(t, "https://example.com/a", store.DocStateFetched)
 	srv.AddDocument(t, "https://example.com/b", store.DocStatePending)
 	assert.Contains(t, mustRun(t, srv, "status"), "\ncards:     2 to embed\n")
+}
+
+// TestStatus_ChunkContext: status counts the chunks left to re-embed for
+// the chunk context and their documents, of all the fetched ones, with the
+// time left while the daemon has measured the re-embed's rate, and prints
+// no line while none is.
+func TestStatus_ChunkContext(t *testing.T) {
+	srv := apitest.Start(t)
+	srv.AddContent(t, srv.AddDocument(t, "https://example.com/a", store.DocStateFetched), "indexed")
+	srv.AddDocument(t, "https://example.com/b", store.DocStateFetched)
+	assert.NotContains(t, mustRun(t, srv, "status"), "chunks:")
+	_, err := srv.DB.Exec(`UPDATE chunks SET context_version = 0`)
+	require.NoError(t, err)
+	assert.Contains(t, mustRun(t, srv, "status"),
+		"\nchunks:    1 chunk in 1 of 2 documents to re-embed (new chunk context)\n")
+
+	running := apitest.Start(t, func(d *api.Deps) {
+		d.Reembed = reembedAt{jobs.ReembedProgress{Active: true, ChunksPerSecond: 0.5}}
+	})
+	running.AddContent(t, running.AddDocument(t, "https://example.com/a", store.DocStateFetched), "indexed")
+	_, err = running.DB.Exec(`UPDATE chunks SET context_version = 0`)
+	require.NoError(t, err)
+	assert.Contains(t, mustRun(t, running, "status"), "\nchunks:    1 chunk in 1 of 1 documents to re-embed "+
+		"(new chunk context), under a minute left at 0.5 chunks/s\n")
+}
+
+// reembedAt is a re-embed that reports progress.
+type reembedAt struct{ progress jobs.ReembedProgress }
+
+func (r reembedAt) Progress() jobs.ReembedProgress { return r.progress }
+
+// TestReembedCheck: doctor passes documents left to re-embed while index
+// jobs are queued to re-embed them, with the time left once measured, and
+// warns when none is, with the restart that resumes the re-embed, and while
+// the re-embed's brake stops it, with what fixes the model.
+func TestReembedCheck(t *testing.T) {
+	const done = "every document's chunks are embedded with their context"
+	until := time.Date(2026, 10, 14, 14, 30, 0, 0, time.UTC)
+	brake := &client.ReembedBrake{Until: until, Failures: 3, Documents: []string{"d1", "d2", "d3"},
+		Error: "HTTP 500: llama runner process has terminated"}
+	for name, tc := range map[string]struct {
+		left         *client.ReembedStats
+		queued       bool
+		brake        *client.ReembedBrake
+		status       checkStatus
+		detail, hint string
+	}{
+		"none left":               {nil, false, nil, statusOK, done, ""},
+		"none left, jobs":         {nil, true, nil, statusOK, done, ""},
+		"none left, the brake on": {nil, false, brake, statusOK, done, ""},
+		"the brake on": {&client.ReembedStats{Documents: 12, Chunks: 140}, true, brake, statusWarn,
+			"12 documents (140 chunks) to re-embed for the new chunk context; the re-embed waits until " +
+				localTime(until) + ", the re-embeds of 3 documents having failed in a row (d1, d2 and d3): HTTP 500: " +
+				"llama runner process has terminated; until then each keeps its earlier vectors", reembedBrakeFix},
+		"some left, jobs": {&client.ReembedStats{Documents: 12, Chunks: 140}, true, nil, statusOK,
+			"12 documents (140 chunks) to re-embed for the new chunk context; index jobs are queued to re-embed " +
+				"them", ""},
+		"measured": {&client.ReembedStats{Documents: 12, Chunks: 140, ChunksPerSecond: 0.5, ETASeconds: 280},
+			true, nil, statusOK, "12 documents (140 chunks) to re-embed for the new chunk context, about 5 min left at " +
+				"0.5 chunks/s; index jobs are queued to re-embed them", ""},
+		"one left, no job": {&client.ReembedStats{Documents: 1, Chunks: 1}, false, nil, statusWarn,
+			"1 document (1 chunk) to re-embed for the new chunk context, and no index job is queued to re-embed it",
+			reembedRestart},
+		"several left, no job": {&client.ReembedStats{Documents: 7, Chunks: 70, ChunksPerSecond: 2, ETASeconds: 35},
+			false, nil, statusWarn, "7 documents (70 chunks) to re-embed for the new chunk context, about 1 min left at " +
+				"2.0 chunks/s, and no index job is queued to re-embed them", reembedRestart},
+	} {
+		t.Run(name, func(t *testing.T) {
+			status, detail, hint := reembedCheck(tc.left, tc.queued, tc.brake)
+			assert.Equal(t, tc.status, status)
+			assert.Equal(t, tc.detail, detail)
+			assert.Equal(t, tc.hint, hint)
+		})
+	}
+	assert.Contains(t, reembedRestart, "tries a document that fails on its own up to 3 times",
+		"the hint says what the restart does")
+	for want, b := range map[string]client.ReembedBrake{
+		"":                                 {Failures: 3},
+		" (d1)":                            {Failures: 1, Documents: []string{"d1"}},
+		" (d1 and d2)":                     {Failures: 2, Documents: []string{"d1", "d2"}},
+		" (d1, d2, d3, d4, d5 and 2 more)": {Failures: 7, Documents: []string{"d1", "d2", "d3", "d4", "d5"}},
+	} {
+		assert.Equal(t, want, brakeDocuments(b))
+	}
+	for d, want := range map[time.Duration]string{0: "under a minute", 29 * time.Second: "under a minute",
+		90 * time.Second: "about 2 min", 59 * time.Minute: "about 59 min", 85 * time.Minute: "about 1 h 25 min"} {
+		assert.Equal(t, want, roughly(d), d)
+	}
 }
 
 // TestCardsCheck: doctor passes cards left to embed while a cards job runs

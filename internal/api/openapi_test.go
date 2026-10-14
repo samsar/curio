@@ -23,6 +23,7 @@ import (
 
 	"github.com/samsar/curio/internal/fetcher"
 	"github.com/samsar/curio/internal/insight"
+	"github.com/samsar/curio/internal/jobs"
 	"github.com/samsar/curio/internal/ollama"
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
@@ -191,7 +192,8 @@ func TestOpenAPI_StrictValidation(t *testing.T) {
 		assert.Error(t, jobRef.VisitJSON(v, validationOptions...), name)
 	}
 	var v any
-	require.NoError(t, json.Unmarshal([]byte(`{"documents_by_state":{"fetched":2},"version":"v","bookmarks_total":0,"documents_total":2,"cards_stale":0}`), &v))
+	require.NoError(t, json.Unmarshal([]byte(`{"documents_by_state":{"fetched":2},"version":"v","bookmarks_total":0,"documents_total":2,"cards_stale":0,`+
+		`"reembed":{"documents":1,"chunks":3,"chunks_per_second":2.5,"eta_seconds":1}}`), &v))
 	assert.NoError(t, schemas["Stats"].Value.VisitJSON(v, validationOptions...), "declared maps stay open")
 }
 
@@ -317,6 +319,13 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 			Bookmarks: unclassifiable{d.Bookmarks}, Log: slog.New(slog.DiscardHandler),
 			Start: SavedDates{CheckedAt: time.Now(), Error: "classify saved dates: disk I/O error"}})
 		d.SavedDates.Classify(store.SourceChrome)
+		// A re-embed under way, its rate measured: the fixtures' chunks
+		// predate the chunk context. Its brake on, and the embedder hold
+		// closed.
+		d.Reembed = reembedAt{jobs.ReembedProgress{Active: true, ChunksPerSecond: 2.5,
+			Brake: jobs.ReembedBrake{Until: time.Now().Add(15 * time.Minute), Failures: 3,
+				Documents: []string{"d1", "d2", "d3"}, Err: "HTTP 500: boom"}}}
+		d.Hold = holdAt{jobs.HoldState{Held: true, Since: time.Now(), Err: "ollama unreachable: connection refused"}}
 		// Paused Jina, with every optional field set.
 		d.Upstreams = func() []fetcher.UpstreamHealth {
 			now := time.Now()

@@ -324,10 +324,16 @@ bookmark file ──► importer ──► bookmark + document ──► fetch j
                               │       enqueue index job
                               │           │
                               │           ▼
-                              │       chunker ──► embedder (Ollama)
+                              │       chunker (with each chunk's headings)
+                              │           │
+                              │           ▼
+                              │       context: title — site — heading path
+                              │           │
+                              │           ▼
+                              │       embedder (Ollama): prefix + context + text
                               │                       │
                               │                       ▼
-                              │                  FTS5 + sqlite-vec ──► mark fetched (indexed_at)
+                              │                  FTS5 + sqlite-vec, in place ──► mark fetched (indexed_at)
                               │                                              │
                               │                                              ▼
                               │                    Placer: into the nearest interest of the
@@ -371,7 +377,7 @@ fields and its card again (`internal/docmeta`) in its own transaction,
 and a card whose text changed queues the cards job there too: at most one
 pending per tenant, due 10 s later (`sqlite.CardsJobDelay`), so the
 changes of a burst share it and it runs about 10 s after the change that
-queued it. The cards job embeds the stale cards in batches of 32, under
+queued it. The cards job embeds the stale cards in batches of 8, under
 the queue gate like any job, logging how far it got every 500 cards; an
 Ollama that doesn't answer defers it, 1 to 5 minutes, rather than failing
 it, and one that fails for good queues the next an hour ahead while cards
@@ -379,6 +385,33 @@ are stale. `/v1/stats` counts the cards left to embed (`cards_stale`),
 which `curio status` prints and `curio doctor` holds to a cards job
 pending or running. See decisions.md "Metadata search: a fields index and
 a card per document".
+
+An index job chunks the current extraction's markdown (`indexer.ChunkText`:
+paragraphs packed into 384-word chunks, 48 words carried from one to the
+next, cut at 3,500 bytes), each chunk knowing the headings open where the
+words it adds begin. It embeds each chunk with its context, `<title> —
+<site> — <heading path>` (`indexer.Context`: the document's title, else
+the title it was saved as; its fields' site name, else its host; the
+nearest heading and its parent that don't repeat them), in batches of 8,
+the configured document prefix first and a blank line between the
+context and the text. The text stays the chunk's own for BM25 and
+snippets; the context and the version of the rules that built it
+(`indexer.ContextVersion`) are stored with it, and the drift check
+re-sends them. The chunks are written in place, by position: a kept
+chunk's row and vector are updated, so sqlite-vec takes no new slot
+(`ChunkStore.ReplaceForDocument`); the index job's writes are held to the
+extraction it read, so one a refetch overtook writes nothing. A daemon
+whose rules are newer than a library's chunks re-embeds them from its
+start, one index job per document fed to the index pool a job at a time
+(`jobs.Reembed`), which a document never fails by, and `/v1/stats` counts
+what is left, with the rate and the time left (`reembed`). While the
+embedding model doesn't answer, the index and cards jobs wait, held by a
+gate (`jobs.EmbedderHold`), without spending an attempt; healthz reports
+the hold (`embedder_hold`). A failure every document's embed meets parks
+at most five re-embed jobs, keeps no document's earlier vectors for good,
+and after three documents in a row stops the feed for 15 minutes to 4
+hours (the brake, `reembed_brake` on healthz). See decisions.md "Chunks
+embedded with their context".
 
 ## Fetcher strategy selection
 
@@ -526,7 +559,8 @@ External processes the daemon expects:
   Ollama truncate an input, and generate requests turn thinking off. The
   daemon records the embedding model's digest and Ollama's version in the
   marker and checks them every minute. A change is verified by
-  re-embedding a sample of up to 64 stored chunks through the indexer:
+  re-embedding a sample of up to 64 stored chunks, with their stored
+  context, through the indexer:
   one whose sample matches the stored vectors becomes the new baseline,
   and one whose sample doesn't, or can't be re-embedded, is reported with
   that evidence as `embedding_drift` on `/v1/healthz`, in `curio doctor`,
