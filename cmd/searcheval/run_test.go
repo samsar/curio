@@ -476,9 +476,9 @@ func TestRun_FillsTheCardsOnce(t *testing.T) {
 }
 
 // TestRun_ComparesWithAFormerReport: a report written before the document
-// lists, which has no fields or cards weight and no fields or cards
-// stage, is a baseline; with the document lists weighted 0, the hybrid
-// ranks as it did.
+// lists, which has no fields, cards or title weight and no fields, cards
+// or titles stage, is a baseline; with the document lists weighted 0, the
+// hybrid ranks as it did.
 func TestRun_ComparesWithAFormerReport(t *testing.T) {
 	fx := newFixture(t)
 	res := runEval(t, fx.args(queries, "-variants", "hybrid,bm25,vector", "-baseline",

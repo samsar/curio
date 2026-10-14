@@ -449,22 +449,25 @@ time. A BM25 weight of 0 still runs BM25, so a config with `bm25_weight: 0`
 still falls back to the keyword results (weight 1) when the vector leg
 fails. The default 1/1 weights rank exactly as before.
 
-**Revised (2026-10-13), metadata search:** search ranks four lists. The two
-chunk lists, BM25 and vector, are fused and collapsed as above; then two
-lists of whole documents, the fields (BM25 over each document's saved
-title, folders, site and author) and the cards (a KNN over each document's
-embedded card), each add `weight/(rrf_k + rank)` to their documents, and a
+**Revised (2026-10-13), metadata search:** search ranks five lists. The
+two chunk lists, BM25 and vector, are fused and collapsed as above; then
+three lists of whole documents, the fields (BM25 over each document's
+saved title, folders, site and author), the cards (a KNN over each
+document's embedded card) and the titles (the AND of a query's distinct
+terms over each document's title and bookmark titles, for a query of two
+terms or more), each add `weight/(rrf_k + rank)` to their documents, and a
 document only they found joins with no chunks. Their weights are
-`search.fields_weight` and `search.cards_weight`, each finite and not
-negative with 0 switching the list off; the four must not all be 0, and
-all four 0 in `search.Config` means unset (1, 1, 0, 0). The query is
-embedded once, for both semantic lists, and only when `vector_weight` or
-`cards_weight` is above 0. Degradation stays one rule: any failure in the
-semantic leg (the embed, either KNN) drops both semantic lists, and BM25
-(at weight 1) and the fields list (at its weight, a local SQLite read like
-BM25, whose failure fails the search) still rank; the warning adds
-", without the document cards" when the cards were on. See "Metadata
-search: a fields index and a card per document".
+`search.fields_weight`, `search.cards_weight` and `search.title_weight`,
+each finite and not negative with 0 switching the list off; the five must
+not all be 0, and all five 0 in `search.Config` means unset (1, 1, 0, 0,
+0). The query is embedded once, for both semantic lists, and only when
+`vector_weight` or `cards_weight` is above 0. Degradation stays one rule:
+any failure in the semantic leg (the embed, either KNN) drops both
+semantic lists, and BM25 (at weight 1), the fields list and the title list
+(at their weights, local SQLite reads like BM25, whose failure fails the
+search) still rank; the warning adds ", without the document cards" when
+the cards were on. See "Metadata search: a fields index and a card per
+document".
 
 ---
 
@@ -5315,16 +5318,16 @@ already reads fetched documents only.
 documents again, by what they were saved as, never by their stale text.
 The chunk retrievers still leave them out, as above, so no passage of a
 failed fetch's old extraction is ever shown or ranked. The document lists
-of metadata search (the fields and the cards) reach every document of
-every state: a bookmark whose page is gone is still the bookmark its
-owner is looking for, and its title, folders and site are what they
-remember it by. About three in ten documents of the owner's library are
-failed or dead. Such a hit has no passages; the API sends the bookmarks
-it was saved under in their place, and every client shows a dead page
-as no longer available and a failed one as one curio couldn't read, a
+of metadata search (the fields, the cards and the title list) reach every
+document of every state: a bookmark whose page is gone is still the
+bookmark its owner is looking for, and its title, folders and site are
+what they remember it by. About three in ten documents of the owner's
+library are failed or dead. Such a hit has no passages; the API sends the
+bookmarks it was saved under in their place, and every client shows a dead
+page as no longer available and a failed one as one curio couldn't read, a
 page often still there behind a sign-in, a bot check or a timeout.
-find-related is unchanged. See "Metadata search: a fields index and a
-card per document".
+find-related is unchanged. See "Metadata search: a fields index and a card
+per document".
 
 ---
 
@@ -13001,12 +13004,12 @@ only writer of `document_fields` and of `document_cards.text`, and
 rules' tables and limits and their outputs over a synthetic sample, so an
 edit to a table no sample document meets still needs a new version. The
 search surfaces show a hit without a passage through it, so the three say
-one thing in one way: `SavedAs` picks the bookmark (the newest whose
-title isn't blank, else the newest) and names its folder as search reads
-it (`FolderText`), and `Unavailable` words a dead or failed page. Those
+one thing in one way: `SavedAs` picks the bookmark (the newest whose title
+isn't blank, else the newest) and names its folder as search reads it
+(`FolderText`), and `Unavailable` words a dead or failed page. Those
 present; no row is derived through them, so they are outside
-`RulesVersion`. `refreshFields` runs inside the transaction of every
-write that changes an input: `Documents.Create`, `ApplyFetch` (now one `BEGIN
+`RulesVersion`. `refreshFields` runs inside the transaction of every write
+that changes an input: `Documents.Create`, `ApplyFetch` (now one `BEGIN
 IMMEDIATE` transaction), and `SetCurrentExtraction`; `Bookmarks.Ingest`
 (new and existing documents), `Create` (when it links a document),
 `Delete` (on the document it linked) and `LinkDocument` (on the old and
@@ -13014,12 +13017,12 @@ the new). State is no input, so `MarkFetched`, `MarkFailed` and the
 refetches don't run it. It upserts each row `ON CONFLICT … DO UPDATE …
 WHERE` something changed (never `INSERT OR REPLACE`, which would fire the
 delete triggers), agrees the host's name, and when that changed rewrites
-the site and card of the host's other documents without a declared name.
-A write that changes no input writes nothing (a test counts
+the site and card of the host's other documents without a declared name. A
+write that changes no input writes nothing (a test counts
 `total_changes()`), and a property test holds any order of the seven
 writes to the fields a full derivation of the final data gives.
-`urlutil.Site`, the registrable domain, moved from the fetcher, whose
-site pacing uses it too.
+`urlutil.Site`, the registrable domain, moved from the fetcher, whose site
+pacing uses it too.
 
 **Why not on `documents`.** The research sketch put the display name in a
 `documents.site_name` column. It changes when a sibling is fetched or
@@ -13451,26 +13454,25 @@ derived, 7,557 cards embedded):
 
 Before the title list the failed and dead items' median rank was 45 (131
 of 132 within the 100, the best 14th); at 2 it is 1, and both pending
-items are first. On the 50 graded queries every title weight from 0.5 to
-3 gives the same: all nDCG@10 0.655 (0.654 without the list, 0.590 for PR
-1), owner-tagged nDCG@10 0.342 and R@10 0.297, keyword R@10 0.864, and
-the worst kind against PR 1 temporal, −0.033, as before; two rankings
-moved (one at 0.5), one keyword query (nDCG@10 0.783 to 0.821) and one
-reorder. At
-weight 0 every ranking of both sets is the one fields and cards alone
-gave. The bars, set before these runs: the 50 queries within 0.01 of
-the first pass (all nDCG@10 0.644 or more, owner-tagged 0.332), keyword
-R@10 0.84 or more and no kind more than 0.05 under PR 1, as the fields
-and cards were held to; and, new, the failed and dead known items on the
-first page. Weight 2 is the smallest of the grid that puts almost every
-one first: rank 1 in the title list alone ties a document both chunk
-lists rank first, and the fields list's rank 1 beside it lifts the item
-over it; 3 is no better. Latency, back to back in one session, three
-rounds of PR 1's `searcheval` (built from main, on a schema-18 copy),
-then this branch's at weight 0, then at 2: hybrid total p50 147.8, 147.6
-and 144.4 ms for PR 1, 142.5, 145.3 and 144.9 at 0, 143.7, 143.7 and
-142.4 at 2; the title stage itself 0.4 ms at p50 and 0.7 at p95 on the
-50 queries, and at most 3.1 ms on the known items, beside BM25.
+items are first. On the 50 graded queries every title weight from 0.5 to 3
+gives the same: all nDCG@10 0.655 (0.654 without the list, 0.590 for PR
+1), owner-tagged nDCG@10 0.342 and R@10 0.297, keyword R@10 0.864, and the
+worst kind against PR 1 temporal, −0.033, as before; two rankings moved
+(one at 0.5), one keyword query (nDCG@10 0.783 to 0.821) and one reorder.
+At weight 0 every ranking of both sets is the one fields and cards alone
+gave. The bars, set before these runs: the 50 queries within 0.01 of the
+first pass (all nDCG@10 0.644 or more, owner-tagged 0.332), keyword R@10
+0.84 or more and no kind more than 0.05 under PR 1, as the fields and
+cards were held to; and, new, the failed and dead known items on the first
+page. Weight 2 is the smallest of the grid that puts almost every one
+first: rank 1 in the title list alone ties a document both chunk lists
+rank first, and the fields list's rank 1 beside it lifts the item over it;
+3 is no better. Latency, back to back in one session, three rounds of PR
+1's `searcheval` (built from main, on a schema-18 copy), then this
+branch's at weight 0, then at 2: hybrid total p50 147.8, 147.6 and 144.4
+ms for PR 1, 142.5, 145.3 and 144.9 at 0, 143.7, 143.7 and 142.4 at 2; the
+title stage itself 0.4 ms at p50 and 0.7 at p95 on the 50 queries, and at
+most 3.1 ms on the known items, beside BM25.
 
 **Rejected, measured on the same sets.**
 
@@ -13519,6 +13521,21 @@ and 144.4 ms for PR 1, 142.5, 145.3 and 144.9 at 0, 143.7, 143.7 and
   site name, unless the fetch lands in the same cards window. A card is
   one short input, next to the page's chunks; the first embed is what
   lets a page that never fetches be found by meaning.
+- The title list counts a query's terms by their lowercase form
+  (`titleQuery`), while the index folds stems and diacritics (`porter`,
+  `remove_diacritics 2`), so two forms of one word ("run running") or a
+  word with and without its accents ("café cafe") count as two terms and
+  engage the title list as a one-word query would not, its AND then
+  reading one word held to the titles. No simpler rule is sound: counting
+  as the index does needs the tokenizer's porter stemming and Unicode
+  decomposition (`golang.org/x/text` as a new direct dependency), and a
+  prefix or suffix rule would merge words the index keeps apart.
+- Under the gentle throttle (at most 4 fetches and 1 index job), a card
+  fill runs beside the one index job, the cards pool being uncapped, so a
+  search's query embed can wait in Ollama behind both. Holding the cards
+  job while an index job runs isn't simple: `Gate.Admit` sees only the
+  asking pool's running count and must do no I/O, so a hold across pools
+  needs state they share and a wake-up when the index pool goes idle.
 
 **Going back to 2.6.x.** 2.6 runs goose v3.28.0, which ignores database
 versions it doesn't know (as 2.5's does: "Going back to 2.5.x"), so its

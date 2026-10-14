@@ -234,12 +234,12 @@ the default `qwen3-embedding:0.6b`). No migration can know that width, so
 migration 001 creates `chunks_vec` at FLOAT[768] and the daemon's
 `sqlite.EnsureVectorIndex`, after migrating, recreates it at the marker's
 width while it is empty, and creates `document_cards_vec`; it never
-rebuilds a table that holds vectors. The daemon refuses to start when `config.yaml`'s
-embedding model or width differs from the marker's, or the marker predates
-home format 2 (see
-[embedding model and per-home width](./decisions.md#embedding-model-and-per-home-width)).
-The database records neither: migration 012 dropped `schema_meta`, whose
-row claimed nomic-embed-text at 768 for every home.
+rebuilds a table that holds vectors. The daemon refuses to start when
+`config.yaml`'s embedding model or width differs from the marker's, or the
+marker predates home format 2 (see [embedding model and per-home
+width](./decisions.md#embedding-model-and-per-home-width)). The database
+records neither: migration 012 dropped `schema_meta`, whose row claimed
+nomic-embed-text at 768 for every home.
 
 ### `document_fields`, `site_name_votes` and `document_cards` (migration 019)
 
@@ -247,11 +247,11 @@ What a document is searched by besides its text: its fields, which the
 fields list matches with BM25 and the title list by its `title` and
 `bookmark_titles` alone (every term of the query in one or the other, an
 FTS5 column filter over the same index), and its card, the short text
-whose vector the cards list searches. Every document of every state has both, derived
-in Go (`internal/docmeta`) from the document, its current extraction's
-declared site name and its bookmarks, and written only by the store's
-refresh (`refreshFields` in `internal/store/sqlite/fields.go`), in the
-transaction of every write that changes what they are derived from:
+whose vector the cards list searches. Every document of every state has
+both, derived in Go (`internal/docmeta`) from the document, its current
+extraction's declared site name and its bookmarks, and written only by the
+store's refresh (`refreshFields` in `internal/store/sqlite/fields.go`), in
+the transaction of every write that changes what they are derived from:
 creating a document, a fetch, a change of its current extraction, and
 saving, deleting or relinking a bookmark. Neither is written with `INSERT
 OR REPLACE`, and like `chunks` neither carries `updated_at`: a derived

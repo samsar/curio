@@ -886,17 +886,14 @@ func titleQuery(q string) string {
 func isLetterOrDigit(r rune) bool { return unicode.IsLetter(r) || unicode.IsNumber(r) }
 
 // keywordTerms are the terms the keyword lists read a query by: its
-// word-like tokens (wordTokenRE), in order, less the stopwords, each
-// without double quotes, since FTS5 has no escape for `"` inside a quoted
-// phrase and the only safe move is to drop them.
+// word-like tokens (wordTokenRE), in order, less the stopwords. No term
+// can hold `"`, which wordTokenRE doesn't match, so a quote inside a word
+// splits it; that is what makes quoting each term as an FTS5 phrase safe,
+// FTS5 having no escape for `"` inside a quoted phrase.
 func keywordTerms(q string) []string {
 	tokens := wordTokenRE.FindAllString(q, -1)
 	terms := make([]string, 0, len(tokens))
 	for _, t := range tokens {
-		t = strings.ReplaceAll(t, `"`, "")
-		if t == "" {
-			continue
-		}
 		if _, stop := bm25Stopwords[strings.ToLower(t)]; stop {
 			continue
 		}

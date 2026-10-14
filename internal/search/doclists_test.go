@@ -591,7 +591,7 @@ func TestEngine_KnownItemsReachTheFirstPage(t *testing.T) {
 	defaults.Log = slog.New(slog.DiscardHandler)
 	withoutTitles := defaults
 	withoutTitles.TitleWeight = 0
-	engine, fieldsAlone := New(chunks, docs, index, emb, defaults), New(chunks, docs, index, emb, withoutTitles)
+	engine, withoutTitleList := New(chunks, docs, index, emb, defaults), New(chunks, docs, index, emb, withoutTitles)
 	for _, it := range items {
 		want := saved[it.title]
 		for _, q := range []string{it.title, it.fragment} {
@@ -610,7 +610,7 @@ func TestEngine_KnownItemsReachTheFirstPage(t *testing.T) {
 			assert.Equal(t, want, res.Items[0].Document.ID, "%s: first by %q", it.state, q)
 			assert.Empty(t, res.Items[0].Chunks, "%s: by what it was saved as, with no passage", it.state)
 
-			res, err = fieldsAlone.Search(ctx, Request{TenantID: "local", Query: q, K: 10})
+			res, err = withoutTitleList.Search(ctx, Request{TenantID: "local", Query: q, K: 10})
 			require.NoError(t, err)
 			assert.Len(t, res.Items, 10)
 			assert.NotContains(t, hitIDs(res.Items), want, "%s: off the first page by %q without the title list",

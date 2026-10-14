@@ -209,7 +209,7 @@ func TestSanitizeBM25Query(t *testing.T) {
 		{"the and of for", ""}, // all stopwords → empty (caller skips BM25)
 		{"don't break apostrophes", `"don't" OR "break" OR "apostrophes"`},
 		{"state-of-the-art", `"state-of-the-art"`},
-		{`he said "hi"`, `"said" OR "hi"`}, // "he" stopworded, inner quotes stripped
+		{`he said "hi"`, `"said" OR "hi"`}, // "he" stopworded; quotes split tokens, never part of one
 		{"AND OR NOT", ""},                 // case-insensitive stopword match
 	}
 	for _, c := range cases {
@@ -229,6 +229,7 @@ func TestTitleQuery(t *testing.T) {
 		{"Find me the zebra and its stripes", `"zebra" AND "stripes"`},
 		{"zebra -- stripes ' ''", `"zebra" AND "stripes"`},
 		{`zebra "stripes"`, `"zebra" AND "stripes"`},
+		{`zeb"ra stripes`, `"zeb" AND "ra" AND "stripes"`}, // a quote inside a word splits it
 		{"state-of-the-art don't", `"state-of-the-art" AND "don't"`},
 		{"Zebra zebra ZEBRA stripes", `"Zebra" AND "stripes"`},
 		{"zebra 2026", `"zebra" AND "2026"`},

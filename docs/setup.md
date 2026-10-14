@@ -787,7 +787,7 @@ list off:
 | `search.vector_weight` | 1 | the passages by meaning |
 | `search.fields_weight` | 0.25 | the documents by their saved title, bookmark titles, folders, site and author |
 | `search.cards_weight` | 0.5 | the documents by their cards' meaning |
-| `search.title_weight` | 2 | the documents whose title or bookmark titles hold every word of the query, for a query of two words or more: what puts a bookmark you search for by the title you saved it under on the first page |
+| `search.title_weight` | 2 | the documents whose title and bookmark titles hold every word of the query between them, for a query of two distinct words or more that aren't stopwords: what puts a bookmark you search for by the title you saved it under on the first page |
 
 Each weight is a number, 0 or more, and not all five may be 0. With
 `vector_weight` and `cards_weight` both 0 the query is never embedded, so
