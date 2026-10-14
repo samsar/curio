@@ -42,12 +42,45 @@ func NewChunks(db *DB, dim int) *Chunks {
 	return &Chunks{db: db, dim: dim}
 }
 
+// ReplaceForDocument implements store.ChunkStore, by position: the
+// document's chunks are read in order, the chunk at each position the
+// document keeps is rewritten in place, its row by primary key and its
+// vector by chunk ID, positions past the old count are inserted, and rows
+// past the new count deleted, their FTS entries and vectors through the
+// delete trigger. A document's rows are always 0 to n-1 of one extraction,
+// written here alone, and every kept row moves to its position's ord
+// before the next, so the new extraction's (extraction_id, ord) is never
+// taken.
+//
+// In place because sqlite-vec (v0.1.6) inserts only into its newest chunk
+// and never reuses a deleted vector's slot: deleting a document's chunks
+// and inserting them again grew chunks_vec by a slot per chunk at every
+// re-index (re-embedding the owner's library that way doubled it, 50 vec0
+// chunks to 100, and slowed every vector search by a third). A row whose
+// text, title and tags stay as they were writes nothing to chunks_fts
+// either (trg_chunks_update, migration 021).
 func (s *Chunks) ReplaceForDocument(
 	ctx context.Context,
 	documentID, extractionID, title string,
 	tags []string,
 	chunks []store.ChunkInput,
 ) error {
+	return s.replace(ctx, documentID, extractionID, nil, title, tags, chunks)
+}
+
+// ReplaceIndexed implements store.ChunkStore: ReplaceForDocument, after
+// checking guard (checkIndexGuard) in its transaction, which holds the
+// write lock from its BEGIN, so no refetch can move the document on between
+// the check and the write.
+func (s *Chunks) ReplaceIndexed(ctx context.Context, documentID string, guard store.IndexGuard, title string,
+	tags []string, chunks []store.ChunkInput) error {
+	return s.replace(ctx, documentID, guard.ExtractionID, &guard, title, tags, chunks)
+}
+
+// replace writes chunks as the document's, from extractionID, by position
+// (ReplaceForDocument), once guard, when there is one, holds.
+func (s *Chunks) replace(ctx context.Context, documentID, extractionID string, guard *store.IndexGuard, title string,
+	tags []string, chunks []store.ChunkInput) error {
 	if documentID == "" {
 		return errors.New("chunks: document_id required")
 	}
@@ -76,11 +109,21 @@ func (s *Chunks) ReplaceForDocument(
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.ExecContext(ctx, deleteDocumentChunksSQL, documentID); err != nil {
-		return fmt.Errorf("delete chunks: %w", err)
+	if guard != nil {
+		if err := checkIndexGuard(ctx, tx, documentID, *guard); err != nil {
+			return err
+		}
 	}
-	if err := insertChunks(ctx, tx, documentID, extractionID, title, tagsStr, chunks); err != nil {
+	kept, err := documentChunks(ctx, tx, documentID)
+	if err != nil {
 		return err
+	}
+	row := chunkRow{documentID: documentID, extractionID: extractionID, title: title, tags: tagsStr}
+	if err := writeChunks(ctx, tx, row, kept, chunks); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, deleteChunksFromSQL, documentID, len(chunks)); err != nil {
+		return fmt.Errorf("delete the chunks past %d: %w", len(chunks), err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit chunks: %w", err)
@@ -88,44 +131,163 @@ func (s *Chunks) ReplaceForDocument(
 	return nil
 }
 
-// deleteDocumentChunksSQL deletes a document's chunks through
-// idx_chunks_document. The delete trigger takes each chunk's FTS entry and
-// vector with it by rowid and chunk ID, so nothing scans chunks_fts or
-// chunks_vec.
-const deleteDocumentChunksSQL = `DELETE FROM chunks WHERE document_id = ?`
+// indexGuardSQL reads what an index write is held to, the document's
+// current extraction and state, by its primary key.
+const indexGuardSQL = `SELECT current_extraction_id, state FROM documents WHERE id = ?`
 
-// insertChunks inserts chunks in order, each as a chunk row (which the
-// insert trigger indexes, with title and tags) and a vector, through two
-// statements prepared once.
-func insertChunks(ctx context.Context, tx *sql.Tx, documentID, extractionID, title, tags string,
+// checkIndexGuard is ErrSuperseded unless guard.ExtractionID is the
+// document's current extraction and, for a re-embed, the document is
+// fetched; ErrNotFound when there is no such document.
+func checkIndexGuard(ctx context.Context, tx *sql.Tx, documentID string, guard store.IndexGuard) error {
+	var (
+		current sql.NullString
+		state   store.DocState
+	)
+	err := tx.QueryRowContext(ctx, indexGuardSQL, documentID).Scan(&current, &state)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return fmt.Errorf("index document %s: %w", documentID, store.ErrNotFound)
+	case err != nil:
+		return fmt.Errorf("index document %s: read what it was indexed from: %w", documentID, err)
+	case current.String != guard.ExtractionID:
+		return fmt.Errorf("index document %s from extraction %s, now %s: %w", documentID, guard.ExtractionID,
+			current.String, store.ErrSuperseded)
+	case guard.Reembed && state != store.DocStateFetched:
+		return fmt.Errorf("re-embed document %s, now %s: %w", documentID, state, store.ErrSuperseded)
+	}
+	return nil
+}
+
+// The statements of ReplaceForDocument. A document's chunks are read
+// through idx_chunks_document and sorted, a handful of rows; a kept row is
+// rewritten by its seq, the INTEGER PRIMARY KEY, and its vector by chunk
+// ID, a vec0 point lookup; the rows past the new count are deleted through
+// idx_chunks_document, the delete trigger taking each one's FTS entry and
+// vector by rowid and chunk ID, so nothing scans chunks_fts or chunks_vec.
+const (
+	documentChunksSQL = `SELECT seq, id FROM chunks WHERE document_id = ? ORDER BY ord`
+	updateChunkSQL    = `UPDATE chunks SET extraction_id = ?, ord = ?, text = ?, token_count = ?, title = ?, tags = ?,
+		context = ?, context_version = ? WHERE seq = ?`
+	insertChunkSQL = `INSERT INTO chunks (id, document_id, extraction_id, ord, text, token_count, title, tags, context,
+		context_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	updateChunkVectorSQL = `UPDATE chunks_vec SET embedding = ? WHERE chunk_id = ?`
+	insertChunkVectorSQL = `INSERT INTO chunks_vec (chunk_id, embedding) VALUES (?, ?)`
+	deleteChunksFromSQL  = `DELETE FROM chunks WHERE document_id = ? AND ord >= ?`
+)
+
+// storedChunk is a stored chunk's keys: its seq, the FTS rowid, and its
+// ID, its vector's key.
+type storedChunk struct {
+	seq int64
+	id  string
+}
+
+// documentChunks reads documentID's chunks' keys in order.
+func documentChunks(ctx context.Context, tx *sql.Tx, documentID string) ([]storedChunk, error) {
+	rows, err := tx.QueryContext(ctx, documentChunksSQL, documentID)
+	if err != nil {
+		return nil, fmt.Errorf("read the document's chunks: %w", err)
+	}
+	defer rows.Close()
+	var out []storedChunk
+	for rows.Next() {
+		var c storedChunk
+		if err := rows.Scan(&c.seq, &c.id); err != nil {
+			return nil, fmt.Errorf("scan a chunk of the document: %w", err)
+		}
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read the document's chunks: %w", err)
+	}
+	return out, nil
+}
+
+// chunkRow is what every chunk of one write shares.
+type chunkRow struct {
+	documentID, extractionID, title, tags string
+}
+
+// writeChunks writes chunks in order, each as a chunk row (which the
+// triggers index, with title and tags) and a vector, through statements
+// prepared once: in place of kept's chunk at its position, or as a new
+// chunk past them.
+func writeChunks(ctx context.Context, tx *sql.Tx, row chunkRow, kept []storedChunk,
 	chunks []store.ChunkInput) (err error) {
-	insChunk, err := tx.PrepareContext(ctx, `
-		INSERT INTO chunks (id, document_id, extraction_id, ord, text, token_count, title, tags)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-	if err != nil {
-		return fmt.Errorf("prepare chunk insert: %w", err)
+	prepare := func(what, query string) (*sql.Stmt, error) {
+		stmt, err := tx.PrepareContext(ctx, query)
+		if err != nil {
+			return nil, fmt.Errorf("prepare the %s: %w", what, err)
+		}
+		return stmt, nil
 	}
-	defer func() { err = errors.Join(err, insChunk.Close()) }()
-	insVec, err := tx.PrepareContext(ctx, `INSERT INTO chunks_vec (chunk_id, embedding) VALUES (?, ?)`)
+	updateChunk, err := prepare("chunk update", updateChunkSQL)
 	if err != nil {
-		return fmt.Errorf("prepare vector insert: %w", err)
+		return err
 	}
-	defer func() { err = errors.Join(err, insVec.Close()) }()
+	defer func() { err = errors.Join(err, updateChunk.Close()) }()
+	insertChunk, err := prepare("chunk insert", insertChunkSQL)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, insertChunk.Close()) }()
+	var vectors vectorWriter
+	if vectors.update, err = prepare("vector update", updateChunkVectorSQL); err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, vectors.update.Close()) }()
+	if vectors.insert, err = prepare("vector insert", insertChunkVectorSQL); err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, vectors.insert.Close()) }()
 
 	for i, c := range chunks {
-		chunkID := uuid.NewString()
-		if _, err := insChunk.ExecContext(ctx,
-			chunkID, documentID, extractionID, i, c.Text, c.TokenCount, title, tags); err != nil {
-			return fmt.Errorf("insert chunk[%d]: %w", i, err)
-		}
 		// sqlite-vec needs the embedding in its specific binary format.
-		serialized, err := sqlitevec.SerializeFloat32(c.Embedding)
+		vec, err := sqlitevec.SerializeFloat32(c.Embedding)
 		if err != nil {
 			return fmt.Errorf("serialize embedding[%d]: %w", i, err)
 		}
-		if _, err := insVec.ExecContext(ctx, chunkID, serialized); err != nil {
-			return fmt.Errorf("insert chunks_vec[%d]: %w", i, err)
+		if i >= len(kept) {
+			id := uuid.NewString()
+			if _, err := insertChunk.ExecContext(ctx, id, row.documentID, row.extractionID, i, c.Text,
+				c.TokenCount, row.title, row.tags, c.Context, c.ContextVersion); err != nil {
+				return fmt.Errorf("insert chunk[%d]: %w", i, err)
+			}
+			if _, err := vectors.insert.ExecContext(ctx, id, vec); err != nil {
+				return fmt.Errorf("insert chunks_vec[%d]: %w", i, err)
+			}
+			continue
 		}
+		if _, err := updateChunk.ExecContext(ctx, row.extractionID, i, c.Text, c.TokenCount, row.title, row.tags,
+			c.Context, c.ContextVersion, kept[i].seq); err != nil {
+			return fmt.Errorf("update chunk[%d]: %w", i, err)
+		}
+		if err := vectors.put(ctx, kept[i].id, vec); err != nil {
+			return fmt.Errorf("chunks_vec[%d]: %w", i, err)
+		}
+	}
+	return nil
+}
+
+// vectorWriter writes chunk vectors through its prepared statements.
+type vectorWriter struct{ update, insert *sql.Stmt }
+
+// put stores vec as chunk id's vector: in place of the one it has, else
+// as a new one, as PutCardVectors does.
+func (w vectorWriter) put(ctx context.Context, id string, vec []byte) error {
+	res, err := w.update.ExecContext(ctx, vec, id)
+	if err != nil {
+		return fmt.Errorf("update its vector: %w", err)
+	}
+	updated, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update its vector: %w", err)
+	}
+	if updated > 0 {
+		return nil
+	}
+	if _, err := w.insert.ExecContext(ctx, id, vec); err != nil {
+		return fmt.Errorf("insert its vector: %w", err)
 	}
 	return nil
 }
@@ -201,8 +363,8 @@ const snippetSQL = `snippet(chunks_fts, 0, '<em>', '</em>', '…', 32)`
 
 // Snippets returns the snippet of each of chunkIDs for query, a MATCH
 // expression as BM25Search takes it, in one statement. A chunk the query
-// doesn't match, or that no longer exists (a reindex replaced it since it
-// was retrieved), is absent.
+// doesn't match, or that no longer exists (a re-index that shortened its
+// document deleted it since it was retrieved), is absent.
 func (s *Chunks) Snippets(ctx context.Context, query string, chunkIDs []string) (map[string]string, error) {
 	out := make(map[string]string, len(chunkIDs))
 	if len(chunkIDs) == 0 || strings.TrimSpace(query) == "" {
@@ -603,12 +765,13 @@ func (s *Chunks) DocumentVectors(ctx context.Context, tenantID string) ([]store.
 // sampleChunksSQL is SampleChunks' statement. Its arguments are the
 // tenant, the fetched state and the two counts.
 //
-// longest ranks each fetched document's chunks by length in bytes, the
-// lower seq first among equals, and keeps the n longest of the documents'
-// first. Lengths bunch at the chunker's cap, so the tie-break decides much
-// of the set; seq has no AUTOINCREMENT, so a reindex rewrites a document's
-// chunks at the top and the lower seq is the chunk written first. Ranking
-// every chunk is the statement's one pass over the chunks table.
+// longest ranks each fetched document's chunks by the bytes embedded
+// besides the document prefix, their text and context, the lower seq first
+// among equals, and keeps the n longest of the documents' first. Lengths
+// bunch at the chunker's cap, so the tie-break decides much of the set: a
+// re-index keeps each chunk's seq, so the same library samples the same
+// chunks every time. Ranking every chunk is the statement's one pass over
+// the chunks table.
 //
 // picked then shuffles the other fetched documents that have chunks and
 // keeps n; only then does sample pick one chunk of each, at random. Picked
@@ -621,8 +784,9 @@ func (s *Chunks) DocumentVectors(ctx context.Context, tenantID string) ([]store.
 const sampleChunksSQL = `
 	WITH longest AS MATERIALIZED (
 		SELECT seq, document_id FROM (
-			SELECT c.seq, c.document_id, octet_length(c.text) AS bytes,
-			       row_number() OVER (PARTITION BY c.document_id ORDER BY octet_length(c.text) DESC, c.seq) AS nth
+			SELECT c.seq, c.document_id, octet_length(c.text) + octet_length(c.context) AS bytes,
+			       row_number() OVER (PARTITION BY c.document_id
+			                          ORDER BY octet_length(c.text) + octet_length(c.context) DESC, c.seq) AS nth
 			FROM documents d JOIN chunks c ON c.document_id = d.id
 			WHERE d.tenant_id = ?1 AND d.state = ?2)
 		WHERE nth = 1
@@ -639,7 +803,7 @@ const sampleChunksSQL = `
 		SELECT seq FROM longest
 		UNION ALL
 		SELECT (SELECT c.seq FROM chunks c WHERE c.document_id = p.id ORDER BY random() LIMIT 1) FROM picked p)
-	SELECT c.id, c.document_id, c.text, v.embedding
+	SELECT c.id, c.document_id, c.text, c.context, v.embedding
 	FROM sample s
 	JOIN chunks c     ON c.seq = s.seq
 	JOIN chunks_vec v ON v.chunk_id = c.id`
@@ -667,7 +831,7 @@ func (s *Chunks) SampleChunks(ctx context.Context, tenantID string, n store.Chun
 			c    store.SampledChunk
 			blob []byte
 		)
-		if err := rows.Scan(&c.ChunkID, &c.DocumentID, &c.Text, &blob); err != nil {
+		if err := rows.Scan(&c.ChunkID, &c.DocumentID, &c.Text, &c.Context, &blob); err != nil {
 			return nil, fmt.Errorf("scan sampled chunk: %w", err)
 		}
 		if c.Embedding, err = decodeVector(blob, s.dim); err != nil {
@@ -679,6 +843,38 @@ func (s *Chunks) SampleChunks(ctx context.Context, tenantID string, n store.Chun
 		return nil, fmt.Errorf("sample chunks: %w", err)
 	}
 	return out, nil
+}
+
+// keepEmbeddedSQL records a document's chunks of an older context version
+// as embedded under the version given, through idx_chunks_document. Their
+// text, title and tags stay as they are, so trg_chunks_update writes
+// nothing to chunks_fts.
+const keepEmbeddedSQL = `UPDATE chunks SET context_version = ?1 WHERE document_id = ?2 AND context_version < ?1`
+
+// staleContextSQL is whether a document holds a chunk of an older context
+// version, its chunks a seek of idx_chunks_document.
+const staleContextSQL = `SELECT EXISTS (SELECT 1 FROM chunks WHERE document_id = ?1 AND context_version < ?2)`
+
+// StaleContext implements store.ChunkStore.
+func (s *Chunks) StaleContext(ctx context.Context, documentID string, version int) (bool, error) {
+	var stale bool
+	if err := s.db.QueryRowContext(ctx, staleContextSQL, documentID, version).Scan(&stale); err != nil {
+		return false, fmt.Errorf("read the context version of document %s's chunks: %w", documentID, err)
+	}
+	return stale, nil
+}
+
+// KeepEmbedded implements store.ChunkStore.
+func (s *Chunks) KeepEmbedded(ctx context.Context, documentID string, version int) (int, error) {
+	res, err := s.db.ExecContext(ctx, keepEmbeddedSQL, version, documentID)
+	if err != nil {
+		return 0, fmt.Errorf("keep the chunks of document %s as embedded: %w", documentID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("keep the chunks of document %s as embedded: %w", documentID, err)
+	}
+	return int(n), nil
 }
 
 // GetByIDs returns the chunks with the given IDs, in arbitrary order.

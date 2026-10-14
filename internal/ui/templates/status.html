@@ -31,6 +31,7 @@ only when their setting does.
 </div>
 <div class="mt-6">{{template "stackbar" (stateBar .ByState)}}</div>
 {{$total := .Documents}}<div class="legend">{{range $i, $c := .ByState}}<a id="legend-{{$i}}" href="{{stateHref $c.Name}}"><span class="swatch swatch-{{stateTone $c.Name}}"></span>{{$c.Name}} <span class="n">{{num $c.Count}}</span> <span class="pct">{{pct $c.Count $total}}</span></a>{{end}}</div>
+{{$fetched := .State "fetched"}}{{with .Reembed}}<p class="muted mt-4">{{count .Chunks "chunk" "chunks"}} in {{num .Documents}} of {{num $fetched}} fetched documents to re-embed for the new chunk context{{if .ETA}}, about {{duration .ETA}} left at {{.Rate}} chunks a second{{end}}</p>{{end}}
 {{end}}
 </div>
 </section>

@@ -42,13 +42,14 @@ type Copy struct {
 	Width int
 	// Fields is what deriving its documents' search fields did, and
 	// SavedDates what classifying its bookmarks' saved dates did.
-	Fields     sqlite.FieldsRefresh
-	SavedDates sqlite.SavedDatesRefresh
-	Documents  store.DocumentStore
-	Bookmarks  store.BookmarkStore
-	Chunks     store.ChunkStore
-	Index      store.DocumentIndex
-	Insights   store.InsightStore
+	Fields      sqlite.FieldsRefresh
+	SavedDates  sqlite.SavedDatesRefresh
+	Documents   store.DocumentStore
+	Extractions store.ExtractionStore
+	Bookmarks   store.BookmarkStore
+	Chunks      store.ChunkStore
+	Index       store.DocumentIndex
+	Insights    store.InsightStore
 
 	db *sqlite.DB
 }
@@ -101,13 +102,19 @@ func migrate(ctx context.Context, path string, db *sqlite.DB) (*Copy, error) {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return &Copy{Path: path, Schema: schema, Width: width, Fields: fields, SavedDates: saved,
-		Documents: sqlite.NewDocuments(db),
+		Documents: sqlite.NewDocuments(db), Extractions: sqlite.NewExtractions(db),
 		Bookmarks: sqlite.NewBookmarks(db), Chunks: sqlite.NewChunks(db, width),
 		Index: sqlite.NewDocumentIndex(db, width), Insights: sqlite.NewInsights(db), db: db}, nil
 }
 
 // Close closes the database.
 func (c *Copy) Close() error { return c.db.Close() }
+
+// ChunkVectorBlocks is how many vec0 chunks the copy's chunk vectors are
+// stored in (sqlite.ChunkVectorBlocks).
+func (c *Copy) ChunkVectorBlocks(ctx context.Context) (int, error) {
+	return sqlite.ChunkVectorBlocks(ctx, c.db)
+}
 
 // homeFiles are the files whose presence beside a database makes its
 // directory a home: daemon.pid, which every daemon that ever started there

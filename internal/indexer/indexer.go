@@ -33,10 +33,10 @@ type Indexer struct {
 type Options struct {
 	ChunkSize    int
 	ChunkOverlap int
-	// DocumentPrefix is prepended to each chunk before embedding (not
-	// stored), for models trained with a document instruction; the default,
-	// Qwen3-Embedding, takes none. It is one half of a scheme with the
-	// search engine's query prefix.
+	// DocumentPrefix is prepended to each chunk's input before embedding
+	// (not stored), for models trained with a document instruction; the
+	// default, Qwen3-Embedding, takes none. It is one half of a scheme with
+	// the search engine's query prefix.
 	DocumentPrefix string
 	// EmbedBatchSize caps how many chunks go into one embed request.
 	// Default EmbedBatchSize.
@@ -46,14 +46,18 @@ type Options struct {
 	Log *slog.Logger
 }
 
-// EmbedBatchSize bounds one embed request to at most 32 chunks of at most
-// 3500 bytes (~112 KB), so a request's work doesn't grow with the document:
-// the embedder's timeout then measures Ollama's health, not document
-// length, and a search's query embedding waits behind a bounded amount of
-// index work in Ollama. How long a batch takes depends on the model and
-// the machine; decisions.md "Indexer: embed in batches of 32" has what was
-// measured, and what wasn't.
-const EmbedBatchSize = 32
+// EmbedBatchSize bounds one embed request to at most 8 inputs of at most
+// about 4 KB (a chunk at the 3,500-byte cap and its context), so a
+// request's work doesn't grow with the document: the embedder's timeout
+// then measures Ollama's health, not document length. Ollama serves one
+// embed request at a time and embeds a batch's inputs one after another,
+// so the size sets how much index work a search's query embedding waits
+// behind, not how fast the library is embedded: with 4 index workers
+// re-embedding the owner's library, query embeds waited 6.0 s at the 95th
+// percentile in batches of 32, past search's 10 s timeout at worst, and
+// 3.35 s in batches of 8, at the same 11.2 chunks a second
+// (decisions.md "Indexer: embed in batches of 32").
+const EmbedBatchSize = 8
 
 func New(chunks store.ChunkStore, emb embedder.Embedder, opts Options) *Indexer {
 	co := ChunkOptions{
@@ -76,72 +80,178 @@ func New(chunks store.ChunkStore, emb embedder.Embedder, opts Options) *Indexer 
 type IndexInput struct {
 	DocumentID   string
 	ExtractionID string
-	Title        string   // denormalized into chunks_fts for boostable title search
 	Tags         []string // denormalized into chunks_fts
 	Markdown     string
+	// Document is what each chunk's context is built from (Context). Its
+	// Title, the document's own, is also denormalized into chunks_fts for
+	// boostable title search.
+	Document DocumentContext
+	// Reembed marks a re-embed's index, written only while the document
+	// is fetched (store.IndexGuard).
+	Reembed bool
 }
 
-// Index chunks, embeds, and writes. Replaces any previous chunks for the
-// document atomically. Empty markdown is valid — produces zero chunks,
-// which clears any prior index for the document.
-func (i *Indexer) Index(ctx context.Context, in IndexInput) error {
+// Index chunks, embeds, and writes, and returns how many chunks it wrote.
+// Each chunk is embedded with its context (Context), stored with it and
+// with ContextVersion; its text, which BM25 and snippets read, stays its
+// own. A chunk the embedding model can't take with its context is embedded
+// without it (embedForIndex), and stored with none, so that a model with a
+// small context indexes every document it indexed before chunks had one.
+// Replaces any previous chunks for the document atomically, while
+// ExtractionID is still its current extraction (ChunkStore.ReplaceIndexed:
+// store.ErrSuperseded otherwise, nothing written). Empty markdown is
+// valid — produces zero chunks, which clears any prior index for the
+// document.
+func (i *Indexer) Index(ctx context.Context, in IndexInput) (int, error) {
 	if in.DocumentID == "" {
-		return errors.New("indexer: DocumentID required")
+		return 0, errors.New("indexer: DocumentID required")
 	}
 	if in.ExtractionID == "" {
-		return errors.New("indexer: ExtractionID required")
+		return 0, errors.New("indexer: ExtractionID required")
 	}
 
 	chunks := ChunkText(in.Markdown, i.opts)
-	if len(chunks) == 0 {
-		// Replace with empty set — clears any previous chunks for the doc.
-		return i.chunks.ReplaceForDocument(ctx, in.DocumentID, in.ExtractionID, in.Title, in.Tags, nil)
-	}
-
-	texts := make([]string, len(chunks))
+	embeds := make([]EmbedInput, len(chunks))
 	for j, c := range chunks {
-		texts[j] = c.Text
+		embeds[j] = EmbedInput{Context: Context(in.Document, c.Headings), Text: c.Text}
 	}
-	vectors, err := i.EmbedChunks(ctx, texts)
+	vectors, bare, err := i.embedForIndex(ctx, embeds)
 	if err != nil {
-		return err
+		return 0, err
+	}
+	if bare > 0 {
+		i.log.Warn("index: the embedding model can't take some of a document's chunks with their context; "+
+			"they are embedded without it", "document_id", in.DocumentID, "chunks", bare, "of", len(chunks))
 	}
 
 	inputs := make([]store.ChunkInput, len(chunks))
 	for j, c := range chunks {
 		inputs[j] = store.ChunkInput{
-			Text:       c.Text,
-			TokenCount: c.TokenCount,
-			Embedding:  vectors[j],
+			Text:           c.Text,
+			TokenCount:     c.TokenCount,
+			Context:        embeds[j].Context,
+			ContextVersion: ContextVersion,
+			Embedding:      vectors[j],
 		}
 	}
-	return i.chunks.ReplaceForDocument(ctx, in.DocumentID, in.ExtractionID, in.Title, in.Tags, inputs)
+	// No chunks replace the document's with none.
+	guard := store.IndexGuard{ExtractionID: in.ExtractionID, Reembed: in.Reembed}
+	if err := i.chunks.ReplaceIndexed(ctx, in.DocumentID, guard, in.Document.Title, in.Tags, inputs); err != nil {
+		return 0, err
+	}
+	return len(inputs), nil
 }
 
-// EmbedChunks embeds chunk texts as indexing does, and is the path every
-// index embed request takes: each text prefixed with the document prefix
-// (models with a document instruction need it; the stored text stays raw,
-// so BM25 and snippets never see it), in consecutive batches of at most
-// the batch size, in order. The drift check re-embeds stored chunks
-// through it, so what it compares was sent exactly as the stored vectors
-// were.
-func (i *Indexer) EmbedChunks(ctx context.Context, texts []string) ([][]float32, error) {
-	prefixed := make([]string, len(texts))
-	for j, t := range texts {
-		prefixed[j] = i.docPrefix + t
+// embedForIndex embeds a document's chunks as EmbedChunks does, batch by
+// batch. A batch the model refuses as too long (embedder.ErrInputTooLong,
+// which fails a whole batch) is embedded again a chunk at a time, and a
+// chunk refused alone with its context is embedded without it: its
+// context is cleared in inputs, so that what is stored is what its vector
+// was made from. bare counts those. Only a chunk refused without its
+// context fails the document, as it did before chunks had one.
+func (i *Indexer) embedForIndex(ctx context.Context, inputs []EmbedInput) (vectors [][]float32, bare int,
+	err error) {
+	vectors = make([][]float32, 0, len(inputs))
+	texts := make([]string, len(inputs))
+	for j, in := range inputs {
+		texts[j] = i.embedText(in)
 	}
-	return i.embed(ctx, prefixed)
+	for start := 0; start < len(inputs); start += i.batchSize {
+		end := min(start+i.batchSize, len(inputs))
+		batch, err := i.embedBatch(ctx, texts, start, end)
+		if errors.Is(err, embedder.ErrInputTooLong) {
+			var n int
+			batch, n, err = i.embedChunksEach(ctx, inputs, start, end)
+			bare += n
+		}
+		if err != nil {
+			return nil, 0, err
+		}
+		vectors = append(vectors, batch...)
+	}
+	return vectors, bare, nil
+}
+
+// embedChunksEach embeds inputs[start:end] one a request, after the model
+// refused them together as too long: each with its context, and one
+// refused that way without it, its context cleared. bare counts those.
+func (i *Indexer) embedChunksEach(ctx context.Context, inputs []EmbedInput, start, end int) (vectors [][]float32,
+	bare int, err error) {
+	for j := start; j < end; j++ {
+		v, err := i.embedChunk(ctx, inputs, j)
+		if errors.Is(err, embedder.ErrInputTooLong) && inputs[j].Context != "" {
+			inputs[j].Context = ""
+			if v, err = i.embedChunk(ctx, inputs, j); err == nil {
+				bare++
+			}
+		}
+		if err != nil {
+			return nil, 0, err
+		}
+		vectors = append(vectors, v)
+	}
+	return vectors, bare, nil
+}
+
+// embedChunk embeds inputs[j] alone, after checking ctx. A failure names
+// the chunk and the size of what was sent.
+func (i *Indexer) embedChunk(ctx context.Context, inputs []EmbedInput, j int) ([]float32, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("indexer: stopped before chunk %d of %d: %w", j, len(inputs), err)
+	}
+	text := i.embedText(inputs[j])
+	v, err := i.embedder.Embed(ctx, []string{text})
+	if err != nil {
+		return nil, fmt.Errorf("indexer: embed chunk %d of %d (%d bytes): %w", j, len(inputs), len(text), err)
+	}
+	if len(v) != 1 {
+		return nil, fmt.Errorf("indexer: embedder returned %d vectors for chunk %d of %d", len(v), j, len(inputs))
+	}
+	return v[0], nil
+}
+
+// EmbedInput is one input to embed as a chunk: its text, and the context
+// it is embedded with, "" for none (a card).
+type EmbedInput struct {
+	Context string
+	Text    string
+}
+
+// embedText is what the embedder is sent for in: the document prefix
+// (models with a document instruction need it; nothing stored holds it, so
+// BM25 and snippets never see it), then the context and a blank line when
+// there is one, then the text. Every embed of the indexer's input is
+// built here alone.
+func (i *Indexer) embedText(in EmbedInput) string {
+	if in.Context == "" {
+		return i.docPrefix + in.Text
+	}
+	return i.docPrefix + in.Context + "\n\n" + in.Text
+}
+
+// EmbedChunks embeds inputs as indexing does, and is the path every index
+// embed request takes: each input as embedText builds it, in consecutive
+// batches of at most the batch size, in order. The drift check re-embeds
+// stored chunks, their stored context included, through it, so what it
+// compares was sent exactly as the stored vectors were.
+func (i *Indexer) EmbedChunks(ctx context.Context, inputs []EmbedInput) ([][]float32, error) {
+	texts := make([]string, len(inputs))
+	for j, in := range inputs {
+		texts[j] = i.embedText(in)
+	}
+	return i.embed(ctx, texts)
 }
 
 // EmbedStaleCards embeds the tenant's stale cards (store.DocumentIndex),
 // in one pass by document: a batch of at most the batch size at a time,
-// each embedded as chunks are (EmbedChunks, the document prefix applied)
-// and its vectors stored in one transaction (PutCardVectors), which keeps
-// a vector only for a card that still holds the text embedded. A card that
-// changes behind the pass is left to the cards job its write queued. ctx
-// is checked before every batch; the batches stored before a failure stay
-// stored. embedded counts the vectors stored. A long pass says how far it
-// got (cardsProgress), against the stale cards counted as it began.
+// each card embedded as a chunk with no context (EmbedChunks, the document
+// prefix applied) and the batch's vectors stored in one transaction
+// (PutCardVectors), which keeps a vector only for a card that still holds
+// the text embedded. A card that changes behind the pass is left to the
+// cards job its write queued. ctx is checked before every batch; the
+// batches stored before a failure stay stored. embedded counts the vectors
+// stored. A long pass says how far it got (cardsProgress), against the
+// stale cards counted as it began.
 //
 // One card the model can't take (embedder.ErrInputTooLong, which fails its
 // whole batch) mustn't hold back the cards behind it, in every later pass
@@ -183,11 +293,11 @@ func (i *Indexer) EmbedStaleCards(ctx context.Context, cards store.DocumentIndex
 // counts the vectors stored.
 func (i *Indexer) embedCards(ctx context.Context, cards store.DocumentIndex, batch []store.Card) (stored int,
 	err error) {
-	texts := make([]string, len(batch))
+	inputs := make([]EmbedInput, len(batch))
 	for j, c := range batch {
-		texts[j] = c.Text
+		inputs[j] = EmbedInput{Text: c.Text}
 	}
-	vectors, err := i.EmbedChunks(ctx, texts)
+	vectors, err := i.EmbedChunks(ctx, inputs)
 	switch {
 	case errors.Is(err, embedder.ErrInputTooLong):
 		return i.embedEach(ctx, cards, batch)
@@ -214,7 +324,7 @@ func (i *Indexer) embedEach(ctx context.Context, cards store.DocumentIndex, batc
 	put := make([]store.CardVector, 0, len(batch))
 	var refused []store.Card
 	for _, c := range batch {
-		vectors, err := i.EmbedChunks(ctx, []string{c.Text})
+		vectors, err := i.EmbedChunks(ctx, []EmbedInput{{Text: c.Text}})
 		switch {
 		case errors.Is(err, embedder.ErrInputTooLong):
 			i.log.Warn("cards: the embedding model can't take this card, which isn't searched by meaning until "+
@@ -272,22 +382,30 @@ func (p *cardsProgress) stored(embedded int) {
 func (i *Indexer) embed(ctx context.Context, texts []string) ([][]float32, error) {
 	vectors := make([][]float32, 0, len(texts))
 	for start := 0; start < len(texts); start += i.batchSize {
-		if err := ctx.Err(); err != nil {
-			return nil, fmt.Errorf("indexer: stopped before chunk %d of %d: %w", start, len(texts), err)
-		}
-		end := min(start+i.batchSize, len(texts))
-		batch, err := i.embedder.Embed(ctx, texts[start:end])
+		batch, err := i.embedBatch(ctx, texts, start, min(start+i.batchSize, len(texts)))
 		if err != nil {
-			return nil, fmt.Errorf("indexer: embed chunks %d-%d of %d (longest chunk %d bytes): %w",
-				start, end-1, len(texts), longest(texts[start:end]), err)
-		}
-		if len(batch) != end-start {
-			return nil, fmt.Errorf("indexer: embedder returned %d vectors for chunks %d-%d of %d",
-				len(batch), start, end-1, len(texts))
+			return nil, err
 		}
 		vectors = append(vectors, batch...)
 	}
 	return vectors, nil
+}
+
+// embedBatch embeds texts[start:end] in one request, after checking ctx.
+func (i *Indexer) embedBatch(ctx context.Context, texts []string, start, end int) ([][]float32, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("indexer: stopped before chunk %d of %d: %w", start, len(texts), err)
+	}
+	batch, err := i.embedder.Embed(ctx, texts[start:end])
+	if err != nil {
+		return nil, fmt.Errorf("indexer: embed chunks %d-%d of %d (longest chunk %d bytes): %w",
+			start, end-1, len(texts), longest(texts[start:end]), err)
+	}
+	if len(batch) != end-start {
+		return nil, fmt.Errorf("indexer: embedder returned %d vectors for chunks %d-%d of %d",
+			len(batch), start, end-1, len(texts))
+	}
+	return batch, nil
 }
 
 // longest is the length in bytes of the longest of texts.

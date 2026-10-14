@@ -9,9 +9,9 @@ package pointers), where the result deviates from the plan, and what was
 deferred. Design reasoning lives in `docs/decisions.md`.
 
 **Where things stand:** M0–M4 are shipped. M6 is under way ahead of M5: its
-first PR, the search evaluation and model roles, is merged, and its
-second, metadata search, is done. **Next: the rest of M6's 2.7 search
-work.**
+first PR, the search evaluation and model roles, is merged, and metadata
+search, real saved dates with search filters, and chunks embedded with
+their context are done. **Next: the rest of M6's 2.7 search work.**
 
 ## M0 — Walking skeleton
 
@@ -295,6 +295,34 @@ before it:
   never on the first page, is first for 97.7% of such queries and on the
   first page for all (decisions.md "Metadata search: a fields index and a
   card per document").
+- PR 2b, done: chunks embedded with their context. Each chunk is embedded
+  as `<title> — <site> — <heading path>`, a blank line and its text, by one
+  rule under `indexer.ContextVersion` (a golden per version); the chunker
+  gives each chunk the headings open where the words it adds begin,
+  reading fences, ATX and setext headings beside its boundaries, which
+  stay byte for byte what they were (5,249 of 5,249 of the owner's
+  documents cut identically). The context and its version are stored
+  with the chunk (migration 021) and re-sent by the drift check. A home's
+  first start re-embeds its library, one index job per document fed to
+  the index workers one at a time, so a page saved meanwhile is indexed
+  beside it and a search waits behind at most one batch of 8; it never
+  fails a document, resumes across restarts, leaves the Library's order
+  alone, and reports its progress in chunks, with the time left, in
+  `curio status`, doctor, the Status page and the log. An Ollama that
+  stops answering holds the index and cards jobs until it answers, failing
+  none, and healthz, status and doctor say so; one that answers every
+  document with an error stops the re-embed for a while, three documents
+  in, rather than queueing or giving up the library; an index write a
+  refetch overtook writes nothing; a chunk too long
+  for a small model with its context is embedded without it. A re-index
+  rewrites chunks and vectors in place, so `chunks_vec` no longer grows
+  with every re-index. `searcheval -reindex` re-embeds a copy through the
+  daemon's index path. On the owner's copy, all
+  queries' nDCG@10 went from 0.655 to 0.671 and the owner-tagged ones'
+  from 0.342 to 0.347, every kind within 0.02 of PR 2a or better, search
+  as fast; the re-embed runs at about 9 chunks a second there, an hour and
+  a half to two hours, with searches at half a second at the median
+  meanwhile (decisions.md "Chunks embedded with their context").
 - PR 2c, done: real saved dates and filters. Every bookmark's `saved_at`
   is classified exact, approx or unknown from its source's bookmarks
   (migration 020; at each start and after each import), so a browser's

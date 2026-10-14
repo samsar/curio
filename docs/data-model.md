@@ -201,7 +201,27 @@ chunks
   token_count       INTEGER
   title             TEXT NOT NULL              -- the document title, as indexed for this chunk
   tags              TEXT NOT NULL              -- bookmark tags as indexed (a JSON array), '' for none
+  context           TEXT NOT NULL DEFAULT ''   -- what the vector was embedded from besides text (021)
+  context_version   INTEGER NOT NULL DEFAULT 0 -- the indexer.ContextVersion that built context (021)
 ```
+
+`context` is the chunk's context exactly as the indexer sent it before
+the text, `<title> — <site> — <heading path>` (`indexer.Context`), without
+the configured document prefix and the blank line between: the vector was
+made from the document prefix, the context, a blank line and the text, or
+from the prefix and the text alone when the context is empty. The drift
+check re-sends it, so it re-embeds what the vector was made from.
+`context_version` is the `indexer.ContextVersion` whose rules built it;
+the defaults, `''` and `0`, mean a chunk embedded before chunk context
+(migration 021 rewrites no row). A fetched document holding a chunk of an
+older version is stale: the daemon re-embeds it, fed to the index pool a
+job at a time, and `/v1/stats` counts such documents and their stale
+chunks (`reembed`). A re-embed records its new vectors' `indexed_at` and
+`word_count` on the document, never its `updated_at`, the lists' order.
+`idx_chunks_context_version (context_version, document_id)` serves both
+reads: the chunks of an older version are one range of it, which once the
+library is re-embedded holds only those of documents no re-embed reaches
+(failed, dead or pending, until a fetch indexes them again).
 
 Two virtual tables sit alongside:
 
@@ -215,11 +235,26 @@ Two virtual tables sit alongside:
 Triggers on `chunks` mirror every insert, update and delete into
 `chunks_fts`, and the delete trigger removes the chunk's vector too, so a
 chunk deleted any way, a foreign-key cascade from its document or
-extraction included, takes its derived rows with it. `title` and `tags`
+extraction included, takes its derived rows with it. Since migration 021
+the update trigger fires only when `seq`, `text`, `title` or `tags`
+changes value, so an update that leaves them as they were, recording a
+chunk's context or rewriting it in place with the same text, writes
+nothing to `chunks_fts`. `title` and `tags`
 are stored on the chunk because an external-content delete must supply
 the values that were indexed. `seq` is an explicit INTEGER PRIMARY KEY
 because SQLite keeps those across VACUUM, where an implicit rowid could be
 renumbered and detach the index from its rows.
+
+A re-index rewrites a document's chunks by position
+(`ChunkStore.ReplaceForDocument`): the chunk at each position the document
+keeps keeps its `id` and `seq`, and its row and vector are updated in
+place; positions past the old count are inserted, and chunks past the new
+count deleted. Never deleted and inserted again: sqlite-vec (v0.1.6)
+inserts only into its newest vec0 chunk (a block of 1,024 slots) and never
+reuses a slot freed in an older one, so every delete-and-insert re-index
+grew `chunks_vec`, and slowed every vector search, by a slot per chunk. A
+document that shrinks, or is deleted, still strands its slots; compacting
+`chunks_vec` is future work.
 
 A document that fails or goes dead keeps the chunks of its last successful
 fetch; the chunk searches and find-related leave failed and dead documents

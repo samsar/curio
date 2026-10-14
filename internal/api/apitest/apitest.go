@@ -27,6 +27,7 @@ import (
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/drift"
+	"github.com/samsar/curio/internal/indexer"
 	"github.com/samsar/curio/internal/insight"
 	"github.com/samsar/curio/internal/jobs"
 	"github.com/samsar/curio/internal/search"
@@ -279,8 +280,9 @@ func (s *Server) addDocument(t testing.TB, doc *store.Document) *store.Document 
 }
 
 // AddContent gives doc what a fetch and an index would: markdown on disk, a
-// current extraction pointing at it, and one chunk embedded by s.Embedder.
-// It leaves the document's state alone.
+// current extraction pointing at it, and one chunk embedded by s.Embedder,
+// under the current chunk context (indexer.ContextVersion), so it isn't
+// one to re-embed. It leaves the document's state alone.
 func (s *Server) AddContent(t testing.TB, doc *store.Document, markdown string) *store.DocumentExtraction {
 	t.Helper()
 	ctx := context.Background()
@@ -305,7 +307,8 @@ func (s *Server) AddContent(t testing.TB, doc *store.Document, markdown string) 
 	if doc.Title != nil {
 		title = *doc.Title
 	}
-	chunk := store.ChunkInput{Text: markdown, TokenCount: len(strings.Fields(markdown)), Embedding: s.Embedder.Vector(markdown)}
+	chunk := store.ChunkInput{Text: markdown, TokenCount: len(strings.Fields(markdown)),
+		ContextVersion: indexer.ContextVersion, Embedding: s.Embedder.Vector(markdown)}
 	if err := s.Deps.Chunks.ReplaceForDocument(ctx, doc.ID, ext.ID, title, nil, []store.ChunkInput{chunk}); err != nil {
 		t.Fatalf("index document: %v", err)
 	}

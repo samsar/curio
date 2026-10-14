@@ -159,6 +159,7 @@ func funcs(assets assetSet) template.FuncMap {
 		"triggerLabel":       triggerLabel,
 		"freshReason":        freshReason,
 		"queueReason":        queueReason,
+		"jobHold":            jobHold,
 		"gentleHint":         gentleHint,
 		"jobKindLabel":       jobKindLabel,
 		"viaLabel":           viaLabel,

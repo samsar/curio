@@ -80,6 +80,10 @@ func (h pageHandlers) statusLive(r *http.Request, vm *ui.Status) {
 // not it has documents, and the statuses that have jobs.
 func countsPanel(s Stats) ui.CountsPanel {
 	p := ui.CountsPanel{Documents: s.DocumentsTotal, Bookmarks: s.BookmarksTotal}
+	if r := s.Reembed; r != nil {
+		p.Reembed = &ui.ReembedLeft{Documents: r.Documents, Chunks: r.Chunks, ChunksPerSecond: r.ChunksPerSecond,
+			ETA: time.Duration(r.ETASeconds) * time.Second}
+	}
 	for _, state := range []store.DocState{store.DocStatePending, store.DocStateFetched, store.DocStateFailed,
 		store.DocStateDead} {
 		p.ByState = append(p.ByState, ui.Count{Name: string(state), Count: s.DocumentsByState[string(state)]})
