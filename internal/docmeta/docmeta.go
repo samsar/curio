@@ -63,7 +63,8 @@ type Own struct {
 	// nothing (DeclaredSite).
 	DeclaredSite string
 	// TitleSuffixes are the distinct site names its title and its
-	// bookmarks' titles end with (TitleSuffix), the title's first.
+	// bookmarks' titles end with (TitleSuffix), the title's first, each
+	// valid UTF-8.
 	TitleSuffixes string
 	// Title is its title, whitespace collapsed.
 	Title string

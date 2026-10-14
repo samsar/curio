@@ -4,6 +4,7 @@ import (
 	"net/url"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/samsar/curio/internal/textutil"
 	"github.com/samsar/curio/internal/urlutil"
@@ -114,9 +115,11 @@ func DeclaredSite(raw, host string) string {
 // rightmost separator (titleSeparators) with text before it, when that is
 // 2 to 60 bytes with a letter in it, and is neither a platform's name nor
 // the host itself; otherwise "". The title's whitespace is collapsed
-// first.
+// first, and each run of bytes that isn't UTF-8 replaced by one U+FFFD:
+// a suffix is always valid UTF-8, as the JSON array the store keeps it in
+// must be, so the store's votes count the name AgreedName counts.
 func TitleSuffix(title, host string) string {
-	t := collapse(title)
+	t := strings.ToValidUTF8(collapse(title), string(utf8.RuneError))
 	cut, sepLen := -1, 0
 	for _, sep := range titleSeparators {
 		// t has no space at either end, so a separator found is never at

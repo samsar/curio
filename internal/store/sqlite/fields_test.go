@@ -303,6 +303,37 @@ func TestRefreshFields_Agreement(t *testing.T) {
 	}
 }
 
+// TestRefreshFields_SuffixNotUTF8: a title suffix holding bytes that
+// aren't UTF-8 is voted for under the name docmeta derives from the
+// titles as saved, so the host agrees on the name docmeta.AgreedName
+// gives, where encoding the raw suffix in the JSON array would have voted
+// for another (a U+FFFD a byte).
+func TestRefreshFields_SuffixNotUTF8(t *testing.T) {
+	e := newFieldsEnv(t)
+	const host = "cafe.example"
+	titles := []string{"One | Caf\xe9 \xff\xfeTimes", "Two | Caf\xe9 \xff\xfeTimes"}
+	ids := make([]string, 0, len(titles))
+	docs := make([]docmeta.HostDocument, 0, len(titles))
+	for i, title := range titles {
+		url := fmt.Sprintf("https://%s/%d", host, i)
+		ids = append(ids, *e.ingest(url, store.SourceChrome, title, "").DocumentID)
+		own := docmeta.Derive(docmeta.Document{URL: url, Bookmarks: []docmeta.Bookmark{{Title: title}}})
+		docs = append(docs, docmeta.HostDocument{DeclaredSite: own.DeclaredSite, TitleSuffixes: own.TitleSuffixes})
+	}
+	agreed := docmeta.AgreedName(host, docs)
+	for _, id := range ids {
+		assert.Equal(t, agreed, e.fields(id).SiteName)
+	}
+	var name string
+	var votes int
+	require.NoError(t, e.db.QueryRow(`SELECT name, votes FROM site_name_votes WHERE host = ? AND kind = ?`,
+		host, voteSuffix).Scan(&name, &votes))
+	assert.Equal(t, agreed, name)
+	assert.Equal(t, 2, votes)
+	assert.Equal(t, "Caf\uFFFD \uFFFDTimes", agreed, "one U+FFFD a run of bytes that aren't UTF-8")
+	e.assertVotes()
+}
+
 // TestRefreshFields_DocumentLeavesItsHost: a document whose fields were
 // derived under another host, as a change of the rules can leave it, no
 // longer counts in that host's agreement once refreshed, and the host's

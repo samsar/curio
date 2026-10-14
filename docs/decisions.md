@@ -13091,7 +13091,13 @@ keep the name they hold until the host's next write, which renames them:
 the misnamed read runs on every refresh. The suffixes are a JSON array
 (CHECKed to be one) because a trigger can split one with `json_each` and
 can't split a list a line, a trigger holding no CTE; `docmeta` keeps its
-list a line, and the store encodes the array.
+list a line, and the store encodes the array. JSON text is UTF-8 alone,
+and `json.Marshal` replaces each stray byte, one that isn't part of UTF-8,
+with a U+FFFD, which would have voted for a name `docmeta` never derived;
+so `docmeta.TitleSuffix` makes a suffix valid UTF-8 itself, one U+FFFD a
+run of such bytes before its limits apply, and the votes count the name
+`AgreedName` counts. No suffix on the owner's copy holds such a byte, and
+its derived rows and votes are byte for byte the same.
 
 Measured on one machine, back to back with the branch before the votes
 (probes over a library of one host, the p50 of 200 calls, the median of

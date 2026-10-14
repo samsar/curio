@@ -388,7 +388,10 @@ func (f *fieldsTx) write(ctx context.Context, id string, fields docmeta.Fields) 
 
 // suffixesJSON is list, title suffixes one a line as docmeta.Own holds
 // them, as the JSON array document_fields keeps, which the vote triggers
-// split.
+// split. json.Marshal would make each byte that isn't UTF-8 a U+FFFD, so
+// the triggers would count a name docmeta never derived; docmeta's
+// suffixes are valid UTF-8 (docmeta.TitleSuffix), so each is voted for as
+// derived.
 func suffixesJSON(list string) (string, error) {
 	suffixes := []string{}
 	if list != "" {

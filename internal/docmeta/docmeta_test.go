@@ -151,9 +151,18 @@ func TestTitleSuffix(t *testing.T) {
 		{"", "example.com", ""},
 		{"記事 | 日本の新聞", "example.jp", "日本の新聞"},
 		{"Article - Ab", "example.com", "Ab"},
+		// Bytes that aren't UTF-8 are one U+FFFD a run, before the limits
+		// apply.
+		{"Article | Caf\xe9 \xff\xfeTimes", "example.com", "Caf\uFFFD \uFFFDTimes"},
+		{"Art\xffcle | Times", "example.com", "Times"},
+		{"Article - " + strings.Repeat("x", 57) + "\xff", "example.com", strings.Repeat("x", 57) + "\uFFFD"},
+		{"Article - " + strings.Repeat("x", 58) + "\xff", "example.com", ""},
+		{"Article - \xff\xfe", "example.com", ""},
 	}
 	for _, tc := range cases {
-		assert.Equal(t, tc.want, TitleSuffix(tc.title, tc.host), "%q", tc.title)
+		got := TitleSuffix(tc.title, tc.host)
+		assert.Equal(t, tc.want, got, "%q", tc.title)
+		assert.True(t, utf8.ValidString(got), "%q", tc.title)
 	}
 }
 
