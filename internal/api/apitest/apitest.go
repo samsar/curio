@@ -34,6 +34,7 @@ import (
 	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/store/sqlite"
 	"github.com/samsar/curio/internal/store/sqlite/sqlitetest"
+	"github.com/samsar/curio/internal/understand"
 )
 
 // TenantID is the tenant the server serves, as a local daemon does.
@@ -161,14 +162,15 @@ func start(t testing.TB, pages api.UIOptions, opts ...func(*api.Deps)) *Server {
 	}
 	scheduler := &Scheduler{snap: insight.Snapshot{State: insight.StateNone, RebuildAt: insight.FirstRebuildAt}}
 	deps := api.Deps{
-		Home:           home,
-		Documents:      docs,
-		Extractions:    sqlite.NewExtractions(db),
-		Bookmarks:      sqlite.NewBookmarks(db),
-		Chunks:         chunks,
-		Index:          index,
-		Queue:          sqlite.NewJobs(db),
-		Search:         search.New(chunks, docs, index, emb, search.Config{Log: quiet}),
+		Home:        home,
+		Documents:   docs,
+		Extractions: sqlite.NewExtractions(db),
+		Bookmarks:   sqlite.NewBookmarks(db),
+		Chunks:      chunks,
+		Index:       index,
+		Queue:       sqlite.NewJobs(db),
+		Search: search.New(chunks, docs, index, emb, search.Config{RewriteWeight: 0.5, NameWeight: 1,
+			Log: quiet}),
 		Insights:       sqlite.NewInsights(db),
 		InsightEnabled: true,
 		Interests:      scheduler,
@@ -227,7 +229,72 @@ func closeClientConns() {
 // the chunk lists, so a document can be found by what it was saved as.
 func DocumentLists(d *api.Deps) {
 	d.Search = search.New(d.Chunks, d.Documents, d.Index, Embedder{Dim: config.Default().Embedding.Dim},
-		search.Config{BM25Weight: 1, VectorWeight: 1, FieldsWeight: 1, CardsWeight: 1, TitleWeight: 1, Log: d.Log})
+		search.Config{BM25Weight: 1, VectorWeight: 1, FieldsWeight: 1, CardsWeight: 1, TitleWeight: 1,
+			RewriteWeight: 0.5, NameWeight: 1, Log: d.Log})
+}
+
+// Planner is a planner whose outcome and state a test sets, and which
+// records the questions it is asked. Its timeout is config.yaml's
+// default, and its state, until set, a planner that is on and hasn't
+// checked its model. Safe for concurrent use.
+type Planner struct {
+	mu        sync.Mutex
+	outcome   understand.Outcome
+	err       error
+	state     *understand.State
+	questions []string
+}
+
+// NewPlanner is a planner that answers every question with outcome.
+func NewPlanner(outcome understand.Outcome) *Planner { return &Planner{outcome: outcome} }
+
+// Timeout implements api.Planner.
+func (*Planner) Timeout() time.Duration {
+	return time.Duration(config.Default().Search.UnderstandTimeoutSeconds) * time.Second
+}
+
+// Plan implements api.Planner.
+func (p *Planner) Plan(_ context.Context, question string) (understand.Outcome, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.questions = append(p.questions, question)
+	return p.outcome, p.err
+}
+
+// State implements api.Planner.
+func (p *Planner) State() understand.State {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.state != nil {
+		return *p.state
+	}
+	return understand.State{On: true, Model: p.outcome.Model, Check: understand.CheckUnchecked}
+}
+
+// SetState makes s the planner's state from now on.
+func (p *Planner) SetState(s understand.State) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.state = &s
+}
+
+// Set makes outcome the answer from now on, and err the error with it.
+func (p *Planner) Set(outcome understand.Outcome, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.outcome, p.err = outcome, err
+}
+
+// Questions are the questions the planner was asked, in order.
+func (p *Planner) Questions() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.questions)
+}
+
+// WithPlanner is an option for Start that understands questions with p.
+func WithPlanner(p *Planner) func(*api.Deps) {
+	return func(d *api.Deps) { d.Planner = p }
 }
 
 // AddBookmark saves url from source as title in folder through ingest,

@@ -52,6 +52,12 @@ func evaluate(ctx context.Context, opts options, stdout io.Writer, log *slog.Log
 			return err
 		}
 	}
+	var replayed *replay
+	if opts.plans != "" {
+		if replayed, err = loadReplay(opts.plans, qf); err != nil {
+			return err
+		}
+	}
 	lib, err := devtool.OpenCopy(ctx, opts.db)
 	if err != nil {
 		return err
@@ -98,6 +104,11 @@ func evaluate(ctx context.Context, opts options, stdout io.Writer, log *slog.Log
 		"unsearchable_by_chunks", rep.Library.Unsearchable)
 
 	e := env{docs: lib.Documents, chunks: lib.Chunks, index: lib.Index, embedder: emb, cfg: cfg, log: log}
+	if anyPlanned(opts.variants) {
+		if e.plans, err = plans(ctx, opts, cfg, qf, replayed, rep, log); err != nil {
+			return err
+		}
+	}
 	for _, v := range opts.variants {
 		vr, err := runVariant(ctx, v, e, qf.set, filters, judged)
 		if err != nil {
@@ -119,6 +130,24 @@ func evaluate(ctx context.Context, opts options, stdout io.Writer, log *slog.Log
 	}
 	log.Info("wrote the JSON report", "path", opts.json)
 	return nil
+}
+
+// plans are the queries' plans the planned variants search by: replayed
+// from -plans, asking no model, or planned now by config.yaml's planner,
+// as of -today. It records where they came from in rep.
+func plans(ctx context.Context, opts options, cfg config.Config, qf queryFile, replayed *replay, rep *report,
+	log *slog.Logger) ([]queryPlan, error) {
+	if replayed != nil {
+		rep.Provenance.PlansFrom, rep.Provenance.PlansPromptVersion = replayed.path, replayed.promptVersion
+		log.Info("replaying plans", "from", replayed.path, "queries", len(replayed.plans))
+		return replayed.plans, nil
+	}
+	plans, planner, err := planQueries(ctx, plannerSetup{cfg: cfg, today: opts.today, log: log}, qf.set)
+	if err != nil {
+		return nil, err
+	}
+	rep.Planner = planner
+	return plans, nil
 }
 
 // loadConfig is the config.yaml at path, strictly loaded, or the defaults
@@ -367,17 +396,22 @@ func runVariant(ctx context.Context, v variant, e env, qs *eval.QuerySet, filter
 	took := map[string][]time.Duration{}
 	for i, q := range qs.Queries {
 		start := time.Now()
-		r, err := rk.rank(ctx, q.Query, filters[i])
+		r, err := rk.rank(ctx, i, q.Query, filters[i])
 		if errors.Is(err, errDegraded) {
 			// Named by id, as the report names queries: never the text.
 			e.log.Warn("a search came back keyword-only; ranking the query again", "variant", v.name,
 				"query_id", queryLabel(q.ID, i), "err", err)
 			start = time.Now()
-			r, err = rk.rank(ctx, q.Query, filters[i])
+			r, err = rk.rank(ctx, i, q.Query, filters[i])
 		}
 		total := time.Since(start)
 		if err != nil {
 			return variantReport{}, fmt.Errorf("variant %s, query %s: %w", v.name, queryLabel(q.ID, i), err)
+		}
+		if r.plan != nil {
+			// The plan was made before the ranking: a planned query's total
+			// is Enter to results, without the API's hydration.
+			total += r.plan.took
 		}
 		r.stages = append(r.stages, stage{totalStage, total})
 		for _, s := range r.stages {
@@ -391,6 +425,9 @@ func runVariant(ctx context.Context, v variant, e env, qs *eval.QuerySet, filter
 	}
 	vr.WallMS = ms(time.Since(began))
 	vr.LatencyMS = latencies(took)
+	if v.planned() {
+		vr.PlanStatuses, vr.FilterAgreement = planStatuses(vr.Queries), agreementTotals(vr.Queries)
+	}
 	for _, g := range eval.Groups(qs) {
 		vr.Groups = append(vr.Groups, newGroupReport(g, scores, vr.Queries))
 	}

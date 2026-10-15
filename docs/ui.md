@@ -103,6 +103,33 @@ footer names the address the daemon listens on.
   address. When semantic
   search is unavailable (Ollama down), the keyword results come under a
   warning. The old address, `/ui/search?q=…`, leads here with its query.
+  Typing searches your words alone, and never asks a model. **Enter**, or
+  the Search button, understands the question first ("Understanding your
+  question…" shows meanwhile; pressing it the moment you stop typing is
+  fine, and typing on cancels it): the planner model reads the dates,
+  types and browser it states, other wordings, and the things it points
+  at by description (`search.understand`, see
+  [setup](setup.md)). A line over the results then says what it was
+  understood as: each filter a chip ("Saved in April 2019",
+  "Videos", "From Safari") whose × searches without it, how many undated
+  pages a date left out with a link to include them (or kept, with one to
+  leave them out), "Also searched: …" for the other wordings, "Looked for:
+  …" for the names, and **Search your words instead**. When the question
+  couldn't be understood, a quiet line says why and what helps (the model
+  is loading or being checked: press Enter again in a few seconds; it
+  didn't pass curio's check: set `generation.roles.planner.model` to one
+  that passes, or `search.understand: false`; it took too long, or it
+  isn't available: `curio doctor` says more; the question is too long)
+  and the results are those of your words. The address then holds the
+  plan itself (`&plan=…`), as do the pages, the type links and the chips:
+  paging, removing a filter, reloading, back and forward search by that
+  plan and never ask the model again. Without JavaScript, the address
+  keeps `understand=1`, and a reload asks again. A link to such an address
+  from another site searches the words without asking the model, so no
+  page elsewhere can load a model of gigabytes on your Mac; one you type,
+  open from a bookmark or from another app (mail, chat, a terminal) is
+  understood, and so is any in a Safari before 16.4, which doesn't say
+  where a request came from.
 - **Library**: every document, most recently updated first. Tabs choose
   the state (All, Fetched, Pending, Failed, Dead), each with its count
   when the state is the only filter; with a type, host, folder or cause

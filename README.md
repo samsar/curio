@@ -8,7 +8,7 @@ Everything runs on your Mac: your library, the search, and the AI models.
 
 ## What you can do with it
 
-- **Find that article again.** `curio search "rolling out feature flags"` searches the full text of every saved page, by meaning, not just keywords; `--saved-after 2024-01-01`, `--site example.com` or `--folder "/Bookmarks Bar/Work"` narrow it to when, where or how you saved it.
+- **Find that article again.** `curio search "rolling out feature flags"` searches the full text of every saved page, by meaning, not just keywords; `--saved-after 2024-01-01`, `--site example.com` or `--folder "/Bookmarks Bar/Work"` narrow it to when, where or how you saved it. Ask it a question, *"the talks on raft I saved last summer"*, and a local model first reads what the question says (the dates, the kind of page, what it points at) and searches with that; it shows what it understood, and `--literal` searches your words alone.
 - **Ask your agent about your reading.** Connect Curio to your favorite agent then ask things like *"what have I saved about pricing experiments?"*
 - **See what you're into.** `curio interests` groups your library into topics and names them.
 - **Find related reads.** `curio related <id>` shows other pages about the same thing.

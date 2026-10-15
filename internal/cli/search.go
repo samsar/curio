@@ -1,50 +1,63 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/samsar/curio/internal/client"
 	"github.com/samsar/curio/internal/daemonctl"
 	"github.com/samsar/curio/internal/docmeta"
+	"github.com/samsar/curio/internal/planlabel"
 	"github.com/samsar/curio/internal/textutil"
 )
 
 func newSearchCmd(env *daemonctl.Env) *cobra.Command {
 	var (
 		k       int
+		literal bool
 		filters client.SearchFilters
 	)
 	cmd := &cobra.Command{
 		Use:   "search <query>",
 		Short: "Hybrid BM25 + vector search across indexed bookmarks",
 		Long: "Search the library by its text and by what each page was saved as.\n\n" +
+			"The daemon first understands the question with its planner model (search.understand,\n" +
+			"generation.roles.planner): the dates, types and browser it states, other wordings, and\n" +
+			"the things it points at by description, all searched with its words. The first lines\n" +
+			"say what it understood, or why it searched your words alone (the model loading, say).\n" +
+			"--literal searches the words alone.\n\n" +
 			"Filters narrow the documents searched; every filter given applies, and the values of a\n" +
 			"repeated one are alternatives. Dates are a day (2024-03-01, midnight UTC) or an RFC 3339\n" +
 			"date-time with its zone (2024-03-01T00:00:00+01:00 for a local day); a window is\n" +
 			"[after, before). A saved date counts only when it is known: a browser's bulk import\n" +
 			"stamp, or a bookmark whose source kept no date, is undated, and so is a published date\n" +
 			"more than a day after the page was first saved. Undated documents are left out of a\n" +
-			"date-filtered search unless --include-undated, and the search says how many there are.",
+			"date-filtered search unless --include-undated, and the search says how many there are.\n" +
+			"A filter given wins over the one the question was understood to state.",
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
 				return err
 			}
-			req := client.SearchRequest{Query: strings.Join(args, " "), K: k}
+			req := client.SearchRequest{Query: strings.Join(args, " "), K: k, Understand: !literal}
 			if !filters.IsEmpty() {
 				req.Filters = &filters
 			}
-			res, err := env.Client.Search(cmd.Context(), req)
+			res, err := sendSearch(cmd.Context(), env.Client, req, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
 			for _, w := range res.Warnings {
 				fmt.Fprintln(cmd.ErrOrStderr(), "warning:", w)
 			}
+			renderUnderstanding(cmd.OutOrStdout(), res.Understanding, time.Local)
 			renderSearchResults(cmd.OutOrStdout(), res)
 			renderUndated(cmd.OutOrStdout(), res.Undated, filters.IncludeUndated)
 			return nil
@@ -52,6 +65,7 @@ func newSearchCmd(env *daemonctl.Env) *cobra.Command {
 	}
 	f := cmd.Flags()
 	f.IntVarP(&k, "k", "k", 0, "Number of results to return, 1-100 (default: the daemon's search.default_k)")
+	f.BoolVar(&literal, "literal", false, "Search the words alone, without understanding the question")
 	f.StringSliceVar(&filters.ContentType, "type", nil,
 		"Filter by content type (article|repo|video|pdf|thread|unknown); repeatable")
 	f.StringSliceVar(&filters.Source, "source", nil,
@@ -69,6 +83,93 @@ func newSearchCmd(env *daemonctl.Env) *cobra.Command {
 	f.BoolVar(&filters.IncludeUndated, "include-undated", false,
 		"Keep the documents a date filter can't judge, which it leaves out by default")
 	return cmd
+}
+
+// sendSearch sends req, and when the daemon predates understanding, searches
+// the words without it, saying so on stderr: right after an upgrade the
+// daemon running is the old one until it restarts, and every search would
+// otherwise fail.
+func sendSearch(ctx context.Context, s searcher, req client.SearchRequest, stderr io.Writer) (
+	*client.SearchResponse, error) {
+	res, err := s.Search(ctx, req)
+	if req.Understand && predatesUnderstanding(err) {
+		fmt.Fprintln(stderr, "note: this curio-daemon predates understanding questions; searched your words "+
+			"(restart it: curio daemon stop)")
+		req.Understand = false
+		return s.Search(ctx, req)
+	}
+	return res, err
+}
+
+// predatesUnderstanding reports whether err is a daemon refusing the
+// understand field it doesn't know. Its strict decoder says so only in
+// text, which internal/api's decodeJSON words as `unknown field
+// "understand": ...`: the one error curio search tells apart by its words.
+func predatesUnderstanding(err error) bool {
+	apiErr, ok := errors.AsType[*client.APIError](err)
+	return ok && apiErr.Status == http.StatusBadRequest &&
+		strings.HasPrefix(apiErr.Problem.Detail, `unknown field "understand"`)
+}
+
+// renderUnderstanding says, before the results, how the question was
+// understood: the plan's kind and filters in a line (its windows as days
+// in loc, the end inclusive), and what else it searched in a second when
+// there is any; or, when the words were searched alone, why. Nothing for a
+// search that didn't ask, or that found understanding off.
+func renderUnderstanding(w io.Writer, u *client.Understanding, loc *time.Location) {
+	switch {
+	case u == nil || u.Status == "off":
+		return
+	case u.Plan == nil:
+		fmt.Fprintf(w, "searched your words: %s\n\n", u.Reason)
+		return
+	}
+	head := "understood"
+	if u.Model != "" {
+		head = fmt.Sprintf("understood (%s, %.1f s)", u.Model, float64(u.TookMS)/1000)
+	}
+	parts := []string{u.Plan.Kind}
+	for _, f := range planFilters(u.Plan.Filters) {
+		parts = append(parts, planlabel.Filter(f.field, f.values, f.after, f.before, loc))
+	}
+	fmt.Fprintf(w, "%s: %s\n", head, strings.Join(parts, " · "))
+	var also []string
+	if len(u.Plan.Rewrites) > 0 {
+		also = append(also, "also searched: "+strings.Join(u.Plan.Rewrites, "; "))
+	}
+	if len(u.Plan.Names) > 0 {
+		also = append(also, "looked for: "+strings.Join(u.Plan.Names, ", "))
+	}
+	if len(also) > 0 {
+		fmt.Fprintln(w, strings.Join(also, " · "))
+	}
+	fmt.Fprintln(w)
+}
+
+// planFilter is one dimension a plan's filters set.
+type planFilter struct {
+	field         string
+	values        []string
+	after, before string
+}
+
+// planFilters are the dimensions f sets, in the order the dashboard's
+// chips show them.
+func planFilters(f client.SearchFilters) []planFilter {
+	var out []planFilter
+	for _, l := range []planFilter{{field: "content_type", values: f.ContentType}, {field: "source", values: f.Source},
+		{field: "site", values: f.Site}, {field: "host", values: f.Host}, {field: "folder", values: f.Folder}} {
+		if len(l.values) > 0 {
+			out = append(out, l)
+		}
+	}
+	if f.SavedAfter != "" || f.SavedBefore != "" {
+		out = append(out, planFilter{field: "saved", after: f.SavedAfter, before: f.SavedBefore})
+	}
+	if f.PublishedAfter != "" || f.PublishedBefore != "" {
+		out = append(out, planFilter{field: "published", after: f.PublishedAfter, before: f.PublishedBefore})
+	}
+	return out
 }
 
 // renderUndated says, for a date-filtered search, how many documents the

@@ -87,7 +87,7 @@ docs/setup.md.`,
 	f.StringVar(&opts.EmbeddingModel, "embedding-model", "",
 		"embed a new home with this Ollama model, tag included (an existing home keeps its own)")
 	f.StringVar(&opts.GenerationModel, "generation-model", "",
-		"write interest labels with this Ollama model, when config.yaml doesn't name one")
+		"write interest labels and understand searches with this Ollama model, when config.yaml doesn't name one")
 	f.StringVar(&opts.Import, "import", "",
 		"import from this source without a menu: chrome, chrome:<profile>, safari, firefox or html:<file>")
 	return cmd

@@ -84,17 +84,19 @@ func TestParseLabel_RejectsRepliesWithoutAName(t *testing.T) {
 }
 
 // fakeGenerator returns a canned reply (or error), counts calls and keeps
-// the last prompt.
+// the last prompt and options.
 type fakeGenerator struct {
 	reply  string
 	err    error
 	calls  int
 	prompt string
+	opts   generator.Options
 }
 
-func (f *fakeGenerator) Generate(_ context.Context, prompt string, _ generator.Options) (string, error) {
+func (f *fakeGenerator) Generate(_ context.Context, prompt string, opts generator.Options) (string, error) {
 	f.calls++
 	f.prompt = prompt
+	f.opts = opts
 	return f.reply, f.err
 }
 func (*fakeGenerator) Model() string              { return "fake" }
@@ -135,13 +137,18 @@ func TestCleanLabel_CapsInRunes(t *testing.T) {
 	assert.Equal(t, maxLabelRunes, utf8.RuneCountInString(got))
 }
 
-// prompt is the prompt LLMLabeler sends for info.
+// prompt is the prompt LLMLabeler sends for info. Every label is written
+// at temperature 0.2, set explicitly: the provider's default would sample
+// more freely, and labels want a low one.
 func prompt(t *testing.T, info ClusterInfo) string {
 	t.Helper()
 	gen := &fakeGenerator{reply: "NAME: Topic\nSUMMARY: About it."}
 	lab, err := NewLLMLabeler(gen).Label(context.Background(), info)
 	require.NoError(t, err)
 	assert.Equal(t, Label{Name: "Topic", Summary: "About it."}, lab)
+	require.NotNil(t, gen.opts.Temperature)
+	assert.Equal(t, 0.2, *gen.opts.Temperature)
+	assert.Equal(t, 120, gen.opts.MaxTokens)
 	return gen.prompt
 }
 

@@ -34,13 +34,14 @@ type Tier struct {
 // 0.30.5, which fixed its crash.
 var generationTiers = []Tier{
 	{0, Model{Name: "qwen3:4b-instruct", Size: 2.5e9,
-		Reason: "names your interests; fits next to the embedder in 8 GB"}},
+		Reason: "names your interests and understands your searches; fits next to the embedder in 8 GB"}},
 	{16 * GiB, Model{Name: "gemma4:12b", Size: 7.6e9, MinOllama: "0.30.5",
-		Reason: "names your interests; a stronger writer that fits 16 GB"}},
+		Reason: "names your interests and understands your searches; a stronger writer that fits 16 GB"}},
 	{32 * GiB, Model{Name: "gemma4:26b-a4b-it-qat", Size: 16e9, MinOllama: "0.30.6",
-		Reason: "names your interests; the 26B mixture of experts, quantization-aware, for 32 GB"}},
+		Reason: "names your interests and understands your searches; the 26B mixture of experts, " +
+			"quantization-aware, for 32 GB"}},
 	{64 * GiB, Model{Name: "gemma4:26b", Size: 19e9, MinOllama: "0.30.5",
-		Reason: "names your interests; the full 26B model, for 64 GB or more"}},
+		Reason: "names your interests and understands your searches; the full 26B model, for 64 GB or more"}},
 }
 
 // Advice is the models curio picks for a machine.

@@ -275,6 +275,11 @@ func sampleVariants(t testing.TB) map[string][]any {
 			Search{Layout: layout(NavSearch), Query: evilAttr, Page: 5, Results: &SearchResults{Total: 37}},
 			Search{Layout: layout(NavSearch), Query: evilURL, Page: 1, Results: &SearchResults{Total: 4, Hits: sampleHits()}},
 			Search{Layout: layout(NavSearch), Query: evilScript, Page: 1, Results: &SearchResults{}},
+			Search{Layout: layout(NavSearch), Query: evilScript, Type: evilAttr, Page: 3, Plan: evilQuotes,
+				Results:    &SearchResults{TookMS: 2400, Total: 37, Hits: sampleHits()},
+				Understood: evilUnderstood("planned")},
+			Search{Layout: layout(NavSearch), Query: evilAttr, Results: &SearchResults{Total: 4, Hits: sampleHits()},
+				Understood: &Understood{Status: "cold", Model: evilScript}},
 		},
 		PageStatus:    statusVariants(layout(NavStatus), panelErr, at),
 		PageFailures:  failuresVariants(layout(NavLibrary), panelErr, counts),
@@ -706,6 +711,7 @@ func partialSamples(t testing.TB) map[string][]any {
 		icons = append(icons, name)
 	}
 	return map[string][]any{
+		"understood":  understoodSamples(),
 		"panel-error": {&PanelError{Message: evilScript, RequestID: evilAttr}},
 		"icon":        icons,
 		"logo":        {nil},
@@ -848,8 +854,52 @@ func eventsOf(events []InterestEvent) []any {
 	return out
 }
 
+// evilUnderstood is a hostile plan as the search page shows it: 160-byte
+// rewrites, names of markup and quotes, a chip of every kind, the
+// documents its dates couldn't judge.
+func evilUnderstood(status string) *Understood {
+	undated := 12
+	return &Understood{Status: status, Model: evilScript, Timeout: 5 * time.Second,
+		Filters: []PlanFilter{
+			{Field: "content_type", Values: []string{"video", "pdf", evilScript}, Token: evilAttr},
+			{Field: "source", Values: []string{"safari", evilQuotes}, Token: evilURL},
+			{Field: "saved", After: "2018-06-01T00:00:00-04:00", Before: "2018-09-23T00:00:00-04:00", Token: evilScript},
+			{Field: "published", Before: evilScript, Token: evilAttr},
+			{Field: "site", Values: []string{evilAttr}, Token: evilQuotes},
+			{Field: "host", Values: []string{evilURL}, Token: evilAttr},
+			{Field: "folder", Values: []string{evilLong + evilScript}, Token: evilAttr},
+			{Field: evilScript, Token: evilAttr},
+		},
+		Rewrites:     []string{strings.Repeat("r", 160), evilScript + evilAttr, evilRTL},
+		Names:        []string{evilQuotes + "<b>Okapi</b>", evilAttr, evilLong},
+		Undated:      &undated,
+		UndatedKept:  status == "supplied",
+		UndatedToken: evilScript,
+	}
+}
+
+// understoodSamples are the search page as its understood line renders
+// it: planned and supplied plans, one that adds nothing, and every status
+// that searched the words.
+func understoodSamples() []any {
+	statuses := []string{"off", "cold", "checking", "unfit", "timeout", "unavailable", "invalid", "too_long",
+		evilScript}
+	out := make([]any, 0, 4+len(statuses))
+	out = append(out,
+		Search{Query: evilScript, Type: evilAttr, Plan: evilQuotes, Understood: evilUnderstood("planned")},
+		Search{Query: evilAttr, Understood: evilUnderstood("supplied")},
+		Search{Query: evilAttr, Understood: &Understood{Status: "planned", Model: evilScript}},
+		Search{Query: evilAttr},
+	)
+	for _, status := range statuses {
+		out = append(out, Search{Query: evilScript, Understood: &Understood{Status: status, Model: evilScript,
+			Timeout: 5 * time.Second}})
+	}
+	return out
+}
+
 // evilSearchHref is a page of the search for a hostile query and type.
-func evilSearchHref(page int) string { return searchHref(evilScript+evilURL, evilAttr, page) }
+func evilSearchHref(page int) string { return searchHref(evilScript+evilURL, evilAttr, page, "") }
 
 // TestEveryTemplateRenders executes every template each page's set
 // defines, the page and the partials alike, with a typed sample whose
@@ -1035,7 +1085,7 @@ func TestAssets(t *testing.T) {
 			}
 		}
 	}
-	require.Len(t, refs, 14, "the stylesheet, htmx, actions.js, the d3 modules and map.js")
+	require.Len(t, refs, 15, "the stylesheet, htmx, actions.js, search.js, the d3 modules and map.js")
 	entries, err := fs.ReadDir(files, "static")
 	require.NoError(t, err)
 	for _, e := range entries {
@@ -1066,7 +1116,8 @@ func TestAssets(t *testing.T) {
 var scriptRefRE = regexp.MustCompile(`<script src="/ui/static/([a-z0-9.-]+)\.[0-9a-f]{16}\.js" defer></script>`)
 
 // TestPages_Scripts: every page loads htmx, then actions.js, each deferred
-// and under its hashed name; the interest map's page, with a map to draw,
+// and under its hashed name; the search page loads search.js after them,
+// and no other page does; the interest map's page, with a map to draw,
 // loads the d3 modules after them, in mapScripts' order, then map.js, and
 // no other page, nor the map's without a map, loads any of them.
 func TestPages_Scripts(t *testing.T) {
@@ -1079,6 +1130,9 @@ func TestPages_Scripts(t *testing.T) {
 			loaded = append(loaded, m[1])
 		}
 		want := base
+		if page == PageSearch {
+			want = append(slices.Clone(base), "search")
+		}
 		if m, ok := data.(MapPage); ok && m.Ready() {
 			want = append(slices.Clone(base), "d3-dispatch-3.0.1.min", "d3-selection-3.0.0.min", "d3-timer-3.0.1.min",
 				"d3-color-3.1.0.min", "d3-interpolate-3.0.1.min", "d3-ease-3.0.1.min", "d3-transition-3.0.1.min",

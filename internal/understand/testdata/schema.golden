@@ -1,0 +1,24 @@
+{
+  "type": "object",
+  "properties": {
+    "kind": {"type": "string", "enum": ["one", "list", "evidence", "analysis", "keywords"]},
+    "names": {"type": "array", "items": {"type": "string"}, "maxItems": 4},
+    "rewrites": {"type": "array", "items": {"type": "string"}, "maxItems": 3},
+    "filters": {
+      "type": "object",
+      "properties": {
+        "saved_after": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+        "saved_before": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+        "published_after": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+        "published_before": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+        "content_type": {"type": "array", "items": {"type": "string", "enum": ["video", "repo", "pdf", "thread"]},
+          "maxItems": 3},
+        "source": {"type": "array", "items": {"type": "string", "enum": ["chrome", "safari", "firefox"]},
+          "maxItems": 3}
+      },
+      "additionalProperties": false
+    }
+  },
+  "required": ["kind", "names", "rewrites", "filters"],
+  "additionalProperties": false
+}

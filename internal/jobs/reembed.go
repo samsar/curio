@@ -124,6 +124,11 @@ type Reembed struct {
 	opts ReembedOptions
 	kick chan struct{}
 
+	// feed is held by a top-up (topUp), from its read of the brake to its
+	// commit, and by a failure's report (Failed), so that neither lands in
+	// the middle of the other. It is taken before mu.
+	feed sync.Mutex
+
 	mu       sync.Mutex
 	progress ReembedProgress
 	samples  []reembedSample // (when, chunks left) over the rate window, oldest first
@@ -313,10 +318,20 @@ func (r *Reembed) Reembedded() {
 // straight back on, so the one document the feed queues then, one that
 // never failed if any is left (DocumentStore.EnqueueReembed), is a probe
 // of whether the failure lasts. A nil Reembed does nothing.
+//
+// The failure must be reported while its job still runs, before the worker
+// records its outcome, as the index handler does; the report waits for a
+// top-up under way (feed). So a top-up that counts the job out of flight,
+// and may queue a document in its place, reads the brake with this failure
+// in it. Otherwise one that read the brake off just before the failure that
+// puts it on would queue one more document once the job left flight, and
+// the brake would stop the feed a failure late.
 func (r *Reembed) Failed(documentID string, err error) {
 	if r == nil {
 		return
 	}
+	r.feed.Lock()
+	defer r.feed.Unlock()
 	r.mu.Lock()
 	b := &r.brake
 	lifted := r.lift(time.Now())
@@ -406,12 +421,8 @@ func (r *Reembed) Run(ctx context.Context) {
 		case <-tick.C:
 			check = true
 		}
-		if !r.braked(time.Now()) {
-			if _, err := r.opts.Documents.EnqueueReembed(ctx, r.opts.TenantID, indexer.ContextVersion,
-				r.limits()); err != nil {
-				warn("chunk context: couldn't queue the next documents to re-embed; trying again at the next check",
-					err)
-			}
+		if err := r.topUp(ctx); err != nil {
+			warn("chunk context: couldn't queue the next documents to re-embed; trying again at the next check", err)
 		}
 		if !check {
 			continue
@@ -435,6 +446,20 @@ func (r *Reembed) Run(ctx context.Context) {
 			lastLine = time.Now()
 		}
 	}
+}
+
+// topUp queues the next documents to re-embed (EnqueueReembed), unless the
+// brake is on, holding feed from its read of the brake to its commit: a
+// failure reported meanwhile (Failed) waits for it, so the brake it read
+// holds every failure of a job its count finds out of flight.
+func (r *Reembed) topUp(ctx context.Context) error {
+	r.feed.Lock()
+	defer r.feed.Unlock()
+	if r.braked(time.Now()) {
+		return nil
+	}
+	_, err := r.opts.Documents.EnqueueReembed(ctx, r.opts.TenantID, indexer.ContextVersion, r.limits())
+	return err
 }
 
 // record notes that left was left at now: the progress, and the rate over

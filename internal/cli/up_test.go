@@ -181,6 +181,7 @@ func TestUp_Help(t *testing.T) {
 		"--no-install", "--yes", "--curio-home", "--daemon-url"}, flags)
 	assert.Contains(t, out, "deleting nothing")
 	assert.Contains(t, out, "never uses sudo")
+	assert.Contains(t, out, "write interest labels and understand searches with this Ollama model")
 }
 
 // TestBareCurio: bare curio prints its help, creating and starting

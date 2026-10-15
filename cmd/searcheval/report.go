@@ -13,7 +13,9 @@ import (
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/devtool"
 	"github.com/samsar/curio/internal/eval"
+	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/understand"
 	"github.com/samsar/curio/internal/version"
 )
 
@@ -29,6 +31,7 @@ type report struct {
 	GeneratedAt time.Time       `json:"generated_at"`
 	Provenance  provenance      `json:"provenance"`
 	Library     libraryReport   `json:"library"`
+	Planner     *plannerReport  `json:"planner,omitempty"` // the planner, when a planned variant planned
 	Reindex     *reindexReport  `json:"reindex,omitempty"` // with -reindex
 	Variants    []variantReport `json:"variants"`
 }
@@ -49,6 +52,10 @@ type provenance struct {
 	K             int                 `json:"k"`
 	Variants      []string            `json:"variants"`
 	Baseline      string              `json:"baseline"`
+	// PlansFrom is the report the planned variants' plans were replayed
+	// from (-plans), and PlansPromptVersion the prompt they were made with.
+	PlansFrom          string `json:"plans_from,omitempty"`
+	PlansPromptVersion string `json:"plans_prompt_version,omitempty"`
 }
 
 type embeddingProvenance struct {
@@ -101,14 +108,18 @@ type savedDatesReport struct {
 	Unknown int `json:"unknown"`
 }
 
-// variantReport is one variant's run.
+// variantReport is one variant's run. A planned variant also counts its
+// queries by plan status, and its filter verdicts against the query
+// file's.
 type variantReport struct {
-	Name        string                 `json:"name"`
-	Description string                 `json:"description"`
-	WallMS      float64                `json:"wall_ms"`
-	LatencyMS   map[string]percentiles `json:"latency_ms"`
-	Groups      []groupReport          `json:"groups"`
-	Queries     []queryReport          `json:"queries"`
+	Name            string                 `json:"name"`
+	Description     string                 `json:"description"`
+	WallMS          float64                `json:"wall_ms"`
+	LatencyMS       map[string]percentiles `json:"latency_ms"`
+	PlanStatuses    map[string]int         `json:"plan_statuses,omitempty"`
+	FilterAgreement map[verdict]int        `json:"filter_agreement,omitempty"`
+	Groups          []groupReport          `json:"groups"`
+	Queries         []queryReport          `json:"queries"`
 
 	// stages are LatencyMS's keys in the order the stages run.
 	stages []string
@@ -128,14 +139,23 @@ type groupReport struct {
 }
 
 // queryReport is one query's ranking and scores, and the filters it was
-// run with, when it has any.
+// run with, when it has any. A planned variant's query also has its plan,
+// whole whichever part the variant searched by, the plan's status, how
+// long the planner took (0 when replayed), the filters it dropped, and
+// how the filters the variant applied compare with the file's, by
+// dimension.
 type queryReport struct {
-	Index   int           `json:"index"`
-	ID      string        `json:"id"`
-	Kind    string        `json:"kind"`
-	Tags    []string      `json:"tags"`
-	Query   string        `json:"query"`
-	Filters *eval.Filters `json:"filters,omitempty"`
+	Index           int                `json:"index"`
+	ID              string             `json:"id"`
+	Kind            string             `json:"kind"`
+	Tags            []string           `json:"tags"`
+	Query           string             `json:"query"`
+	Filters         *eval.Filters      `json:"filters,omitempty"`
+	Plan            *planJSON          `json:"plan,omitempty"`
+	PlanStatus      string             `json:"plan_status,omitempty"`
+	PlanMS          *float64           `json:"plan_ms,omitempty"`
+	PlanDropped     []droppedJSON      `json:"plan_dropped,omitempty"`
+	FilterAgreement map[string]verdict `json:"filter_agreement,omitempty"`
 	eval.QueryScore
 	Judgments []judgmentReport   `json:"judgments"`
 	Ranking   []rankedReport     `json:"ranking"`
@@ -226,7 +246,25 @@ func newQueryReport(i int, q eval.Query, score eval.QueryScore, r ranking, judge
 	for _, s := range r.stages {
 		qr.TimingsMS[s.name] = ms(s.took)
 	}
+	if r.plan != nil {
+		addPlan(&qr, *r.plan, r.applied)
+	}
 	return qr
+}
+
+// addPlan records a planned query's plan in its report.
+func addPlan(qr *queryReport, qp queryPlan, applied search.FilterRequest) {
+	took := ms(qp.took)
+	qr.PlanStatus, qr.PlanMS = string(qp.status), &took
+	if qp.plan != nil {
+		qr.Plan = toPlanJSON(*qp.plan)
+	}
+	for _, d := range qp.dropped {
+		qr.PlanDropped = append(qr.PlanDropped, droppedJSON{Field: d.Field, Reason: d.Reason})
+	}
+	if v := agreement(qr.Filters, applied, time.Local); len(v) > 0 {
+		qr.FilterAgreement = v
+	}
 }
 
 // newGroupReport is g's mean scores and its judgments the variant can't
@@ -276,6 +314,7 @@ func (r *report) text(b *bytes.Buffer, base *baseline) {
 	}
 	fmt.Fprintf(b, "Searched with %s: %s; k %d; variants %s\n", configName(p.Config), searchSettings(p),
 		p.K, strings.Join(p.Variants, ", "))
+	r.writePlanner(b)
 	if base != nil {
 		base.header(b, r)
 	}
@@ -285,12 +324,68 @@ func (r *report) text(b *bytes.Buffer, base *baseline) {
 		b.WriteString("\n")
 		writeQueries(b, v.Queries)
 		b.WriteString("\n")
+		writePlans(b, v)
 		writeLatencies(b, v)
 		fmt.Fprintf(b, "\nwall time %.1f s\n", v.WallMS/1000)
 		if base != nil {
 			base.compareVariant(b, v)
 		}
 	}
+}
+
+// writePlanner says, for a run with planned variants, where their plans
+// came from: the planner and its check, set apart so a failed check isn't
+// missed, or the report they were replayed from.
+func (r *report) writePlanner(b *bytes.Buffer) {
+	p := r.Provenance
+	switch {
+	case p.PlansFrom != "":
+		fmt.Fprintf(b, "Plans: replayed from %s (prompt %s); no model was asked\n", p.PlansFrom,
+			shortHash(p.PlansPromptVersion))
+	case r.Planner != nil:
+		pl := r.Planner
+		fmt.Fprintf(b, "Planner: %s, prompt %s, today %s, loaded in %.1f s; rewrites at %g, names at %g, "+
+			"%d s a plan\n", pl.Model, shortHash(pl.PromptVersion), pl.Today, pl.WarmMS/1000, pl.RewriteWeight,
+			pl.NameWeight, pl.TimeoutSeconds)
+		check := "PASSED"
+		if pl.Check != "passed" {
+			check = "NOT PASSED (" + pl.Check + "): the daemon would search every question by its words alone"
+		}
+		fmt.Fprintf(b, "Planner check: %s\n", check)
+	}
+}
+
+// writePlans says, for a planned variant, how its queries were planned, by
+// status, and how the filters it applied compare with the query file's:
+// counts by verdict, then the queries and dimensions of each but the
+// agreeing. Ids and counts alone: a plan's text and values come from the
+// private query set.
+func writePlans(b *bytes.Buffer, v variantReport) {
+	if len(v.PlanStatuses) == 0 {
+		return
+	}
+	var statuses []string
+	for _, st := range understand.Statuses() {
+		if n := v.PlanStatuses[string(st)]; n > 0 {
+			statuses = append(statuses, fmt.Sprintf("%s %d", st, n))
+		}
+	}
+	fmt.Fprintf(b, "plans: %s\n", strings.Join(statuses, ", "))
+	if len(v.FilterAgreement) == 0 {
+		b.WriteString("filters against the query file's: none set on either side\n\n")
+		return
+	}
+	counts := make([]string, 0, len(verdicts))
+	for _, vd := range verdicts {
+		counts = append(counts, fmt.Sprintf("%s %d", vd, v.FilterAgreement[vd]))
+	}
+	fmt.Fprintf(b, "filters against the query file's: %s\n", strings.Join(counts, ", "))
+	for _, vd := range verdicts[1:] {
+		if ids := verdictList(v.Queries, vd); len(ids) > 0 {
+			fmt.Fprintf(b, "  %s: %s\n", vd, strings.Join(ids, ", "))
+		}
+	}
+	b.WriteString("\n")
 }
 
 // queryCount is how many queries the run scored.

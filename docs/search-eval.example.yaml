@@ -7,7 +7,16 @@
 #   sqlite3 -readonly ~/.curio/curio.db ".backup /tmp/copy.db"
 #   make search-eval DB=/tmp/copy.db QUERIES=my-queries.yaml \
 #       [CONFIG=~/.curio/config.yaml] [JSON=/tmp/run.json] \
-#       [BASELINE=/tmp/previous-run.json] [VARIANTS=hybrid,bm25,vector]
+#       [BASELINE=/tmp/previous-run.json] [VARIANTS=hybrid,bm25,vector] \
+#       [TODAY=YYYY-MM-DD] [PLANS=/tmp/planned-run.json]
+#
+# The planned variants (planned, and the ablations planned-filters,
+# planned-rewrites, planned-names) search each query by the plan
+# config.yaml's planner model gives it, in place of its filters: TODAY pins
+# the day the planner is told is today, which relative dates ("last week")
+# are read from, and PLANS replays a previous report's plans, asking no
+# model. A query's filters then serve as the oracle the planner's are
+# compared with, dimension by dimension.
 #
 # A real test set names what you read and what you search for: keep it, and
 # every report made with it, outside the repository. This file is synthetic.
@@ -19,7 +28,8 @@
 #   tags      optional; each tag is a group of its own, too.
 #   note      optional; a comment on the query, never scored.
 #   query     the text, as you would type it into search.
-#   filters   optional; the search filters the query runs with, under
+#   filters   optional; the search filters the query runs with (the
+#             planned variants' oracle instead), under
 #             POST /v1/search's names: saved_after, saved_before,
 #             published_after, published_before (a date, midnight UTC, or
 #             an RFC 3339 date-time with a zone; windows are

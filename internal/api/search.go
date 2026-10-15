@@ -12,16 +12,67 @@ import (
 
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/understand"
 )
 
 // SearchRequest is the POST /v1/search body. K 0 (or omitted) means the
 // configured search.default_k. The response is the documents ranked
 // [Offset, Offset+K) of the one ranking every request for the query gets.
+//
+// Understand asks the planner what the query means and searches by its
+// plan; Plan searches by a plan a client supplies, a response's
+// understanding.plan as is or with a filter taken out, and asks no model,
+// so an understood search's pages are windows of one ranking. A request
+// sends one or neither. Filters win over a plan's, dimension by dimension.
 type SearchRequest struct {
-	Query   string  `json:"query"`
-	K       int     `json:"k,omitempty"`
-	Offset  int     `json:"offset,omitempty"`
-	Filters Filters `json:"filters,omitzero"`
+	Query      string    `json:"query"`
+	K          int       `json:"k,omitempty"`
+	Offset     int       `json:"offset,omitempty"`
+	Filters    Filters   `json:"filters,omitzero"`
+	Understand bool      `json:"understand,omitempty"`
+	Plan       *PlanJSON `json:"plan,omitempty"`
+}
+
+// PlanJSON mirrors the openapi Plan schema: what a search does for a
+// question besides its words. Filters are in the request's form; a saved
+// bound the planner set is its local midnight in RFC 3339.
+type PlanJSON struct {
+	Kind     string   `json:"kind"`
+	Filters  Filters  `json:"filters,omitzero"`
+	Rewrites []string `json:"rewrites,omitempty"`
+	Names    []string `json:"names,omitempty"`
+}
+
+// Understanding mirrors the openapi Understanding schema: how the query
+// was understood, present exactly when the request sent understand or
+// plan. Reason says why there is no plan, for any status but planned and
+// supplied; Plan is the plan as applied, and Dropped the plan's filters
+// left out, by the planner's guards or because the request sets their
+// dimension.
+type Understanding struct {
+	Status  string          `json:"status"`
+	Reason  string          `json:"reason,omitempty"`
+	Model   string          `json:"model,omitempty"`
+	TookMS  int64           `json:"took_ms"`
+	Plan    *PlanJSON       `json:"plan,omitempty"`
+	Dropped []DroppedFilter `json:"dropped,omitempty"`
+}
+
+// DroppedFilter is a filter of a plan the search left out, and why.
+type DroppedFilter struct {
+	Field  string `json:"field"`
+	Reason string `json:"reason"`
+}
+
+// Planner understands search questions: the daemon's understand.Planner,
+// nil while search.understand is off. Timeout is how long a plan may take
+// (search.understand_timeout_seconds), which the dashboard's note for a
+// plan that took longer names. State is what it knows of its model, read
+// from its memory alone, for healthz.
+type Planner interface {
+	Plan(ctx context.Context, question string) (understand.Outcome, error)
+	Timeout() time.Duration
+	State() understand.State
 }
 
 // Filters mirrors the openapi filters block; the search engine applies
@@ -44,6 +95,24 @@ func (f Filters) request() search.FilterRequest {
 	return search.FilterRequest{ContentType: f.ContentType, Host: f.Host, Source: f.Source, Site: f.Site,
 		Folder: f.Folder, SavedAfter: f.SavedAfter, SavedBefore: f.SavedBefore, PublishedAfter: f.PublishedAfter,
 		PublishedBefore: f.PublishedBefore, IncludeUndated: f.IncludeUndated}
+}
+
+// filtersOf is r on the wire.
+func filtersOf(r search.FilterRequest) Filters {
+	return Filters{ContentType: r.ContentType, Host: r.Host, Source: r.Source, Site: r.Site, Folder: r.Folder,
+		SavedAfter: r.SavedAfter, SavedBefore: r.SavedBefore, PublishedAfter: r.PublishedAfter,
+		PublishedBefore: r.PublishedBefore, IncludeUndated: r.IncludeUndated}
+}
+
+// plan is p as the planner's package reads it.
+func (p PlanJSON) plan() understand.Plan {
+	return understand.Plan{Kind: understand.Kind(p.Kind), Filters: p.Filters.request(), Rewrites: p.Rewrites,
+		Names: p.Names}
+}
+
+// planJSON is p on the wire.
+func planJSON(p understand.Plan) *PlanJSON {
+	return &PlanJSON{Kind: string(p.Kind), Filters: filtersOf(p.Filters), Rewrites: p.Rewrites, Names: p.Names}
 }
 
 // SearchHitResponse mirrors the openapi SearchHit schema. MarkdownPath
@@ -89,17 +158,20 @@ type ChunkMatchJSON struct {
 // Capped whether more matched than it ranks. Degraded and Warnings report
 // keyword-only results when semantic search was unavailable. Undated, with
 // a date filter alone, is how many documents it couldn't judge.
+// Understanding says how a request that sent understand or plan was
+// understood; TookMS covers the planning too.
 type SearchResponse struct {
-	Query      string              `json:"query"`
-	TookMS     int64               `json:"took_ms"`
-	BM25Hits   int                 `json:"bm25_hits"`
-	VectorHits int                 `json:"vector_hits"`
-	Total      int                 `json:"total"`
-	Capped     bool                `json:"capped"`
-	Degraded   bool                `json:"degraded,omitempty"`
-	Warnings   []string            `json:"warnings,omitempty"`
-	Undated    *int                `json:"undated,omitempty"`
-	Items      []SearchHitResponse `json:"items"`
+	Query         string              `json:"query"`
+	TookMS        int64               `json:"took_ms"`
+	BM25Hits      int                 `json:"bm25_hits"`
+	VectorHits    int                 `json:"vector_hits"`
+	Total         int                 `json:"total"`
+	Capped        bool                `json:"capped"`
+	Degraded      bool                `json:"degraded,omitempty"`
+	Warnings      []string            `json:"warnings,omitempty"`
+	Undated       *int                `json:"undated,omitempty"`
+	Understanding *Understanding      `json:"understanding,omitempty"`
+	Items         []SearchHitResponse `json:"items"`
 }
 
 func (d Deps) handleSearch(w http.ResponseWriter, r *http.Request) {
@@ -118,11 +190,14 @@ func (d Deps) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 // search runs req through the search engine and hydrates its hits. A query,
 // k, offset or filter the engine can't take is a requestError, refused
-// before the query is embedded: a filter's names its field
+// before the query is embedded or understood: a filter's names its field
 // (search.FilterError), and a content_type or source outside its set is
 // one, since the engine would match nothing and a typo would read as "no
-// results". Semantic search failing is not an error:
-// the keyword results come back Degraded, with Warnings.
+// results". So is a request sending understand and a plan, or a plan
+// understand.Validate refuses. Semantic search failing is not an error:
+// the keyword results come back Degraded, with Warnings; nor is
+// understanding failing, which searches the query's words, Understanding
+// saying why.
 func (d Deps) search(ctx context.Context, req SearchRequest) (SearchResponse, error) {
 	if req.Query == "" {
 		return SearchResponse{}, badRequest("query is required")
@@ -138,19 +213,33 @@ func (d Deps) search(ctx context.Context, req SearchRequest) (SearchResponse, er
 		return SearchResponse{}, badRequest("offset must be between 0 and %d (offset + k at most %d), got %d",
 			store.MaxSearchK-k, store.MaxSearchK, req.Offset)
 	}
-	filters, err := req.Filters.request().Resolve()
-	if err != nil {
+	// The request's own filters are checked alone, as without a plan:
+	// include_undated without a date of its own is refused even when a
+	// plan would add one.
+	if _, err := req.Filters.request().Resolve(); err != nil {
 		return SearchResponse{}, &requestError{err: err}
 	}
 
 	start := time.Now()
-	res, err := d.Search.Search(ctx, search.Request{
-		TenantID: d.TenantID,
-		Query:    req.Query,
-		K:        req.K,
-		Offset:   req.Offset,
-		Filters:  filters,
-	})
+	plan, understanding, err := d.understand(ctx, req)
+	if err != nil {
+		return SearchResponse{}, err
+	}
+	sreq := search.Request{TenantID: d.TenantID, Query: req.Query, K: req.K, Offset: req.Offset}
+	merged := req.Filters.request()
+	if plan != nil {
+		var dropped []understand.Dropped
+		merged, dropped = mergeFilters(req.Filters.request(), plan.Filters)
+		applied := *plan
+		applied.Filters = withoutDropped(plan.Filters, dropped)
+		understanding.Plan = planJSON(applied)
+		understanding.Dropped = append(understanding.Dropped, droppedJSON(dropped)...)
+		sreq.Rewrites, sreq.Names = plan.Rewrites, plan.Names
+	}
+	if sreq.Filters, err = merged.Resolve(); err != nil {
+		return SearchResponse{}, &requestError{err: err}
+	}
+	res, err := d.Search.Search(ctx, sreq)
 	if err != nil {
 		return SearchResponse{}, err
 	}
@@ -160,17 +249,159 @@ func (d Deps) search(ctx context.Context, req SearchRequest) (SearchResponse, er
 		return SearchResponse{}, err
 	}
 	return SearchResponse{
-		Query:      res.Query,
-		TookMS:     time.Since(start).Milliseconds(),
-		BM25Hits:   res.BM25Hits,
-		VectorHits: res.VectorHits,
-		Total:      res.Total,
-		Capped:     res.Capped,
-		Degraded:   res.Degraded,
-		Warnings:   res.Warnings,
-		Undated:    res.Undated,
-		Items:      items,
+		Query:         res.Query,
+		TookMS:        time.Since(start).Milliseconds(),
+		BM25Hits:      res.BM25Hits,
+		VectorHits:    res.VectorHits,
+		Total:         res.Total,
+		Capped:        res.Capped,
+		Degraded:      res.Degraded,
+		Warnings:      res.Warnings,
+		Undated:       res.Undated,
+		Understanding: understanding,
+		Items:         items,
 	}, nil
+}
+
+// understand is req's plan and how it came to be: the plan it supplied,
+// checked by understand.Validate; the planner's, when it asked for
+// understanding and the planner gave one; or none, with the status that
+// says why. A request that asked for neither has no Understanding. Only
+// the caller's context ending is an error besides a refused plan.
+func (d Deps) understand(ctx context.Context, req SearchRequest) (*understand.Plan, *Understanding, error) {
+	switch {
+	case req.Plan != nil && req.Understand:
+		return nil, nil, badRequest("send understand or plan, not both")
+	case req.Plan != nil:
+		p := req.Plan.plan()
+		if err := understand.Validate(p); err != nil {
+			return nil, nil, &requestError{err: err}
+		}
+		return &p, &Understanding{Status: string(understand.StatusSupplied)}, nil
+	case !req.Understand:
+		return nil, nil, nil
+	case d.Planner == nil:
+		return nil, &Understanding{Status: string(understand.StatusOff), Reason: understand.OffReason}, nil
+	}
+	out, err := d.Planner.Plan(ctx, req.Query)
+	if err != nil {
+		return nil, nil, err
+	}
+	u := &Understanding{Status: string(out.Status), Model: out.Model, TookMS: out.Took.Milliseconds(),
+		Dropped: droppedJSON(out.Dropped)}
+	if out.Status != understand.StatusPlanned {
+		u.Reason = out.Reason
+	}
+	return out.Plan, u, nil
+}
+
+// mergeFilters lays a plan's filters under the request's: each dimension
+// the request sets is the request's, and the plan's of that dimension, if
+// it set one, is dropped. A window (saved, published) is one dimension,
+// its two bounds together; include_undated goes with the request's dates
+// when it sets any, and with the plan's otherwise.
+func mergeFilters(req, plan search.FilterRequest) (search.FilterRequest, []understand.Dropped) {
+	out := req
+	var dropped []understand.Dropped
+	lists := []struct {
+		field     string
+		req, plan []string
+		to        *[]string
+	}{
+		{"content_type", req.ContentType, plan.ContentType, &out.ContentType},
+		{"host", req.Host, plan.Host, &out.Host},
+		{"source", req.Source, plan.Source, &out.Source},
+		{"site", req.Site, plan.Site, &out.Site},
+		{"folder", req.Folder, plan.Folder, &out.Folder},
+	}
+	for _, l := range lists {
+		switch {
+		case len(l.req) == 0:
+			*l.to = l.plan
+		case len(l.plan) > 0:
+			dropped = append(dropped, understand.Dropped{Field: l.field, Reason: "the request sets " + l.field})
+		}
+	}
+	windows := []struct {
+		field                 string
+		reqSet, planSet       bool
+		planAfter, planBefore string
+		toAfter, toBefore     *string
+	}{
+		{"saved", req.SavedAfter != "" || req.SavedBefore != "", plan.SavedAfter != "" || plan.SavedBefore != "",
+			plan.SavedAfter, plan.SavedBefore, &out.SavedAfter, &out.SavedBefore},
+		{"published", req.PublishedAfter != "" || req.PublishedBefore != "",
+			plan.PublishedAfter != "" || plan.PublishedBefore != "", plan.PublishedAfter, plan.PublishedBefore,
+			&out.PublishedAfter, &out.PublishedBefore},
+	}
+	reqDates := false
+	for _, w := range windows {
+		reqDates = reqDates || w.reqSet
+		switch {
+		case !w.reqSet:
+			*w.toAfter, *w.toBefore = w.planAfter, w.planBefore
+		case w.planSet:
+			dropped = append(dropped, understand.Dropped{Field: w.field,
+				Reason: fmt.Sprintf("the request sets %s_after or %s_before", w.field, w.field)})
+		}
+	}
+	switch {
+	case !reqDates:
+		out.IncludeUndated = plan.IncludeUndated
+	case plan.IncludeUndated && !req.IncludeUndated:
+		dropped = append(dropped, understand.Dropped{Field: "include_undated",
+			Reason: "the request sets its own dates, without include_undated"})
+	}
+	return out, dropped
+}
+
+// withoutDropped is f less the dimensions dropped names: what of a plan's
+// filters a search applied.
+func withoutDropped(f search.FilterRequest, dropped []understand.Dropped) search.FilterRequest {
+	for _, d := range dropped {
+		f = withoutDimension(f, d.Field)
+	}
+	return f
+}
+
+// withoutDimension is f less the dimension field names: content_type,
+// host, source, site, folder, saved or published (a window, both bounds),
+// or include_undated. Taking out its last date filter takes
+// include_undated with it, which keeps nothing alone.
+func withoutDimension(f search.FilterRequest, field string) search.FilterRequest {
+	switch field {
+	case "content_type":
+		f.ContentType = nil
+	case "host":
+		f.Host = nil
+	case "source":
+		f.Source = nil
+	case "site":
+		f.Site = nil
+	case "folder":
+		f.Folder = nil
+	case "saved":
+		f.SavedAfter, f.SavedBefore = "", ""
+	case "published":
+		f.PublishedAfter, f.PublishedBefore = "", ""
+	case "include_undated":
+		f.IncludeUndated = false
+	}
+	if f.SavedAfter == "" && f.SavedBefore == "" && f.PublishedAfter == "" && f.PublishedBefore == "" {
+		f.IncludeUndated = false
+	}
+	return f
+}
+
+func droppedJSON(dropped []understand.Dropped) []DroppedFilter {
+	if len(dropped) == 0 {
+		return nil
+	}
+	out := make([]DroppedFilter, 0, len(dropped))
+	for _, d := range dropped {
+		out = append(out, DroppedFilter{Field: d.Field, Reason: d.Reason})
+	}
+	return out
 }
 
 // searchHitsToResponse maps engine hits to wire hits, populating each

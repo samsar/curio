@@ -138,7 +138,10 @@ var farAway = at(1000)
 // fakeOllama is an Ollama with testModel pulled, which embeds each
 // query of testdata/queries.yaml at its place on the line (queryAt), each
 // bookmarked document's card at its own (cardAt), and any other text far
-// away. It fails a test that asks it to pull.
+// away. With answer set it also plans, as a planner model held in memory:
+// it loads on a generate request without a prompt, and answers one with a
+// prompt with answer's reply to the prompt's question, told the prompt's
+// today. It fails a test that asks it to pull.
 type fakeOllama struct {
 	url string
 
@@ -146,6 +149,9 @@ type fakeOllama struct {
 	models   []string       // what /api/tags lists
 	failText map[string]int // texts /api/embed answers 500 for, and how many more times; -1 for always
 	embeds   []string       // every text embedded, in order
+	answer   func(question, today string) string
+	asked    []string // every question planned, the probes' included, in order
+	loads    int      // generate requests without a prompt
 }
 
 func newFakeOllama(t *testing.T) *fakeOllama {
@@ -157,6 +163,10 @@ func newFakeOllama(t *testing.T) *fakeOllama {
 			f.tags(t, w)
 		case "/api/embed":
 			f.embed(t, w, r)
+		case "/api/ps":
+			fmt.Fprint(w, `{"models":[{"name":"`+planModel+`","model":"`+planModel+`"}]}`)
+		case "/api/generate":
+			f.generate(t, w, r)
 		case "/api/pull":
 			t.Errorf("searcheval asked Ollama to pull a model")
 			http.Error(w, "no pulls", http.StatusForbidden)
@@ -227,6 +237,54 @@ func (f *fakeOllama) embed(t *testing.T, w http.ResponseWriter, r *http.Request)
 	if err := json.NewEncoder(w).Encode(out); err != nil {
 		t.Errorf("encode the embeddings: %v", err)
 	}
+}
+
+// planModel is the planner's model the planned tests' config names.
+const planModel = "test-plan:1"
+
+func (f *fakeOllama) generate(t *testing.T, w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Model  string  `json:"model"`
+		Prompt *string `json:"prompt"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		t.Errorf("decode a generate request: %v", err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Model != planModel {
+		t.Errorf("generate with %q, not %q", req.Model, planModel)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if req.Prompt == nil {
+		f.loads++
+		fmt.Fprint(w, `{"response":"","done":true,"done_reason":"load"}`)
+		return
+	}
+	_, question, _ := strings.Cut(*req.Prompt, "\nQuestion: ")
+	question = strings.TrimSuffix(question, "\n")
+	_, today, _ := strings.Cut(*req.Prompt, "\nToday is ")
+	today, _, _ = strings.Cut(today, ".")
+	_, today, _ = strings.Cut(today, ", ")
+	f.asked = append(f.asked, question)
+	if f.answer == nil {
+		t.Errorf("searcheval asked for a plan of %q", question)
+		http.Error(w, "no planner here", http.StatusInternalServerError)
+		return
+	}
+	reply, err := json.Marshal(f.answer(question, today))
+	if err != nil {
+		t.Errorf("encode a plan: %v", err)
+	}
+	fmt.Fprintf(w, `{"response":%s,"done":true,"done_reason":"stop"}`, reply)
+}
+
+// questions are the questions the fake planned, in order.
+func (f *fakeOllama) questions() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.asked...)
 }
 
 // reembedded is what the fake embedded as chunks with their context, the

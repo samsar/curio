@@ -11,39 +11,49 @@ import (
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/understand"
 )
 
 // variant is a way of ranking the library for a query: the production
 // pipeline, or a change to it measured against it. config is the engine's
 // configuration for it, from config.yaml's; its weights also say which
-// lists it ranks with, and so which documents it can return (reach).
+// lists it ranks with, and so which documents it can return (reach). A
+// planned variant searches each query by its plan, the part of it mask
+// keeps, in place of the query file's filters; nil for the others.
 type variant struct {
 	name        string
 	description string
 	config      func(config.Config) search.Config
+	mask        func(understand.Plan) understand.Plan
 }
 
 // env is what a variant builds its ranker from: the copy's stores, the
-// query embedder, the loaded config and the log.
+// query embedder, the loaded config, the queries' plans when a planned
+// variant runs, and the log.
 type env struct {
 	docs     store.DocumentStore
 	chunks   store.ChunkStore
 	index    store.DocumentIndex
 	embedder search.Embedder
 	cfg      config.Config
+	plans    []queryPlan
 	log      *slog.Logger
 }
 
-// ranker ranks the library's documents for a query under its filters.
+// ranker ranks the library's documents for query i of the file under its
+// filters.
 type ranker interface {
-	rank(ctx context.Context, query string, filters store.SearchFilters) (ranking, error)
+	rank(ctx context.Context, i int, query string, filters store.SearchFilters) (ranking, error)
 }
 
 // ranking is a query's documents, best first, and how long each stage of
-// ranking them took, in the order the stages ran.
+// ranking them took, in the order the stages ran. A planned ranking also
+// has the query's plan, made before it, and the filters of it it applied.
 type ranking struct {
-	docs   []rankedDoc
-	stages []stage
+	docs    []rankedDoc
+	stages  []stage
+	plan    *queryPlan
+	applied search.FilterRequest
 }
 
 // rankedDoc is a ranked document.
@@ -100,6 +110,31 @@ var variants = []variant{
 			"query of two words or more, which never embeds the query",
 		config: only(0, 0, 0, 0, 1),
 	},
+	{
+		name: "planned",
+		description: "the daemon's understood search: each query's plan from the planner config.yaml configures, " +
+			"its filters, rewrites and names, in place of the file's filters",
+		config: search.ConfigFrom,
+		mask:   func(p understand.Plan) understand.Plan { return p },
+	},
+	{
+		name:        "planned-filters",
+		description: "the planned search with the plans' filters alone",
+		config:      search.ConfigFrom,
+		mask:        func(p understand.Plan) understand.Plan { return understand.Plan{Kind: p.Kind, Filters: p.Filters} },
+	},
+	{
+		name:        "planned-rewrites",
+		description: "the planned search with the plans' rewrites alone",
+		config:      search.ConfigFrom,
+		mask:        func(p understand.Plan) understand.Plan { return understand.Plan{Kind: p.Kind, Rewrites: p.Rewrites} },
+	},
+	{
+		name:        "planned-names",
+		description: "the planned search with the plans' names alone",
+		config:      search.ConfigFrom,
+		mask:        func(p understand.Plan) understand.Plan { return understand.Plan{Kind: p.Kind, Names: p.Names} },
+	},
 }
 
 // only is the production configuration with the five lists weighted bm25,
@@ -114,7 +149,13 @@ func only(bm25, vector, fields, cards, titles float64) func(config.Config) searc
 }
 
 // build is v's ranker over e.
-func (v variant) build(e env) ranker { return newEngineRanker(e, v.config(e.cfg)) }
+func (v variant) build(e env) ranker {
+	r := newEngineRanker(e, v.config(e.cfg))
+	if v.planned() {
+		return plannedRanker{engine: r, plans: e.plans, mask: v.mask}
+	}
+	return r
+}
 
 // reach is which documents v's lists can return.
 func (v variant) reach(c config.Config) reach {
@@ -155,9 +196,14 @@ func newEngineRanker(e env, cfg search.Config) engineRanker {
 // report BM25 alone as the pipeline being measured.
 var errDegraded = errors.New("the search came back keyword-only")
 
-func (r engineRanker) rank(ctx context.Context, query string, filters store.SearchFilters) (ranking, error) {
-	res, err := r.engine.Search(ctx, search.Request{TenantID: store.LocalTenantID, Query: query, K: store.MaxSearchK,
+func (r engineRanker) rank(ctx context.Context, _ int, query string, filters store.SearchFilters) (ranking, error) {
+	return r.search(ctx, search.Request{TenantID: store.LocalTenantID, Query: query, K: store.MaxSearchK,
 		Filters: filters})
+}
+
+// search ranks req's first 100 documents.
+func (r engineRanker) search(ctx context.Context, req search.Request) (ranking, error) {
+	res, err := r.engine.Search(ctx, req)
 	if err != nil {
 		return ranking{}, err
 	}
@@ -178,5 +224,39 @@ func (r engineRanker) rank(ctx context.Context, query string, filters store.Sear
 	for i, hit := range res.Items {
 		out.docs[i] = rankedDoc{id: hit.Document.ID, url: hit.Document.URL}
 	}
+	return out, nil
+}
+
+// plannedRanker ranks a query by its plan, the part of it mask keeps, as
+// the daemon searches an understood question: the plan's filters in place
+// of the query file's, its rewrites and names searched with the words. A
+// query the planner gave no plan is searched by its words alone, without
+// filters, as the daemon falls back.
+type plannedRanker struct {
+	engine engineRanker
+	plans  []queryPlan
+	mask   func(understand.Plan) understand.Plan
+}
+
+func (r plannedRanker) rank(ctx context.Context, i int, query string, _ store.SearchFilters) (ranking, error) {
+	qp := r.plans[i]
+	req := search.Request{TenantID: store.LocalTenantID, Query: query, K: store.MaxSearchK}
+	if qp.plan != nil {
+		p := r.mask(*qp.plan)
+		filters, err := p.Filters.Resolve()
+		if err != nil {
+			return ranking{}, fmt.Errorf("the plan's filters: %w", err)
+		}
+		req.Filters, req.Rewrites, req.Names = filters, p.Rewrites, p.Names
+	}
+	out, err := r.engine.search(ctx, req)
+	if err != nil {
+		return ranking{}, err
+	}
+	if qp.plan != nil {
+		out.applied = r.mask(*qp.plan).Filters
+	}
+	out.plan = &qp
+	out.stages = append([]stage{{"plan", qp.took}}, out.stages...)
 	return out, nil
 }

@@ -8,9 +8,29 @@ search is limited to, 400 ms after the last keystroke, and the answer,
 the same full page a plain GET gets, replaces what is inside #results,
 and the type links (#search-scope, out of band), so that each carries the
 query typed. The form holds no page, so typing starts again at page 1.
-With JavaScript off, the form is a plain GET. #results carries no class
-of its own: htmx swaps only its children, so each state's width is its
-child's, and a swap leaves the page as a plain GET of it renders.
+A keystroke's search is the query's words: it never asks the model that
+understands questions, which takes seconds. With JavaScript off, the form
+is a plain GET. #results carries no class of its own: htmx swaps only its
+children, so each state's width is its child's, and a swap leaves the
+page as a plain GET of it renders.
+
+Enter, or the Search button, understands the question: the button is
+named understand, and the form's own hx-get (on submit) sends it, as
+htmx includes the button that submitted a form, and as a plain GET does
+without JavaScript; a keystroke's hx-include of the form leaves submit
+buttons out. While the model plans, #understanding says so; a keystroke
+meanwhile replaces the request (the one hx-sync). So would the search of
+the words Enter just submitted, still waiting out its delay: search.js,
+which only this page loads, drops it. An understood page says what it
+understood: each of the plan's filters as a chip whose link searches
+without it, the documents its dates couldn't judge, what else it
+searched and looked for, and the search of the words alone; or, when it
+searched the words, a quiet note says why. The plan travels as an
+opaque token (plan=, built and read in Go): the page's pages, its type
+links and its chips carry it, and the handler answers htmx with the
+plan's address to push, so reload, back and forward never ask the model
+again. Without JavaScript the address keeps understand=1, and a reload
+plans again.
 
 A result that matched on what it was saved as alone, its bookmark's
 title or folder, its site or its card, has no passage: in its place, one
@@ -33,18 +53,23 @@ text/template keeps a block's default over an empty define.
 */}}
 {{define "header-search"}}<!-- no header search -->{{end}}
 
+{{define "head"}}<script src="{{asset "search.js"}}" defer></script>{{end}}
+
 {{define "content" -}}
 <div class="search-page">
 <h1 class="visually-hidden">Search</h1>
-<form class="search-hero" action="{{navHref "search"}}" method="get" role="search">
+<form class="search-hero" action="{{navHref "search"}}" method="get" role="search"
+ hx-get="{{navHref "search"}}" hx-trigger="submit" hx-sync="closest .search-page:replace"
+ hx-target="#results" hx-select="#results > *" hx-select-oob="#search-scope" hx-swap="innerHTML" hx-push-url="true" hx-indicator="#understanding">
 <label class="visually-hidden" for="q">Search your library</label>
 <div class="searchbox">
 {{template "icon" "search"}}
 <input id="q" type="search" name="q" value="{{.Query}}" placeholder="{{.Placeholder}}" autocomplete="off" autofocus
- hx-get="{{navHref "search"}}" hx-trigger="input changed delay:400ms, search" hx-sync="closest .search-page:replace" hx-include="closest form"
+ hx-get="{{navHref "search"}}" hx-trigger="input changed delay:400ms" hx-sync="closest .search-page:replace" hx-include="closest form"
  hx-target="#results" hx-select="#results > *" hx-select-oob="#search-scope" hx-swap="innerHTML" hx-push-url="true" hx-indicator="#searching">
-<div class="searchbox-end"><span id="searching" class="htmx-indicator spinner" aria-hidden="true"></span><button class="btn btn-primary" type="submit" aria-label="Search">{{template "icon" "search"}}<span class="label">Search</span></button></div>
+<div class="searchbox-end"><span id="searching" class="htmx-indicator spinner" aria-hidden="true"></span><button class="btn btn-primary" type="submit" name="understand" value="1" aria-label="Search">{{template "icon" "search"}}<span class="label">Search</span></button></div>
 </div>
+<p id="understanding" class="htmx-indicator understanding" aria-hidden="true"><span class="spinner"></span>Understanding your question…</p>
 <div class="search-scope" id="search-scope">
 <span>In</span>
 <div class="segmented" role="group" aria-label="Type">{{range .TypeTabs}}<a href="{{.Href}}"{{if .Current}} aria-current="page"{{end}}>{{.Label}}</a>{{end}}</div>
@@ -60,6 +85,7 @@ text/template keeps a block's default over an empty define.
 </nav>{{end}}
 </div>
 {{else}}<div class="results">
+{{template "understood" .}}
 {{with .Err}}{{template "panel-error" .}}{{end}}
 {{with .Results}}
 {{if .Degraded}}<div class="callout callout-warn mb-4" role="status">{{template "icon" "alert"}}
@@ -92,6 +118,27 @@ text/template keeps a block's default over an empty define.
 </div>{{end}}
 </div>
 </div>
+{{- end}}
+
+{{/*
+What an understood search searched by: the plan's filters, each a chip
+that searches without it (and "Understood as" before them, when it kept
+any), the undated documents its dates left out or kept, what else it
+searched and looked for, each on one line, cut, whole in its title, and
+the search of the words alone. A search of the words
+says why instead, in a quiet line, never an alert: the results are
+there.
+*/}}
+{{define "understood" -}}
+{{if .UnderstoodLine}}<div class="understood">
+<div class="understood-plan">{{with .Chips}}<span class="understood-lead">Understood as</span>
+{{- range .}}<a class="chip" href="{{.Href}}" aria-label="Remove: {{.Label}}" title="Remove: {{.Label}}"><span class="chip-label">{{.Label}}</span>{{template "icon" "x"}}</a>{{end}}{{end}}
+{{- with .UndatedLine}}<span class="understood-undated">{{.Text}} · <a href="{{.Href}}">{{.Action}}</a></span>{{end}}
+<a class="understood-words" href="{{.WordsHref}}">Search your words instead</a></div>
+{{- with .Understood.AlsoSearched}}<p class="understood-also" title="{{.}}">{{.}}</p>{{end}}
+{{- with .Understood.LookedFor}}<p class="understood-also" title="{{.}}">{{.}}</p>{{end}}
+</div>
+{{- else}}{{with .Understood}}{{with .Note}}<p class="understood-note">{{.}}</p>{{end}}{{end}}{{end}}
 {{- end}}
 
 {{/*

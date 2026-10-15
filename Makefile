@@ -72,8 +72,9 @@ help:
 ## build: build curio, curio-daemon and curio-mcp into ./bin
 # Always runs go build: its cache decides what is stale, including the
 # migrations embedded from outside internal/. The three commands are named:
-# cmd/clusterreport and cmd/searcheval are developer's tools (make
-# cluster-report, make search-eval), never built into ./bin or shipped.
+# cmd/clusterreport, cmd/searcheval and cmd/plannercheck are developer's
+# tools (make cluster-report, search-eval, planner-check), never built
+# into ./bin or shipped.
 .PHONY: build
 build:
 	@mkdir -p $(BIN_DIR)
@@ -111,20 +112,32 @@ cluster-report:
 	@test -n "$(DB)" || { echo 'usage: make cluster-report DB=<copy of curio.db> [JSON=<file>] [DRAWS=n] [SEED=n]' >&2; exit 2; }
 	$(GO) run -tags=$(GOTAGS) ./cmd/clusterreport -db "$(DB)" $(if $(JSON),-json "$(JSON)") $(if $(DRAWS),-draws $(DRAWS)) $(if $(SEED),-seed $(SEED))
 
-## search-eval: score search on a copy of a home's database against a graded query file (DB=<copy> QUERIES=<file> [CONFIG=<config.yaml>] [JSON=<file>] [BASELINE=<previous JSON>] [VARIANTS=hybrid,bm25,vector,fields,cards,titles] [REINDEX=1 CONTENT=<home's content dir>])
+## search-eval: score search on a copy of a home's database against a graded query file (DB=<copy> QUERIES=<file> [CONFIG=<config.yaml>] [JSON=<file>] [BASELINE=<previous JSON>] [VARIANTS=hybrid,bm25,vector,fields,cards,titles,planned,...] [TODAY=YYYY-MM-DD] [PLANS=<previous JSON>] [REINDEX=1 CONTENT=<home's content dir>])
 # A developer's tool: go run, so nothing lands in ./bin; built with the
 # release's version stamp, which the report records. It migrates the
 # database it reads and refuses a home's own, like cluster-report, and
 # embeds the queries, and the copy's stale cards, through config.yaml's
-# Ollama, which must have the model: it never pulls one. REINDEX=1 first
-# re-embeds the copy's chunks that predate the chunk context, as the
-# daemon would, from the markdown under CONTENT (the copy's home's content
-# directory). Keep the query file and the JSON report out of the
-# repository. See cmd/searcheval.
+# Ollama, which must have the model: it never pulls one. The planned
+# variants plan each query with config.yaml's planner model, as of TODAY,
+# or replay PLANS, a previous report's plans. REINDEX=1 first re-embeds the
+# copy's chunks that predate the chunk context, as the daemon would, from
+# the markdown under CONTENT (the copy's home's content directory). Keep
+# the query file and the JSON report out of the repository. See
+# cmd/searcheval.
 .PHONY: search-eval
 search-eval:
-	@test -n "$(DB)" && test -n "$(QUERIES)" || { echo 'usage: make search-eval DB=<copy of curio.db> QUERIES=<file> [CONFIG=<config.yaml>] [JSON=<file>] [BASELINE=<previous JSON>] [VARIANTS=hybrid,bm25,vector,fields,cards,titles] [REINDEX=1 CONTENT=<dir>]' >&2; exit 2; }
-	$(GO) run -tags=$(GOTAGS) -ldflags "$(LDFLAGS)" ./cmd/searcheval -db "$(DB)" -queries "$(QUERIES)" $(if $(CONFIG),-config "$(CONFIG)") $(if $(JSON),-json "$(JSON)") $(if $(BASELINE),-baseline "$(BASELINE)") $(if $(VARIANTS),-variants "$(VARIANTS)") $(if $(REINDEX),-reindex) $(if $(CONTENT),-content "$(CONTENT)")
+	@test -n "$(DB)" && test -n "$(QUERIES)" || { echo 'usage: make search-eval DB=<copy of curio.db> QUERIES=<file> [CONFIG=<config.yaml>] [JSON=<file>] [BASELINE=<previous JSON>] [VARIANTS=hybrid,bm25,vector,fields,cards,titles,planned,planned-filters,planned-rewrites,planned-names] [TODAY=YYYY-MM-DD] [PLANS=<previous JSON>] [REINDEX=1 CONTENT=<dir>]' >&2; exit 2; }
+	$(GO) run -tags=$(GOTAGS) -ldflags "$(LDFLAGS)" ./cmd/searcheval -db "$(DB)" -queries "$(QUERIES)" $(if $(CONFIG),-config "$(CONFIG)") $(if $(JSON),-json "$(JSON)") $(if $(BASELINE),-baseline "$(BASELINE)") $(if $(VARIANTS),-variants "$(VARIANTS)") $(if $(TODAY),-today "$(TODAY)") $(if $(PLANS),-plans "$(PLANS)") $(if $(REINDEX),-reindex) $(if $(CONTENT),-content "$(CONTENT)")
+
+## planner-check: measure a writing model as search understanding's planner on this machine (MODEL=<name> [CONFIG=<config.yaml>])
+# A developer's tool: go run, so nothing lands in ./bin. It runs the
+# fitness check the daemon runs, times plans of made-up questions against
+# search.understand_timeout_seconds, and reads Ollama's /api/ps after a
+# query embed: whether the model stays loaded beside the embedder. It
+# never pulls a model, and unloads the one it loaded. See cmd/plannercheck.
+.PHONY: planner-check
+planner-check:
+	$(GO) run -tags=$(GOTAGS) ./cmd/plannercheck $(if $(MODEL),-model "$(MODEL)") $(if $(CONFIG),-config "$(CONFIG)")
 
 ## vet: go vet
 .PHONY: vet

@@ -39,6 +39,15 @@
 // to embed a query within search.embed_timeout_seconds degrades that
 // search, which is ranked again once; a second degraded search fails the
 // run: run it again with Ollama idle.
+//
+// The planned variants measure search understanding: before the first,
+// the tool loads config.yaml's planner model (whatever search.understand
+// says), runs its fitness check, and plans every query once, as of
+// -today, each plan searched in place of the query's filters, which then
+// serve as the oracle the plan's are compared with. The check's verdict is
+// reported, and the variants run whatever it is: the tool measures the
+// planner. -plans replays a previous report's plans instead, asking no
+// model, so a later change is measured without the planner's variance.
 package main
 
 import (
@@ -54,6 +63,7 @@ import (
 	"slices"
 	"strings"
 	"syscall"
+	"time"
 )
 
 func main() {
@@ -71,6 +81,10 @@ type options struct {
 	json     string
 	baseline string
 	variants []variant
+	// today is the day the planner is told is today, as its noon local
+	// time, and plans the report whose plans the planned variants replay.
+	today time.Time
+	plans string
 	// reindex re-embeds the copy's chunks that predate the chunk context
 	// before any query, from the markdown under content.
 	reindex bool
@@ -105,12 +119,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	return exitOK
 }
 
-// dropQueryText leaves a query's text out of the log. The engine names it
-// in a degraded search's warning; the tool names queries by id alone, as
-// its report does, so a private test set stays off the terminal and out of
-// any log a run is kept in.
+// dropQueryText leaves a query's text, and its plan's rewrites and names,
+// out of the log, should any record carry them: the tool names queries by
+// id alone, as its report does, so a private test set stays off the
+// terminal and out of any log a run is kept in.
 func dropQueryText(groups []string, a slog.Attr) slog.Attr {
-	if len(groups) == 0 && a.Key == "query" {
+	if len(groups) == 0 && (a.Key == "query" || a.Key == "rewrites" || a.Key == "names") {
 		return slog.Attr{}
 	}
 	return a
@@ -121,7 +135,9 @@ func dropQueryText(groups []string, a slog.Attr) slog.Attr {
 func complain(stderr io.Writer, msg string) { _, _ = io.WriteString(stderr, msg) }
 
 const usageLine = "usage: searcheval -db <copy of curio.db> -queries <file> [-config <config.yaml>] [-json <file>] " +
-	"[-baseline <previous -json>] [-variants hybrid,bm25,vector,fields,cards,titles] [-reindex -content <dir>]\n"
+	"[-baseline <previous -json>] " +
+	"[-variants hybrid,bm25,vector,fields,cards,titles,planned,planned-filters,planned-rewrites,planned-names] " +
+	"[-today YYYY-MM-DD] [-plans <previous -json>] [-reindex -content <dir>]\n"
 
 // parseFlags parses args, writing what is wrong and the usage to out on a
 // usage error, and the usage alone for -h.
@@ -129,6 +145,7 @@ func parseFlags(args []string, out *bytes.Buffer) (options, error) {
 	var (
 		opts     options
 		variants string
+		today    string
 	)
 	fs := flag.NewFlagSet("searcheval", flag.ContinueOnError)
 	fs.SetOutput(out)
@@ -138,6 +155,9 @@ func parseFlags(args []string, out *bytes.Buffer) (options, error) {
 	fs.StringVar(&opts.json, "json", "", "also write every number to this file, as JSON")
 	fs.StringVar(&opts.baseline, "baseline", "", "a previous run's -json report to compare with")
 	fs.StringVar(&variants, "variants", "hybrid", "the variants to run, in order: "+strings.Join(variantNames(), ", "))
+	fs.StringVar(&today, "today", "", "the day the planner is told is today, YYYY-MM-DD (default: the local date)")
+	fs.StringVar(&opts.plans, "plans", "", "a previous run's -json report whose plans the planned variants replay, "+
+		"asking no model")
 	fs.BoolVar(&opts.reindex, "reindex", false, "re-embed the copy's chunks that predate the chunk context first, "+
 		"from the markdown under -content")
 	fs.StringVar(&opts.content, "content", "", "the content directory of the home the copy is from (with -reindex)")
@@ -162,6 +182,12 @@ func parseFlags(args []string, out *bytes.Buffer) (options, error) {
 		problem = "-content is read only with -reindex"
 	default:
 		opts.variants, problem = parseVariants(variants)
+	}
+	if problem == "" {
+		var err error
+		if opts.today, err = parseToday(today, time.Now()); err != nil {
+			problem = err.Error()
+		}
 	}
 	if problem == "" {
 		return opts, nil

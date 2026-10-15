@@ -339,8 +339,8 @@ var ErrNoMarkdown = errors.New("no markdown to index")
 // gone, until it is refetched, and one with a chunk the embedding model
 // can't take even without its context. It tells the re-embed (Deps.Reembed)
 // of a document re-embedded and of an attempt that failed, which its brake
-// goes by; a deferral, a shutdown and a document it had no need or way to
-// re-embed are neither.
+// goes by, while the job still runs (Reembed.Failed says why); a deferral,
+// a shutdown and a document it had no need or way to re-embed are neither.
 func indexHandler(d Deps) HandlerFunc {
 	return func(ctx context.Context, job *store.Job) error {
 		start := time.Now()

@@ -91,13 +91,17 @@ func (x *listIndex) SearchTitles(_ context.Context, _, _ string, limit int, _ st
 	return x.titles, x.titlesErr
 }
 
-// countingEmbedder embeds every query as one 1-wide vector, counting the
+// countingEmbedder embeds every text as a 1-wide vector, counting the
 // calls.
 type countingEmbedder struct{ calls atomic.Int32 }
 
-func (e *countingEmbedder) Embed(context.Context, []string) ([][]float32, error) {
+func (e *countingEmbedder) Embed(_ context.Context, texts []string) ([][]float32, error) {
 	e.calls.Add(1)
-	return [][]float32{{1}}, nil
+	out := make([][]float32, len(texts))
+	for i := range out {
+		out[i] = []float32{1}
+	}
+	return out, nil
 }
 
 func chunkHit(chunk, doc string) store.ChunkHit {

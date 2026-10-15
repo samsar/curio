@@ -27,6 +27,7 @@ import (
 	"github.com/samsar/curio/internal/ollama"
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/understand"
 )
 
 // These tests hold the router and the handlers to api/openapi.yaml: the same
@@ -270,6 +271,9 @@ func assertFieldsMatch(t *testing.T, path string, typ reflect.Type, schema *open
 			continue
 		}
 		s := prop.Value
+		if ft.Kind() == reflect.Pointer {
+			ft = ft.Elem()
+		}
 		if ft.Kind() == reflect.Slice {
 			ft, s = ft.Elem(), s.Items.Value
 		}
@@ -307,6 +311,23 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 		d.Search = search.New(d.Chunks, d.Documents, d.Index, emb, search.Config{BM25Weight: 1, VectorWeight: 1,
 			FieldsWeight: 1, Log: slog.New(slog.DiscardHandler)})
 		d.Embedder = pingingEmbedder{err: fmt.Errorf("%w: connection refused", ollama.ErrUnreachable)}
+		// "kafka" is planned, with a filter its guards dropped; anything
+		// else finds the model loading.
+		// Its state with every field set: unfit, held both ways, and failed.
+		now := time.Now()
+		d.Planner = statePlanner{Planner: plannerFunc(func(_ context.Context, q string) (understand.Outcome, error) {
+			if q != "kafka" {
+				return understand.Outcome{Status: understand.StatusCold, Reason: "gemma4:26b is loading",
+					Model: "gemma4:26b"}, nil
+			}
+			out := plannedKafka()
+			out.Plan.Filters.SavedAfter = "2017-01-01T00:00:00-05:00"
+			return out, nil
+		}), state: understand.State{On: true, Model: "gemma4:26b", Reason: "questions would leave this machine",
+			Check: understand.CheckUnfit, CheckedAt: now, Unfit: `gemma4:26b didn't pass the check "no filter"`,
+			Last: understand.StatusTimeout, LastAt: now, TimeoutHoldUntil: now.Add(2 * time.Minute),
+			EvictionHoldUntil: now.Add(15 * time.Minute),
+			Failure:           understand.Failure{Cause: "evicted", At: now, Err: "unloaded within its keep-alive 2 times"}}}
 		d.Drift = monitor
 		d.Bookmarks = unsavableBookmark{BookmarkStore: d.Bookmarks, url: "https://example.com/unsavable"}
 		d.YouTubeFetcher = "/opt/homebrew/bin/yt-dlp"
@@ -450,6 +471,17 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 			`"site":["www.example.com"],"folder":["/Reading"],"source":["chrome"],"content_type":["article"]}}`),
 			http.StatusOK},
 		{"POST /v1/search", jsonBody(http.MethodPost, "/v1/search", `{"query":"kafka","filters":{"site":["*"]}}`),
+			http.StatusBadRequest},
+		{"POST /v1/search", jsonBody(http.MethodPost, "/v1/search", `{"query":"kafka","understand":true}`),
+			http.StatusOK},
+		{"POST /v1/search", jsonBody(http.MethodPost, "/v1/search", `{"query":"kafka log","understand":true}`),
+			http.StatusOK},
+		{"POST /v1/search", jsonBody(http.MethodPost, "/v1/search", `{"query":"kafka","plan":{"kind":"list",`+
+			`"filters":{"content_type":["article"],"host":["example.com"],"source":["chrome"],"site":["example.com"],`+
+			`"folder":["/Reading"],"saved_after":"2015-01-01","saved_before":"2030-01-01",`+
+			`"published_after":"2000-01-01","published_before":"2030-01-01","include_undated":true},`+
+			`"rewrites":["kafka log"],"names":["Kafka Guide"]}}`), http.StatusOK},
+		{"POST /v1/search", jsonBody(http.MethodPost, "/v1/search", `{"query":"kafka","plan":{"kind":"summary"}}`),
 			http.StatusBadRequest},
 		{"GET /v1/failures", get("/v1/failures"), http.StatusOK},
 

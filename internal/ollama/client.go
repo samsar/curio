@@ -151,6 +151,62 @@ func (c *Client) lookup(ctx context.Context) (tagEntry, error) {
 	return tagEntry{}, fmt.Errorf("%w: %s", ErrModelNotLoaded, c.model)
 }
 
+// Running is a model Ollama holds in memory, as GET /api/ps lists it: its
+// name, its size in memory and in VRAM, the context it was loaded with,
+// and when its keep-alive runs out.
+type Running struct {
+	Name          string    `json:"name"`
+	Model         string    `json:"model"`
+	Size          int64     `json:"size"`
+	SizeVRAM      int64     `json:"size_vram"`
+	ContextLength int       `json:"context_length"`
+	ExpiresAt     time.Time `json:"expires_at"`
+}
+
+// Running lists the models Ollama holds in memory now, from GET /api/ps.
+// No answer, or an error status, wraps ErrUnreachable.
+func (c *Client) Running(ctx context.Context) ([]Running, error) {
+	resp, err := c.send(ctx, http.MethodGet, "/api/ps", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if !ok(resp) {
+		return nil, fmt.Errorf("%w: /api/ps: %w", ErrUnreachable, statusError(resp))
+	}
+	var ps struct {
+		Models []Running `json:"models"`
+	}
+	if err := decodeJSON(resp.Body, &ps, MaxResponseBody); err != nil {
+		return nil, fmt.Errorf("/api/ps: %w", err)
+	}
+	return ps.Models, nil
+}
+
+// Is reports whether r is the model named name, matched as Ping matches
+// /api/tags: case aside, an untagged name being :latest.
+func (r Running) Is(name string) bool {
+	want := normalizeModel(name)
+	return normalizeModel(r.Name) == want || normalizeModel(r.Model) == want
+}
+
+// Loaded reports whether Ollama holds the model in memory now, from GET
+// /api/ps, matched by name as Ping matches /api/tags: a request for a
+// model that isn't loaded waits for its load, seconds for a large one. No
+// answer, or an error status, wraps ErrUnreachable.
+func (c *Client) Loaded(ctx context.Context) (bool, error) {
+	running, err := c.Running(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, m := range running {
+		if m.Is(c.model) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // ModelDigest is the manifest digest of the model as Ollama has it pulled,
 // the one `ollama list` shows, read from GET /api/tags. It changes when a
 // pull brings a different build of the model. A model that isn't pulled is

@@ -77,6 +77,34 @@ type Health struct {
 	// ReembedBrake is the re-embed's brake while it stops the re-embed;
 	// nil while it doesn't.
 	ReembedBrake *ReembedBrake `json:"reembed_brake,omitempty"`
+	// Understanding is what the daemon's planner knows of its model; nil
+	// from a daemon that predates saying so.
+	Understanding *UnderstandingHealth `json:"understanding,omitempty"`
+}
+
+// UnderstandingHealth mirrors api.UnderstandingHealth: whether search
+// understanding is on, its model, why no question is planned at all, the
+// fitness check's verdict, the last question's status, the holds in
+// effect, and the last failure.
+type UnderstandingHealth struct {
+	On                bool                  `json:"on"`
+	Model             string                `json:"model,omitempty"`
+	Reason            string                `json:"reason,omitempty"`
+	Check             string                `json:"check,omitempty"`
+	CheckedAt         time.Time             `json:"checked_at,omitzero"`
+	Unfit             string                `json:"unfit,omitempty"`
+	LastStatus        string                `json:"last_status,omitempty"`
+	LastAt            time.Time             `json:"last_at,omitzero"`
+	TimeoutHoldUntil  time.Time             `json:"timeout_hold_until,omitzero"`
+	EvictionHoldUntil time.Time             `json:"eviction_hold_until,omitzero"`
+	LastFailure       *UnderstandingFailure `json:"last_failure,omitempty"`
+}
+
+// UnderstandingFailure mirrors api.UnderstandingFailure.
+type UnderstandingFailure struct {
+	Cause string    `json:"cause"`
+	At    time.Time `json:"at"`
+	Error string    `json:"error,omitempty"`
 }
 
 // EmbedderHold mirrors api.EmbedderHold: since when the embedding model
@@ -475,10 +503,44 @@ func (c *Client) GetDocumentContent(ctx context.Context, id string) (string, err
 }
 
 // SearchRequest body. K 0 is omitted, so the daemon's search.default_k applies.
+//
+// Understand asks the daemon's planner what the query means, and Plan
+// searches by a plan a response's Understanding returned, asking no model;
+// send one or neither. Both are sent only when set: a daemon older than
+// understanding refuses either with its unknown-field 400.
 type SearchRequest struct {
-	Query   string         `json:"query"`
-	K       int            `json:"k,omitempty"`
-	Filters *SearchFilters `json:"filters,omitempty"`
+	Query      string         `json:"query"`
+	K          int            `json:"k,omitempty"`
+	Filters    *SearchFilters `json:"filters,omitempty"`
+	Understand bool           `json:"understand,omitempty"`
+	Plan       *Plan          `json:"plan,omitempty"`
+}
+
+// Plan mirrors api.PlanJSON: what a search does for a query besides its
+// words.
+type Plan struct {
+	Kind     string        `json:"kind"`
+	Filters  SearchFilters `json:"filters,omitzero"`
+	Rewrites []string      `json:"rewrites,omitempty"`
+	Names    []string      `json:"names,omitempty"`
+}
+
+// Understanding mirrors api.Understanding: how the query was understood.
+// Status is planned or supplied with a Plan, and otherwise why the query's
+// words were searched, Reason saying more.
+type Understanding struct {
+	Status  string          `json:"status"`
+	Reason  string          `json:"reason,omitempty"`
+	Model   string          `json:"model,omitempty"`
+	TookMS  int64           `json:"took_ms"`
+	Plan    *Plan           `json:"plan,omitempty"`
+	Dropped []DroppedFilter `json:"dropped,omitempty"`
+}
+
+// DroppedFilter mirrors api.DroppedFilter.
+type DroppedFilter struct {
+	Field  string `json:"field"`
+	Reason string `json:"reason"`
 }
 
 // SearchFilters scopes a search, as api.Filters reads it. Nil/omitted
@@ -779,8 +841,10 @@ type SearchResponse struct {
 	Warnings   []string `json:"warnings,omitempty"`
 	// Undated is, for a search with a date filter, how many documents the
 	// filter couldn't judge; nil without one.
-	Undated *int        `json:"undated,omitempty"`
-	Items   []SearchHit `json:"items"`
+	Undated *int `json:"undated,omitempty"`
+	// Understanding is set when the request sent Understand or Plan.
+	Understanding *Understanding `json:"understanding,omitempty"`
+	Items         []SearchHit    `json:"items"`
 }
 
 func (c *Client) Search(ctx context.Context, req SearchRequest) (*SearchResponse, error) {

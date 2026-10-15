@@ -172,7 +172,7 @@ func (l *LLMLabeler) Label(ctx context.Context, info ClusterInfo) (Label, error)
 		prompt = l.areaPrompt(info)
 	}
 	out, err := l.gen.Generate(ctx, prompt, generator.Options{
-		Temperature: 0.2,
+		Temperature: new(0.2),
 		MaxTokens:   120,
 		System:      labelSystemPrompt,
 	})

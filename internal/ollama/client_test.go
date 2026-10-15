@@ -247,6 +247,85 @@ func TestModelDigest(t *testing.T) {
 	}
 }
 
+// TestRunning: /api/ps's models, with their sizes, context and expiry, as
+// Ollama lists them; Is matches a name as Ping does.
+func TestRunning(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/ps", r.URL.Path)
+		fmt.Fprint(w, `{"models":[{"name":"gemma4:12b","model":"gemma4:12b","size":9100000000,`+
+			`"size_vram":8800000000,"context_length":8192,"expires_at":"2026-10-14T15:30:00Z"},`+
+			`{"name":"","model":"qwen3-embedding:0.6b"}]}`)
+	}))
+	t.Cleanup(srv.Close)
+	running, err := newClient(t, srv.URL, "gemma4:12b").Running(context.Background())
+	require.NoError(t, err)
+	require.Len(t, running, 2)
+	assert.Equal(t, Running{Name: "gemma4:12b", Model: "gemma4:12b", Size: 9_100_000_000, SizeVRAM: 8_800_000_000,
+		ContextLength: 8192, ExpiresAt: time.Date(2026, 10, 14, 15, 30, 0, 0, time.UTC)}, running[0])
+	assert.True(t, running[0].Is("Gemma4:12B"))
+	assert.True(t, running[1].Is("qwen3-embedding:0.6b"))
+	assert.False(t, running[1].Is("qwen3-embedding"), "an untagged name is :latest")
+
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(down.Close)
+	_, err = newClient(t, down.URL, "gemma4:12b").Running(context.Background())
+	require.ErrorIs(t, err, ErrUnreachable)
+}
+
+// TestLoaded: /api/ps lists the models in memory, matched by name or
+// model as /api/tags is, untagged meaning :latest; an error status, a
+// reply over the cap or no answer at all is an error.
+func TestLoaded(t *testing.T) {
+	const ps = `{"models":[{"name":"gemma4:26b","model":"gemma4:26b","size_vram":19000000000},` +
+		`{"name":"","model":"llama3.2:latest"}]}`
+	cases := []struct {
+		name    string
+		model   string
+		body    string
+		status  int
+		want    bool
+		wantErr error
+		errText string
+	}{
+		{"loaded, by name", "gemma4:26b", ps, 200, true, nil, ""},
+		{"loaded, by model, untagged is :latest", "llama3.2", ps, 200, true, nil, ""},
+		{"names compare case insensitively", "Gemma4:26B", ps, 200, true, nil, ""},
+		{"another tag isn't the model", "gemma4:12b", ps, 200, false, nil, ""},
+		{"nothing loaded", "gemma4:26b", `{"models":[]}`, 200, false, nil, ""},
+		{"server error", "gemma4:26b", "oops", 500, false, ErrUnreachable, ""},
+		{"a reply over the cap", "gemma4:26b", `{"models":[{"name":"` + strings.Repeat("a", MaxResponseBody) + `"}]}`,
+			200, false, nil, "exceeds"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, http.MethodGet, r.Method)
+				assert.Equal(t, "/api/ps", r.URL.Path)
+				w.WriteHeader(tc.status)
+				fmt.Fprint(w, tc.body)
+			}))
+			t.Cleanup(srv.Close)
+			got, err := newClient(t, srv.URL, tc.model).Loaded(context.Background())
+			switch {
+			case tc.wantErr != nil:
+				require.ErrorIs(t, err, tc.wantErr)
+			case tc.errText != "":
+				require.ErrorContains(t, err, tc.errText)
+			default:
+				require.NoError(t, err)
+				assert.Equal(t, tc.want, got)
+			}
+		})
+	}
+	t.Run("no answer", func(t *testing.T) {
+		_, err := newClient(t, "http://"+closedAddr(t), "gemma4:26b").Loaded(context.Background())
+		require.ErrorIs(t, err, ErrUnreachable)
+		require.ErrorIs(t, err, syscall.ECONNREFUSED)
+	})
+}
+
 func TestVersion(t *testing.T) {
 	cases := []struct {
 		name    string

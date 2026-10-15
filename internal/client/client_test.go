@@ -24,7 +24,9 @@ import (
 	"github.com/samsar/curio/internal/drift"
 	"github.com/samsar/curio/internal/fetcher"
 	"github.com/samsar/curio/internal/insight"
+	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/understand"
 )
 
 // Every exported method round-trips through the daemon's real router over a
@@ -784,6 +786,42 @@ func TestSearch_HitWithoutMatches(t *testing.T) {
 	assert.Equal(t, "/Favorites/Baking", hit.Bookmarks[0].FolderPath)
 	assert.Equal(t, store.SourceSafari, hit.Bookmarks[0].Source)
 	assert.False(t, hit.Bookmarks[0].SavedAt.IsZero())
+}
+
+// TestSearch_Understanding: a search that asks for understanding decodes
+// the plan the daemon searched by, and sending that plan back searches by
+// it again without asking the planner; a request asking for neither sends
+// neither field, so a daemon older than understanding takes it.
+func TestSearch_Understanding(t *testing.T) {
+	planner := apitest.NewPlanner(understand.Outcome{Status: understand.StatusPlanned, Model: "gemma4:26b",
+		Took: 900 * time.Millisecond, Plan: &understand.Plan{Kind: understand.KindList,
+			Filters:  search.FilterRequest{SavedAfter: "2018-06-01T00:00:00-04:00"},
+			Rewrites: []string{"kafka brokers"}, Names: []string{"Kafka: The Definitive Guide"}},
+		Dropped: []understand.Dropped{{Field: "content_type", Reason: `the question doesn't name the type "pdf"`}}})
+	s := apitest.Start(t, apitest.WithPlanner(planner))
+	c := client.New(s.URL)
+	ctx := context.Background()
+
+	res, err := c.Search(ctx, client.SearchRequest{Query: "kafka from this summer", Understand: true})
+	require.NoError(t, err)
+	want := &client.Plan{Kind: "list", Filters: client.SearchFilters{SavedAfter: "2018-06-01T00:00:00-04:00"},
+		Rewrites: []string{"kafka brokers"}, Names: []string{"Kafka: The Definitive Guide"}}
+	assert.Equal(t, &client.Understanding{Status: "planned", Model: "gemma4:26b", TookMS: 900, Plan: want,
+		Dropped: []client.DroppedFilter{{Field: "content_type", Reason: `the question doesn't name the type "pdf"`}}},
+		res.Understanding)
+
+	res, err = c.Search(ctx, client.SearchRequest{Query: "kafka from this summer", Plan: res.Understanding.Plan})
+	require.NoError(t, err)
+	assert.Equal(t, "supplied", res.Understanding.Status)
+	assert.Equal(t, want, res.Understanding.Plan)
+	assert.Equal(t, []string{"kafka from this summer"}, planner.Questions(), "the planner is asked once")
+
+	res, err = c.Search(ctx, client.SearchRequest{Query: "kafka"})
+	require.NoError(t, err)
+	assert.Nil(t, res.Understanding)
+	body, err := json.Marshal(client.SearchRequest{Query: "kafka"})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"query":"kafka"}`, string(body))
 }
 
 func TestInterests(t *testing.T) {

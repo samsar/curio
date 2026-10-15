@@ -201,6 +201,12 @@ func runOwnChecks(ctx context.Context, flags *rootFlags, d deps, r *doctorReport
 				status, detail, hint := savedDatesCheck(*s)
 				r.add("saved dates", status, detail, hint)
 			}
+			// Whether search understanding plans questions, as the planner
+			// knows its model.
+			if u := health.Understanding; u != nil {
+				status, detail, hint := understandingCheck(*u)
+				r.add("understanding", status, detail, hint)
+			}
 			// Whether the daemon holds its index and cards jobs for an
 			// embedding model that doesn't answer: only while it does.
 			if h := health.EmbedderHold; h != nil {
@@ -338,6 +344,48 @@ const embedderFix = "start Ollama, and make sure it serves the embedding model: 
 func embedderHoldCheck(h client.EmbedderHold) (status checkStatus, detail, hint string) {
 	return statusWarn, fmt.Sprintf("held since %s: the embedding model doesn't answer (%s); index and cards jobs "+
 		"wait for it, failing nothing", localTime(h.Since), h.Error), embedderFix
+}
+
+// The fitness check's verdict on an unfit model, as healthz says it.
+const checkUnfit = "unfit"
+
+// Fixes for search understanding that plans no question: a model that
+// failed its check (understand.UnfitFix, which its reason ends with), one
+// Ollama keeps unloading, and plans that keep timing out.
+const (
+	unfitFix = "set generation.roles.planner.model to a model that passes, or search.understand: false"
+	evictFix = "the planner's model and the embedder don't fit in memory together: give the planner a smaller " +
+		"model (generation.roles.planner.model), or set search.understand: false"
+	slowFix = "give the planner a faster model (generation.roles.planner.model) or more time " +
+		"(search.understand_timeout_seconds), or set search.understand: false"
+)
+
+// understandingCheck is doctor's check of search understanding, as the
+// daemon's planner knows its model, from its memory: a warning while
+// understanding is on and no question can get a plan (withheld from the
+// model, a model that failed its check, one Ollama keeps unloading, plans
+// that keep timing out), each with its fix; otherwise how the model
+// stands.
+func understandingCheck(u client.UnderstandingHealth) (status checkStatus, detail, hint string) {
+	switch {
+	case !u.On:
+		return statusOK, "off (search.understand: false)", ""
+	case u.Reason != "":
+		return statusWarn, "every search uses its words: " + u.Reason, ""
+	case u.Check == checkUnfit:
+		return statusWarn, fmt.Sprintf("%s (checked %s); every search uses its words",
+			strings.TrimSuffix(u.Unfit, "; "+unfitFix), localTime(u.CheckedAt)), unfitFix
+	case !u.EvictionHoldUntil.IsZero():
+		return statusWarn, fmt.Sprintf("Ollama unloaded %s within its keep-alive twice, for other models; curio "+
+			"doesn't load it again until %s, and searches use their words meanwhile", u.Model,
+			localTime(u.EvictionHoldUntil)), evictFix
+	case !u.TimeoutHoldUntil.IsZero():
+		return statusWarn, fmt.Sprintf("plans with %s kept taking longer than the timeout; searches use their "+
+			"words until %s", u.Model, localTime(u.TimeoutHoldUntil)), slowFix
+	case u.Check == "fit":
+		return statusOK, fmt.Sprintf("%s passed its check (%s)", u.Model, localTime(u.CheckedAt)), ""
+	}
+	return statusOK, u.Model + " not checked yet: the first understood search loads and checks it", ""
 }
 
 // reembedCheckOf asks c whether index jobs are pending or running when
