@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"log/slog"
 	"math"
 	"os"
@@ -176,6 +177,24 @@ func TestValidate(t *testing.T) {
 			c.Search.TitleWeight = 0
 		}, "search.bm25_weight, vector_weight, fields_weight, cards_weight and title_weight must not all be 0"},
 		{"zero embed timeout", func(c *Config) { c.Search.EmbedTimeoutSeconds = 0 }, "search.embed_timeout_seconds"},
+		{"zero understand timeout", func(c *Config) { c.Search.UnderstandTimeoutSeconds = 0 },
+			"search.understand_timeout_seconds must be in [1, 23], got 0"},
+		{"negative understand timeout", func(c *Config) { c.Search.UnderstandTimeoutSeconds = -1 },
+			"search.understand_timeout_seconds must be in [1, 23], got -1"},
+		{"an understand timeout past the CLI's budget alone", func(c *Config) { c.Search.UnderstandTimeoutSeconds = 24 },
+			"search.understand_timeout_seconds must be in [1, 23], got 24"},
+		{"zero keep-alive", func(c *Config) { c.Search.UnderstandKeepAliveMinutes = 0 },
+			"search.understand_keep_alive_minutes must be in [1, 1440], got 0"},
+		{"a keep-alive past a day", func(c *Config) { c.Search.UnderstandKeepAliveMinutes = 1441 },
+			"search.understand_keep_alive_minutes must be in [1, 1440], got 1441"},
+		{"NaN rewrite weight", func(c *Config) { c.Search.RewriteWeight = math.NaN() },
+			"search.rewrite_weight must be a finite number >= 0, got NaN"},
+		{"negative rewrite weight", func(c *Config) { c.Search.RewriteWeight = -0.5 }, "search.rewrite_weight"},
+		{"infinite rewrite weight", func(c *Config) { c.Search.RewriteWeight = math.Inf(1) }, "search.rewrite_weight"},
+		{"NaN name weight", func(c *Config) { c.Search.NameWeight = math.NaN() }, "search.name_weight"},
+		{"negative name weight", func(c *Config) { c.Search.NameWeight = -1 }, "search.name_weight"},
+		{"infinite name weight", func(c *Config) { c.Search.NameWeight = math.Inf(1) },
+			"search.name_weight must be a finite number >= 0, got +Inf"},
 		{"zero rrf_k", func(c *Config) { c.Search.RRFK = 0 }, "search.rrf_k"},
 		{"bad collapse", func(c *Config) { c.Search.Collapse = "average" }, "search.collapse"},
 		{"zero web2md timeout", func(c *Config) { c.Fetcher.Web2MD.TimeoutSeconds = 0 }, "web2md.timeout_seconds"},
@@ -504,17 +523,111 @@ func TestValidate_OneZeroWeightIsAllowed(t *testing.T) {
 	}
 }
 
-// TestDefault_Roles: without generation.roles, the one role writes with
-// generation's own settings, and it is in use.
+// TestDefault_Roles: without generation.roles, every role writes with
+// generation's own settings, and both are in use.
 func TestDefault_Roles(t *testing.T) {
 	d := Default()
 	assert.Nil(t, d.Generation.Roles)
-	assert.Equal(t, ModelSpec{Provider: "ollama", Model: "qwen3:4b-instruct", BaseURL: "http://localhost:11434",
-		TimeoutSeconds: 120}, d.Generation.Role(RoleLabels))
-	assert.Equal(t, []Role{RoleLabels}, d.RolesInUse())
-	assert.Equal(t, []Role{RoleLabels}, Roles())
+	want := ModelSpec{Provider: "ollama", Model: "qwen3:4b-instruct", BaseURL: "http://localhost:11434",
+		TimeoutSeconds: 120}
+	assert.Equal(t, want, d.Generation.Role(RoleLabels))
+	assert.Equal(t, want, d.Generation.Role(RolePlanner))
+	assert.Equal(t, []Role{RoleLabels, RolePlanner}, d.RolesInUse())
+	assert.Equal(t, []Role{RoleLabels, RolePlanner}, Roles())
 	assert.Equal(t, "interest labels", RoleLabels.UsedFor())
+	assert.Equal(t, "search understanding", RolePlanner.UsedFor())
 	assert.Empty(t, Role("lables").UsedFor())
+}
+
+// TestDefault_Understanding: search understands questions by default,
+// within 5 s a plan, its rewrites at half the question's weight and its
+// names at the question's.
+func TestDefault_Understanding(t *testing.T) {
+	s := Default().Search
+	assert.True(t, s.Understand)
+	assert.Equal(t, 5, s.UnderstandTimeoutSeconds)
+	assert.Equal(t, 30, s.UnderstandKeepAliveMinutes)
+	assert.Equal(t, 0.5, s.RewriteWeight)
+	assert.Equal(t, 1.0, s.NameWeight)
+}
+
+// TestLoad_Understanding: the keys load, and zero weights leave a plan's
+// rewrites and names out, which Validate takes.
+func TestLoad_Understanding(t *testing.T) {
+	got, err := Load(writeConfig(t, "search:\n  understand: false\n  understand_timeout_seconds: 8\n"+
+		"  understand_keep_alive_minutes: 5\n  rewrite_weight: 0\n  name_weight: 0\n"))
+	require.NoError(t, err)
+	assert.False(t, got.Search.Understand)
+	assert.Equal(t, 8, got.Search.UnderstandTimeoutSeconds)
+	assert.Equal(t, 5, got.Search.UnderstandKeepAliveMinutes)
+	assert.Zero(t, got.Search.RewriteWeight)
+	assert.Zero(t, got.Search.NameWeight)
+}
+
+// TestLoad_A26EmbedTimeout: a config.yaml 2.6 took is taken, understanding
+// on by default: an embed timeout that leaves a plan little or no room
+// within the CLI's 30 s is the planner's to deal with (it shortens its
+// timeout, or understands nothing), never a refused daemon start.
+func TestLoad_A26EmbedTimeout(t *testing.T) {
+	for _, embed := range []int{19, 20, 29} {
+		got, err := Load(writeConfig(t, fmt.Sprintf("search:\n  embed_timeout_seconds: %d\n", embed)))
+		require.NoError(t, err, "embed_timeout_seconds: %d", embed)
+		assert.True(t, got.Search.Understand)
+		assert.Equal(t, embed, got.Search.EmbedTimeoutSeconds)
+	}
+}
+
+// TestPullsAlone: the daemon pulls the labels' model on its own, and the
+// planner's only with another role's pull of the same model.
+func TestPullsAlone(t *testing.T) {
+	assert.True(t, RoleLabels.PullsAlone())
+	assert.False(t, RolePlanner.PullsAlone())
+	assert.False(t, Role("lables").PullsAlone())
+}
+
+// TestSharesModel: a role shares its model when another role in use
+// writes with the same provider, model and server, a trailing slash
+// aside.
+func TestSharesModel(t *testing.T) {
+	cfg := Default()
+	assert.True(t, cfg.SharesModel(RolePlanner), "both write with generation.model")
+	assert.True(t, cfg.SharesModel(RoleLabels))
+
+	cfg.Generation.Roles = map[Role]ModelSpec{RoleLabels: {BaseURL: cfg.Generation.BaseURL + "/"}}
+	assert.True(t, cfg.SharesModel(RolePlanner), "the same server")
+
+	cfg.Generation.Roles = map[Role]ModelSpec{RolePlanner: {Model: "gemma4:26b"}}
+	assert.False(t, cfg.SharesModel(RolePlanner), "a model of its own")
+
+	cfg.Generation.Roles = map[Role]ModelSpec{RolePlanner: {BaseURL: "http://127.0.0.1:11500"}}
+	assert.False(t, cfg.SharesModel(RolePlanner), "another server")
+
+	cfg = Default()
+	cfg.Insight.Labeling = "terms"
+	assert.False(t, cfg.SharesModel(RolePlanner), "labels not in use")
+}
+
+// TestOnThisMachine: a model server on loopback, at the unspecified
+// address (which connects to this machine), or the provider's default, is
+// on this machine; any other host isn't.
+func TestOnThisMachine(t *testing.T) {
+	for url, want := range map[string]bool{
+		"":                          true,
+		"http://localhost:11434":    true,
+		"http://LOCALHOST:11434":    true,
+		"http://127.0.0.1:11434":    true,
+		"http://127.0.0.2:11434/":   true,
+		"http://[::1]:11434":        true,
+		"http://0.0.0.0:11434":      true,
+		"http://[::]:11434":         true,
+		"http://gpu-box.lan:11434":  false,
+		"https://api.example.com":   false,
+		"http://192.168.1.20:11434": false,
+		"http://localhost.example":  false,
+		"://bad":                    false,
+	} {
+		assert.Equal(t, want, OnThisMachine(url), url)
+	}
 }
 
 // TestLoad_Roles: a role inherits every field it leaves out, or sets to 0
@@ -539,25 +652,34 @@ func TestLoad_Roles(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, ModelSpec{Provider: "ollama", Model: "qwen3:4b-instruct", BaseURL: "http://127.0.0.1:11600",
 		TimeoutSeconds: 30}, got.Generation.Role(RoleLabels))
+
+	got, err = Load(writeConfig(t, "generation:\n  model: gemma4:12b\n  roles:\n    planner:\n      model: gemma4:26b\n"))
+	require.NoError(t, err)
+	assert.Equal(t, "gemma4:26b", got.Generation.Role(RolePlanner).Model)
+	assert.Equal(t, "gemma4:12b", got.Generation.Role(RoleLabels).Model, "one role's model is its own")
 }
 
 // TestRolesInUse: labels is in use only while insight is on and labels
-// with an LLM.
+// with an LLM, and the planner only while search understands questions,
+// whatever insight says.
 func TestRolesInUse(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		enabled bool
-		label   string
-		want    []Role
+		name       string
+		enabled    bool
+		label      string
+		understand bool
+		want       []Role
 	}{
-		{"llm", true, "llm", []Role{RoleLabels}},
-		{"insight off", false, "llm", nil},
-		{"term labels", true, "terms", nil},
-		{"no labels", true, "off", nil},
+		{"llm", true, "llm", true, []Role{RoleLabels, RolePlanner}},
+		{"llm, no understanding", true, "llm", false, []Role{RoleLabels}},
+		{"insight off", false, "llm", true, []Role{RolePlanner}},
+		{"term labels", true, "terms", true, []Role{RolePlanner}},
+		{"no labels, no understanding", true, "off", false, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := Default()
 			cfg.Insight.Enabled, cfg.Insight.Labeling = tc.enabled, tc.label
+			cfg.Search.Understand = tc.understand
 			assert.Equal(t, tc.want, cfg.RolesInUse())
 		})
 	}
@@ -571,7 +693,7 @@ func TestLoad_RoleErrors(t *testing.T) {
 		name, yaml, want string
 	}{
 		{"an unknown role", "generation:\n  roles:\n    lables:\n      model: m:1\n",
-			`generation.roles: unknown role "lables"; the roles are: labels`},
+			`generation.roles: unknown role "lables"; the roles are: labels, planner`},
 		{"unknown roles, the first in order", "generation:\n  roles:\n    zeta: {}\n    alpha: {}\n",
 			`unknown role "alpha"`},
 		{"another provider", "generation:\n  roles:\n    labels:\n      provider: openai\n",
@@ -581,6 +703,8 @@ func TestLoad_RoleErrors(t *testing.T) {
 		{"a negative timeout", "generation:\n  roles:\n    labels:\n      timeout_seconds: -1\n",
 			"generation.roles.labels.timeout_seconds must be positive, got -1"},
 		{"an unknown key", "generation:\n  roles:\n    labels:\n      models: m:1\n", "field models not found"},
+		{"the planner's checked too", "generation:\n  roles:\n    planner:\n      timeout_seconds: -2\n",
+			"generation.roles.planner.timeout_seconds must be positive, got -2"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := Load(writeConfig(t, tc.yaml))

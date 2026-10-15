@@ -9,9 +9,10 @@ package pointers), where the result deviates from the plan, and what was
 deferred. Design reasoning lives in `docs/decisions.md`.
 
 **Where things stand:** M0–M4 are shipped. M6 is under way ahead of M5: its
-first PR, the search evaluation and model roles, is merged, and metadata
+first PR, the search evaluation and model roles, is merged; metadata
 search, real saved dates with search filters, and chunks embedded with
-their context are done. **Next: the rest of M6's 2.7 search work.**
+their context are done; and understanding the question is done. **Next:
+the rest of M6's 2.7 search work.**
 
 ## M0 — Walking skeleton
 
@@ -339,6 +340,40 @@ before it:
   nDCG@10 under the filters an ideal reading of their words sets rose
   from 0.406 to 0.932, and a narrow or site filter costs a search no more
   than 20 ms (decisions.md "Saved dates and search filters").
+- PR 3, done: understanding the question. A writing role, `planner`
+  (`generation.roles.planner`; `search.understand`, on by default),
+  turns a question into a plan in one structured Ollama call
+  (`internal/understand`): its kind, the filters it states, up to 3
+  rewrites and up to 4 names it points at by description. Code decides
+  what to trust: a strict decoding, filters kept only when the question's
+  own English words state them, never a site, folder or
+  `include_undated`, saved days as local midnights, and a three-question
+  fitness check before the model's first plan. The engine searches the
+  rewrites in every list at `search.rewrite_weight` (0.5) and the names
+  in the document lists at `search.name_weight` (1), in the one ranking
+  every page is cut from, its store reads bounded at 6 a search. `POST
+  /v1/search` takes `understand` or a `plan` sent back, and answers with
+  what it understood or why it searched the words (a cold or unchecked
+  model is never waited for); `curio search` understands by default
+  (`--literal`), the dashboard on Enter and never while you type,
+  carrying the plan in its address, and MCP stays literal. searcheval
+  gains the planned variants, `-today`, `-plans` replay and filter
+  agreement with a query file's oracle. On the owner's copy all
+  questions' nDCG@10 rose from 0.655 to 0.771, the owner-tagged ones'
+  from 0.342 to 0.388 and the temporal ones' from 0.406 to 0.946, above
+  the oracle filters' 0.932, no kind falling more than 0.001; a warm
+  understood search took p50 1.3 s and p95 1.7 s with Ollama otherwise
+  idle. A model that wasn't measured degrades cheaply and visibly: an
+  unfit one is unloaded, plans that keep timing out and a model Ollama
+  keeps evicting are held for a while, a question over 512 bytes isn't
+  sent, and healthz (`understanding`), `curio doctor` and `curio status`
+  say so with the fix. The daemon never pulls the planner's model on its
+  own (`curio up` does, with consent), and questions leave the machine
+  only for a server the planner role names. Open for the release:
+  measuring `curio up`'s three tiers below 64 GB as planners
+  (`make planner-check`, then searcheval's planned variant) (decisions.md
+  "Understanding the question: a planner role, one structured call,
+  grounded filters, a fitness check").
 
 ## M7 — Hosted mode
 

@@ -269,15 +269,25 @@ func failureCauseHref(cause string) string {
 	return (&url.URL{Path: failuresHref(), Fragment: causeCardID(cause)}).String()
 }
 
+// PlanParam is the search page's query parameter of an understood
+// search's plan: an opaque token the page's handler encodes and decodes,
+// so the plan's pages, its filters taken out one by one, and a reload,
+// search by the plan without asking the model again.
+const PlanParam = "plan"
+
 // searchHref is page, from 1, of the search page's results for q, limited
-// to contentType when it is set; the first page names none. A blank q is
-// the search home, which has no pages.
-func searchHref(q, contentType string, page int) string {
+// to contentType when it is set and searched by the plan token plan when
+// it is set; the first page names none. A blank q is the search home,
+// which has no pages and no plan.
+func searchHref(q, contentType string, page int, plan string) string {
 	v := url.Values{}
 	if strings.TrimSpace(q) != "" {
 		v.Set("q", q)
 		if page > 1 {
 			v.Set(PageParam, strconv.Itoa(page))
+		}
+		if plan != "" {
+			v.Set(PlanParam, plan)
 		}
 	}
 	if contentType != "" {

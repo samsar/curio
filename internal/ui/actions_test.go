@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -136,11 +137,8 @@ func TestActionsScript(t *testing.T) {
 	assert.LessOrEqual(t, strings.Count(js, "\n"), 200, "lines")
 
 	code := strings.TrimSpace(jsCode(js))
-	assert.True(t, strings.HasPrefix(code, "(function () {\n  'use strict';\n"), "an IIFE, strict from its first line")
-	assert.True(t, strings.HasSuffix(code, "\n})();"), "nothing after the IIFE")
-	for _, banned := range []string{"eval", "Function(", "innerHTML", "outerHTML", "insertAdjacentHTML",
-		"document.write", "DOMParser", "createContextualFragment", "setTimeout", "setInterval", "mode:",
-		"credentials:", "javascript:", "localStorage", "sessionStorage", "XMLHttpRequest", "import("} {
+	assertStrictIIFE(t, code)
+	for _, banned := range scriptBanned {
 		assert.NotContains(t, code, banned)
 	}
 	assert.Contains(t, code, "AbortSignal.timeout(timeoutMs)", "every change has a deadline")
@@ -154,6 +152,43 @@ func TestActionsScript(t *testing.T) {
 		assert.Contains(t, jsCode(bad), what, "comments aside, code is checked")
 	}
 	assert.NotContains(t, jsCode("// no innerHTML\n/* nor eval */ x();\n"), "innerHTML")
+}
+
+// TestSearchScript: search.js, which only the search page loads, is one
+// strict IIFE of a few lines that sends nothing: it listens for typing
+// and for htmx confirming a request, and drops a request (search.html says
+// which), using nothing actions.js may not, nor fetch.
+func TestSearchScript(t *testing.T) {
+	src, err := fs.ReadFile(files, "static/search.js")
+	require.NoError(t, err)
+	js := string(src)
+	assert.LessOrEqual(t, strings.Count(js, "\n"), 40, "lines")
+
+	code := strings.TrimSpace(jsCode(js))
+	assertStrictIIFE(t, code)
+	for _, banned := range append(slices.Clone(scriptBanned), "fetch(", "sendBeacon", "WebSocket", "EventSource",
+		"history.") {
+		assert.NotContains(t, code, banned)
+	}
+	listened := regexp.MustCompile(`addEventListener\('([^']+)'`).FindAllStringSubmatch(code, -1)
+	require.Len(t, listened, 2)
+	assert.Equal(t, []string{"input", "htmx:confirm"}, []string{listened[0][1], listened[1][1]})
+	assert.Contains(t, code, "event.preventDefault()")
+}
+
+// scriptBanned is what the dashboard's own scripts' code (their comments
+// aside) never uses: nothing that evaluates code or injects markup, sets a
+// timer, loosens fetch or keeps state in the browser.
+var scriptBanned = []string{"eval", "Function(", "innerHTML", "outerHTML", "insertAdjacentHTML", "document.write",
+	"DOMParser", "createContextualFragment", "setTimeout", "setInterval", "mode:", "credentials:", "javascript:",
+	"localStorage", "sessionStorage", "XMLHttpRequest", "import("}
+
+// assertStrictIIFE checks that code, a script's without its comments, is
+// one IIFE, strict from its first line, with nothing after it.
+func assertStrictIIFE(t *testing.T, code string) {
+	t.Helper()
+	assert.True(t, strings.HasPrefix(code, "(function () {\n  'use strict';\n"), "an IIFE, strict from its first line")
+	assert.True(t, strings.HasSuffix(code, "\n})();"), "nothing after the IIFE")
 }
 
 // jsCommentRE matches a JavaScript comment, block or line. actions.js has

@@ -59,6 +59,11 @@ const (
 	// Announce says what it does and doesn't ask: creating a new home and
 	// its config.yaml, which are curio's own files.
 	Announce
+	// Offer asks one yes-or-no question, yes by default, and a no skips
+	// the fix, saying what it leaves (Fix.Declined), instead of stopping
+	// the run: pulling a model only search understanding uses, without
+	// which searches use their words.
+	Offer
 )
 
 // Fix is what applying a step would do.
@@ -69,6 +74,9 @@ type Fix struct {
 	// empty for a fix that is curio's own work (a pull, a new home).
 	Commands [][]string
 	Consent  Consent
+	// Declined, for an Offer, says what a no leaves and how to get it
+	// later.
+	Declined string
 }
 
 // Result is what a check found.

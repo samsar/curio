@@ -12,6 +12,7 @@ import (
 	"github.com/samsar/curio/internal/indexer"
 	"github.com/samsar/curio/internal/jobs"
 	"github.com/samsar/curio/internal/ollama"
+	"github.com/samsar/curio/internal/understand"
 	"github.com/samsar/curio/internal/version"
 )
 
@@ -41,28 +42,88 @@ import (
 // EmbedderHold is the hold over the index and cards jobs while the
 // embedding model doesn't answer, and ReembedBrake the re-embed's brake
 // while it stops the re-embed: each present only while it holds, and
-// neither changes Status.
+// neither changes Status. Understanding is what the planner knows of its
+// model, from its memory alone; it never changes Status either.
 type Health struct {
-	Status          string            `json:"status"`
-	PID             int               `json:"pid"`
-	Home            string            `json:"home"`
-	Version         string            `json:"version"`
-	SchemaVersion   int               `json:"schema_version"`
-	EmbeddingModel  string            `json:"embedding_model"`
-	EmbeddingDim    int               `json:"embedding_dim"`
-	EmbeddingDrift  *EmbeddingDrift   `json:"embedding_drift,omitempty"`
-	GenerationModel string            `json:"generation_model"`
-	GenerationRoles map[string]string `json:"generation_roles"`
-	OllamaReachable bool              `json:"ollama_reachable"`
-	OllamaDetail    string            `json:"ollama_detail,omitempty"`
-	Upstreams       []UpstreamHealth  `json:"upstreams"`
-	YouTubeFetcher  string            `json:"youtube_fetcher,omitempty"`
-	GitHubToken     bool              `json:"github_token"`
-	Interests       InterestsState    `json:"interests"`
-	DocumentFields  DocumentFields    `json:"document_fields"`
-	SavedDates      SavedDates        `json:"saved_dates"`
-	EmbedderHold    *EmbedderHold     `json:"embedder_hold,omitempty"`
-	ReembedBrake    *ReembedBrake     `json:"reembed_brake,omitempty"`
+	Status          string              `json:"status"`
+	PID             int                 `json:"pid"`
+	Home            string              `json:"home"`
+	Version         string              `json:"version"`
+	SchemaVersion   int                 `json:"schema_version"`
+	EmbeddingModel  string              `json:"embedding_model"`
+	EmbeddingDim    int                 `json:"embedding_dim"`
+	EmbeddingDrift  *EmbeddingDrift     `json:"embedding_drift,omitempty"`
+	GenerationModel string              `json:"generation_model"`
+	GenerationRoles map[string]string   `json:"generation_roles"`
+	OllamaReachable bool                `json:"ollama_reachable"`
+	OllamaDetail    string              `json:"ollama_detail,omitempty"`
+	Upstreams       []UpstreamHealth    `json:"upstreams"`
+	YouTubeFetcher  string              `json:"youtube_fetcher,omitempty"`
+	GitHubToken     bool                `json:"github_token"`
+	Interests       InterestsState      `json:"interests"`
+	DocumentFields  DocumentFields      `json:"document_fields"`
+	SavedDates      SavedDates          `json:"saved_dates"`
+	EmbedderHold    *EmbedderHold       `json:"embedder_hold,omitempty"`
+	ReembedBrake    *ReembedBrake       `json:"reembed_brake,omitempty"`
+	Understanding   UnderstandingHealth `json:"understanding"`
+}
+
+// UnderstandingHealth mirrors the openapi UnderstandingHealth schema: what
+// the planner knows of its model, read from its memory alone, never by
+// asking the model. On is search.understand. Reason says why no question
+// is planned at all: understanding is off, its provider can't answer in
+// JSON, or questions would leave this machine for a server the planner
+// role doesn't name. Check is the fitness check's verdict (unchecked, fit
+// or unfit), CheckedAt when it was reached, and Unfit why, with the fix.
+// LastStatus is the last question's understanding.status, at LastAt.
+// TimeoutHoldUntil and EvictionHoldUntil are present only while each
+// holds: plans that kept timing out, and a model Ollama kept unloading
+// within its keep-alive. LastFailure is the planner's last failure.
+type UnderstandingHealth struct {
+	On                bool                  `json:"on"`
+	Model             string                `json:"model,omitempty"`
+	Reason            string                `json:"reason,omitempty"`
+	Check             string                `json:"check,omitempty"`
+	CheckedAt         time.Time             `json:"checked_at,omitzero"`
+	Unfit             string                `json:"unfit,omitempty"`
+	LastStatus        string                `json:"last_status,omitempty"`
+	LastAt            time.Time             `json:"last_at,omitzero"`
+	TimeoutHoldUntil  time.Time             `json:"timeout_hold_until,omitzero"`
+	EvictionHoldUntil time.Time             `json:"eviction_hold_until,omitzero"`
+	LastFailure       *UnderstandingFailure `json:"last_failure,omitempty"`
+}
+
+// UnderstandingFailure is the planner's last failure: its cause, as the
+// daemon's log records name it (timeout, unavailable:generate, unfit,
+// evicted, ...), when, and its error.
+type UnderstandingFailure struct {
+	Cause string    `json:"cause"`
+	At    time.Time `json:"at"`
+	Error string    `json:"error,omitempty"`
+}
+
+// understanding is the planner's state on healthz; with no planner, off.
+// Times are in UTC.
+func (d Deps) understanding() UnderstandingHealth {
+	if d.Planner == nil {
+		return UnderstandingHealth{Reason: understand.OffReason}
+	}
+	s := d.Planner.State()
+	h := UnderstandingHealth{On: s.On, Model: s.Model, Reason: s.Reason, Check: s.Check, Unfit: s.Unfit,
+		LastStatus: string(s.Last), CheckedAt: utc(s.CheckedAt), LastAt: utc(s.LastAt),
+		TimeoutHoldUntil: utc(s.TimeoutHoldUntil), EvictionHoldUntil: utc(s.EvictionHoldUntil)}
+	if f := s.Failure; f.Cause != "" {
+		h.LastFailure = &UnderstandingFailure{Cause: f.Cause, At: f.At.UTC(), Error: f.Err}
+	}
+	return h
+}
+
+// utc is t in UTC, the zero time kept zero.
+func utc(t time.Time) time.Time {
+	if t.IsZero() {
+		return t
+	}
+	return t.UTC()
 }
 
 // EmbedderHold is the hold over the index and cards jobs while it holds
@@ -321,6 +382,7 @@ func (d Deps) health(ctx context.Context) (Health, error) {
 		SavedDates:      d.SavedDates.State(),
 		EmbedderHold:    d.embedderHold(),
 		ReembedBrake:    d.reembedBrake(),
+		Understanding:   d.understanding(),
 	}, nil
 }
 

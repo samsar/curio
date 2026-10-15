@@ -60,7 +60,8 @@ func newEvalCmd(env *daemonctl.Env) *cobra.Command {
 	return cmd
 }
 
-// searcher is the slice of the daemon client that rankQueries needs.
+// searcher is the slice of the daemon client that rankQueries and curio
+// search need.
 type searcher interface {
 	Search(ctx context.Context, req client.SearchRequest) (*client.SearchResponse, error)
 }

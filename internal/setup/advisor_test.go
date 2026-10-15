@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -41,11 +42,15 @@ func TestAdvise(t *testing.T) {
 	}
 }
 
-// TestTiers: every tier has a pinned tag, a size and a reason, and gemma4
-// names the Ollama it needs.
+// TestTiers: every tier has a pinned tag, a size and a reason naming both
+// roles it writes for, and gemma4 names the Ollama it needs.
 func TestTiers(t *testing.T) {
 	tiers := ModelAdvisor{}.Tiers()
 	require.Len(t, tiers, 4)
+	for _, tier := range tiers {
+		assert.True(t, strings.HasPrefix(tier.Model.Reason, "names your interests and understands your searches; "),
+			tier.Model.Name)
+	}
 	for _, tier := range append(tiers, Tier{Model: EmbeddingModel}) {
 		m := tier.Model
 		assert.True(t, hasTag(m.Name), m.Name)

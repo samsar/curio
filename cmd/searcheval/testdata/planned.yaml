@@ -1,0 +1,38 @@
+# The planned variants' query file over the synthetic library (see
+# library_test.go and plans_test.go): each query's plan, which the fake
+# planner gives, changes its ranking in one way: a rewrite, a filter, a
+# name, none (the planner's answer is no plan), and a relative date.
+queries:
+  - id: q-rewrite
+    note: the words match nothing; the rewrite matches documents 3 and 5
+    query: epsilon
+    relevant:
+      - {url: "https://example.com/doc/05", grade: 2}
+      - https://example.com/doc/03
+
+  - id: q-filter
+    note: the plan's type, which the question names, holds no document
+    query: alpha videos
+    relevant:
+      - {url: "https://example.com/doc/05", grade: 2}
+
+  - id: q-name
+    note: the name is the failed document 22's bookmark title
+    query: the archived beta page
+    relevant:
+      - {url: "https://example.com/doc/22", grade: 2}
+      - https://example.com/doc/20
+
+  - id: q-fallback
+    note: the planner's answer can't be used
+    query: beta
+    relevant:
+      - {url: "https://example.com/doc/20", grade: 2}
+      - https://example.com/doc/12
+
+  - id: q-week
+    note: the plan's window is last week as of the planner's today
+    query: zebra saved last week
+    filters: {saved_after: "2025-04-10", saved_before: "2025-04-18"}
+    relevant:
+      - https://example.com/doc/00

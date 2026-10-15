@@ -57,8 +57,12 @@ does it, asking before each step:
 
    The embedding model is `qwen3-embedding:0.6b` (639 MB) everywhere. A
    `generation.model` already in `config.yaml` is kept, and nothing is
-   asked; with interest labels off (`insight.labeling: terms`) no writing
-   model is pulled.
+   asked. A writing model is pulled for each use of one that is on:
+   interest labels (`insight.labeling: llm`, the default) and search
+   understanding (`search.understand: true`, the default); with both off
+   no writing model is pulled. curio up is the one that pulls the
+   planner's: the daemon does only when the labels write with the same
+   model (see "Change the writing model" below).
 4. **The home**, `~/.curio` or `$CURIO_HOME`, and its `config.yaml`. A new
    home records the embedding model and the width of its vectors, measured
    with one embed after the pull. curio up writes `config.yaml` once, when
@@ -274,10 +278,18 @@ A model that can't turn thinking off answers the request with an error,
 and its interests get term labels; pick another.
 
 Each use of a writing model is a *role*, and `generation.roles` gives a
-role a model of its own. Today there is one role, `labels` (the interest
-and area labels); a role is in use only while its feature is on, so with
-`insight.enabled: false`, or `insight.labeling` other than `llm`, no
-writing model is built, pulled or checked. A role's entry takes the keys
+role a model of its own. There are two roles: `labels`, the interest and
+area labels, in use while `insight.enabled` is true and `insight.labeling`
+is `llm`; and `planner`, which understands a search question, in use while
+`search.understand` is true (the default). A role is in use only while its
+feature is on; with neither, no writing model is built, pulled or
+checked. Understanding is on whatever insight says. With
+`generation.auto_pull` the daemon pulls the labels' model, and the
+planner's only when it is the same one on the same server: a home with
+`insight.enabled: false` or `insight.labeling: terms` gets the planner's
+model from `curio up`, which asks first, and until then a search says
+`<model> isn't pulled — run curio up` and searches its words. A role's
+entry takes the keys
 `generation` does, `provider`, `model`, `base_url` and `timeout_seconds`,
 and each it leaves out (or sets to `""` or 0) is `generation`'s:
 
@@ -289,6 +301,70 @@ generation:
       model: qwen3:4b-instruct  # interest labels write with this; the rest is generation's
 ```
 
+The planner asks its model for a plan when a search asks to be understood
+(`curio search` by default, Enter on the dashboard; never while you type):
+the dates, types and browser the question states, a few other wordings,
+and the things it points at by description. Before its first plan the
+model must pass a short check, three questions with known answers; a model
+that fails it is unloaded, never asked again until the daemon restarts,
+and its searches use their words alone, saying so and how to fix it (a
+WARN in the daemon's log names the question it failed). After a plan the
+model stays loaded for `search.understand_keep_alive_minutes`, so the
+next search finds it warm; a search that finds it unloaded starts
+loading it and searches its words at once. When 3 plans in a row take
+longer than the timeout, searches use their words for a while (2
+minutes, doubling to 15 while it goes on), and when Ollama unloads the
+model twice within an hour for other models, curio stops loading it for
+15 minutes; `curio doctor` says what helps. A question over 512 bytes is
+searched by its words without asking. Only the planner role's model
+writes the plans, so `make planner-check MODEL=<name>` (a developer's
+target) shows whether a model passes the check and how fast it plans
+here. Its keys, under `search`:
+
+| Key | Default | |
+|---|---|---|
+| `search.understand` | true | understand questions with the planner role; false turns it off |
+| `search.understand_timeout_seconds` | 5 | one plan, 1 to 23; a slower one searches the words |
+| `search.understand_keep_alive_minutes` | 30 | how long the planner's model stays loaded after a plan, 1 to 1440 |
+| `search.rewrite_weight` | 0.5 | a plan's other wordings, as a share of each list's weight; 0 leaves them out |
+| `search.name_weight` | 1 | the things a plan names, searched in what documents were saved as (titles, folders, sites, cards); 0 leaves them out |
+
+The planner's model is the labels' by default: they share one loaded
+model, and the planner sends the context size the labels do, so neither
+loads it again for the other. A plan waits behind a rebuild's labels on
+that model.
+
+A plan sends the model the planner's fixed instructions, today's weekday
+and date, and the question; nothing of the library. Since the question
+is your own words, it goes only where you name: while
+`generation.base_url` is off this machine (or `generation.provider` isn't
+Ollama), the planner sends nothing until `generation.roles.planner`
+names that base URL (or provider) itself (loopback hosts and 0.0.0.0 or
+`::` count as this machine), and `curio up` offers no model for it:
+
+```yaml
+generation:
+  base_url: http://gpu-box.local:11434   # the labels write there
+  roles:
+    planner:
+      base_url: http://gpu-box.local:11434   # and questions may go there too
+```
+
+**Upgrading from 2.6.** Search understanding is on after the upgrade,
+and a 2.6 `config.yaml` is taken as it is. A home whose interests are
+labelled by an LLM (the default) already has the model, which the
+planner shares. One whose labels are off (`insight.labeling: terms`, or
+`insight.enabled: false`) has none for it, and the daemon doesn't
+download one on its own: `curio search` says `<model> isn't pulled — run
+curio up`, and `curio up` offers it; saying no leaves searches literal
+and the run goes on (`curio doctor` warns of it). Set
+`search.understand: false` to stop understanding questions. A plan, a
+second asking whether the model is loaded and the query's embed stay
+under 25 s, so `curio search` answers within its 30 s: with
+`search.embed_timeout_seconds` of 19 or more, plans get what it leaves
+(the daemon's log says so at start), and at 23 or more none is planned,
+`curio doctor` saying why: lower it to understand questions again.
+
 An unknown role, or an unknown key inside one, fails the config. `curio
 up` and `curio doctor` check, and `curio up` pulls, the model each role in
 use writes with, and `curio up` restarts a daemon that writes with
@@ -299,7 +375,11 @@ Writing model.
 
 Going back to curio 2.6.x, remove `generation.roles` from `config.yaml`
 first: 2.6.x doesn't know the key, so its daemon refuses to start and its
-commands refuse to run.
+commands refuse to run. Going back to a 2.7 from before understanding,
+remove `search.understand`, `search.understand_timeout_seconds`,
+`search.understand_keep_alive_minutes`, `search.rewrite_weight`,
+`search.name_weight` and `generation.roles.planner` first, for the same
+reason: an older curio refuses keys and roles it doesn't know.
 
 ### The embedding model is the home's
 
@@ -874,6 +954,7 @@ model not answering" under Troubleshooting).
 |---|---|---|
 | `embedding.timeout_seconds` | 60 | one embed request (the indexer sends at most 8 chunks per request), including the time it waits behind other requests inside Ollama |
 | `search.embed_timeout_seconds` | 10 | embedding a search query; past it, search returns keyword-only results marked `degraded`. Keep it well under 30: the CLI and MCP give up on a request after 30 s, so a hung Ollama would surface as a client timeout instead |
+| `search.understand_timeout_seconds` | 5 | one plan of a search question, at most 23; past it, the search searches the question's words. It plus `search.embed_timeout_seconds` plus 1 stays under 25, for the same reason: past that the planner gets what the embed timeout leaves, and none below a second |
 | `generation.timeout_seconds` | 120 | one LLM request; timeouts aren't retried. A role's `generation.roles.<role>.timeout_seconds` replaces it for that role |
 | `insight.labeling_timeout_seconds` | 900 | all LLM labeling in one rebuild of the interests; the rest get term labels |
 
@@ -977,6 +1058,21 @@ start's own classification fails, date filters read the classes the
 bookmarks had. Either way, a restart (`curio daemon stop`; the next
 command starts it) classifies every bookmark again, and `curio doctor`
 then says when.
+
+**`understanding` warning in `curio doctor`** — search understanding is
+on, but searches use their words: the doctor line says why and the fix.
+The planner's model failed its check (set
+`generation.roles.planner.model` to one that passes, or
+`search.understand: false`); plans kept taking longer than
+`search.understand_timeout_seconds` (a faster model, or more time); or
+Ollama kept unloading the model for others within its keep-alive, most
+often while an index or re-embed runs (a smaller planner model, or turn
+understanding off); or questions would leave this machine for a server
+the planner role doesn't name (above). The daemon reports the same on
+`/v1/healthz` (`understanding`), from what it has seen, without asking
+the model; `curio status` prints one line while it lasts. A search
+saying `<model> isn't pulled — run curio up` needs the model pulled:
+`curio up` offers it.
 
 **`curio home from an older curio`** — the home was made by a curio from
 before home formats: its vectors came from another embedding model, under

@@ -3,6 +3,7 @@ package search
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -354,6 +355,45 @@ func TestEngine_DegradesToKeywordResults(t *testing.T) {
 			assert.Equal(t, 1, strings.Count(logs.String(), "level=WARN"), "one warning is logged")
 		})
 	}
+}
+
+// TestEngine_DegradedLogsOncePerOutage: the first degraded search of an
+// outage warns, the rest are at debug, and a search that isn't degraded
+// ends the outage, so the next one warns again. No record carries the
+// query, only its length in bytes.
+func TestEngine_DegradedLogsOncePerOutage(t *testing.T) {
+	db := sqlitetest.NewDB(t)
+	docs, chunks, _ := seedCorpus(t, db)
+	var down atomic.Bool
+	emb := &fakeEmbedder{dim: sqlitetest.Width(t, db)}
+	flaky := embedFunc(func(ctx context.Context, texts []string) ([][]float32, error) {
+		if down.Load() {
+			return nil, errors.New("connection refused")
+		}
+		return emb.Embed(ctx, texts)
+	})
+	var logs bytes.Buffer
+	engine := New(chunks, docs, unusedIndex{}, flaky, Config{
+		Log: slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))})
+	const query = "zqxjq attention token"
+	for _, d := range []bool{true, true, true, false, true, true} {
+		down.Store(d)
+		res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: query, K: 3})
+		require.NoError(t, err)
+		require.Equal(t, d, res.Degraded)
+	}
+	var levels []string
+	for line := range strings.Lines(logs.String()) {
+		assert.NotContains(t, line, "zqxjq", "a record carries the query")
+		var rec map[string]any
+		require.NoError(t, json.Unmarshal([]byte(line), &rec))
+		if rec["msg"] == "semantic search unavailable; returning keyword-only results" {
+			levels = append(levels, rec["level"].(string))
+			assert.InDelta(t, len(query), rec["query_bytes"], 0)
+			assert.Equal(t, "embed query: connection refused", rec["err"])
+		}
+	}
+	assert.Equal(t, []string{"WARN", "DEBUG", "DEBUG", "WARN", "DEBUG"}, levels)
 }
 
 // TestEngine_QueryTooLongDegrades: a query longer than the embedding

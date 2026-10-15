@@ -806,7 +806,7 @@ svg.stackbar rect { shape-rendering: crispEdges; }
 
 /* Search -------------------------------------------------------------------- */
 
-.search-hero { width: 100%; max-width: 48rem; margin: var(--s6) auto var(--s8); }
+.search-hero { position: relative; width: 100%; max-width: 48rem; margin: var(--s6) auto var(--s8); }
 .searchbox { position: relative; }
 .searchbox > svg.icon { position: absolute; left: 1.05rem; top: 50%; transform: translateY(-50%); width: 1.25rem; height: 1.25rem; color: var(--text-3); pointer-events: none; }
 .searchbox input[type="search"] {
@@ -827,6 +827,30 @@ svg.stackbar rect { shape-rendering: crispEdges; }
 .searchbox .btn { height: 2.4rem; border-radius: var(--r-md); }
 .search-scope { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); margin-top: var(--s3); font-size: var(--fs-sm); color: var(--text-3); }
 .search-scope .segmented a { height: 1.625rem; padding: 0 0.6rem; font-size: var(--fs-xs); }
+
+/* While the model plans an understood search: under the box, over the
+   space below it, so the page doesn't move when it shows. */
+.understanding {
+  position: absolute; left: 0; right: 0; top: 100%; margin-top: var(--s2);
+  display: flex; align-items: center; justify-content: center; gap: var(--s2);
+  color: var(--text-3); font-size: var(--fs-sm); pointer-events: none;
+}
+/* What an understood search searched by: its filters as chips that take
+   them out, and quiet lines, each cut to fit, the whole in its title. */
+.understood { margin-bottom: var(--s4); color: var(--text-3); font-size: var(--fs-sm); }
+.understood-plan { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); min-width: 0; }
+.chip {
+  display: inline-flex; align-items: center; gap: 0.3rem; max-width: 100%; min-width: 0;
+  height: 1.625rem; padding: 0 0.45rem 0 0.6rem;
+  border: 1px solid var(--accent-border); border-radius: var(--r-pill);
+  background: var(--accent-soft); color: var(--accent-text);
+  font-size: var(--fs-xs); font-weight: 540;
+}
+.chip-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip svg { flex: none; width: 0.75rem; height: 0.75rem; }
+.chip:hover { border-color: var(--accent); text-decoration: none; }
+.understood-also { margin-top: var(--s1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.understood-note { margin-bottom: var(--s4); color: var(--text-3); font-size: var(--fs-sm); }
 
 /* htmx's request indicator; its own inline styles are off. */
 .htmx-indicator { opacity: 0; transition: opacity 160ms; }

@@ -659,6 +659,28 @@ paths:
         keyword results are still returned with degraded=true and a warning
         explaining why; a failure of the keyword index or the fields index
         (the fields and title lists) is a 500.
+
+        With understand, the daemon first asks its planner (the planner
+        role's writing model, search.understand) what the query means: a
+        plan of filters the query states, up to 3 rewrites searched with
+        it in every list, and up to 4 names it points at, searched in
+        what the documents were saved as. The response's understanding
+        says how that went. A plan that can't be had (the model loading or
+        being checked, unfit, slow, unavailable, its answer unusable, the
+        query over 512 bytes, or understanding off) is no error: the
+        query's own words are searched, and understanding says why. With plan, the request supplies the
+        plan itself and no model is asked: send a response's
+        understanding.plan back, with the same query and filters, to get
+        another page of that ranking, or with a filter taken out to drop
+        it. Asking again with understand could plan differently, so an
+        understood search's pages go by its plan. The request's own
+        filters win over a plan's, dimension by dimension: content_type,
+        host, source, site, folder, the saved window (both bounds), the
+        published window (both bounds), and include_undated, which goes
+        with the request's date filters when it sets any; the plan's
+        filter of a dimension the request sets is reported in
+        understanding.dropped. The request's filters are checked alone,
+        as without a plan.
       requestBody:
         required: true
         content:
@@ -674,8 +696,9 @@ paths:
           description: >
             Missing query, k outside 0..100, an offset below 0 or with
             offset + k over 100 (k as omitted means the default), a
-            content_type or source outside its set, an unknown field, or a
-            malformed body
+            content_type or source outside its set, both understand and
+            plan, a plan its schema or a filter refuses (plan.<field> or
+            plan.filters.<field>), an unknown field, or a malformed body
           content:
             application/problem+json:
               schema: { $ref: "#/components/schemas/Problem" }
@@ -1169,7 +1192,8 @@ components:
           type: object
           description: >
             Each writing role the daemon uses (labels: interest and area
-            labels, while insight is on and labels with an LLM) and the
+            labels, while insight is on and labels with an LLM; planner:
+            search understanding, while search.understand is on) and the
             model it writes with: generation.roles' model for the role, or
             generation.model. Empty when no role is in use. It takes a
             restart to change.
@@ -1202,7 +1226,72 @@ components:
         saved_dates: { $ref: "#/components/schemas/SavedDatesCheck" }
         embedder_hold: { $ref: "#/components/schemas/EmbedderHold" }
         reembed_brake: { $ref: "#/components/schemas/ReembedBrake" }
-      required: [status, pid, home, version, schema_version, embedding_model, embedding_dim, generation_model, generation_roles, ollama_reachable, upstreams, github_token, interests, document_fields, saved_dates]
+        understanding: { $ref: "#/components/schemas/UnderstandingHealth" }
+      required: [status, pid, home, version, schema_version, embedding_model, embedding_dim, generation_model, generation_roles, ollama_reachable, upstreams, github_token, interests, document_fields, saved_dates, understanding]
+
+    UnderstandingHealth:
+      description: >
+        What the daemon's planner knows of its model, read from its memory
+        alone: healthz never asks the model. Status stays ok whatever it
+        says.
+      type: object
+      properties:
+        "on": { type: boolean, description: "search.understand" }
+        model: { type: string, description: "The planner role's model" }
+        reason:
+          type: string
+          description: >
+            Why no question is planned at all, present only then:
+            understanding is off; its provider can't answer in JSON; or
+            questions would leave this machine (generation.base_url off
+            loopback, or another provider) for a server the planner role
+            doesn't name (generation.roles.planner).
+        check:
+          type: string
+          enum: [unchecked, fit, unfit]
+          description: >
+            The fitness check's verdict on the model, run before its first
+            plan and kept until the daemon restarts.
+        checked_at: { type: string, format: date-time, description: "When the verdict was reached" }
+        unfit: { type: string, description: "Why the model is unfit, and the fix; present only then" }
+        last_status:
+          type: string
+          description: The last question's understanding.status, if any was asked since the daemon started.
+        last_at: { type: string, format: date-time, description: "When the last question was asked" }
+        timeout_hold_until:
+          type: string
+          format: date-time
+          description: >
+            Present only while plans are held because 3 in a row took longer
+            than search.understand_timeout_seconds: until then every
+            question answers timeout at once, asking no model. The hold
+            lasts 2 minutes, twice as long each time it holds again, at
+            most 15, and a plan in time ends the run.
+        eviction_hold_until:
+          type: string
+          format: date-time
+          description: >
+            Present only while the planner doesn't load its model because
+            Ollama unloaded it within its keep-alive twice within an hour,
+            for other models (the embedder's re-embed, most often): until
+            then a question that finds it unloaded answers unavailable.
+        last_failure:
+          type: object
+          description: The planner's last failure since the daemon started.
+          properties:
+            cause:
+              type: string
+              description: >
+                What failed, as the daemon's log names it: timeout,
+                timeout:held, invalid:<rule>, unavailable:loaded (asking
+                whether the model is loaded), unavailable:missing (the
+                provider doesn't have the model), unavailable:load
+                (loading it), unavailable:check, unavailable:generate,
+                unfit or evicted.
+            at: { type: string, format: date-time }
+            error: { type: string }
+          required: [cause, at]
+      required: ["on"]
 
     EmbedderHold:
       description: >
@@ -1803,70 +1892,174 @@ components:
             documents, the same ranking for every offset, so the pages of a
             query tile it. offset + k is at most 100, k as the request gets
             it (the default when omitted). Omitted means 0.
-        filters:
-          type: object
+        filters: { $ref: "#/components/schemas/SearchFilters" }
+        understand:
+          type: boolean
           description: >
-            Every dimension given applies, and the values within one are
-            alternatives; each list holds at most 32. A filter the server
-            can't take is a 400 naming it (filters.<field>), before the query
-            is embedded. Tag filters, per-request RRF weights and the
-            collapse strategy are not implemented; the server config sets
-            the weights and collapse strategy, and sending any of them is a
-            400. Dates are a day (YYYY-MM-DD), which is midnight UTC, or an
-            RFC 3339 date-time with a zone (2024-03-01T00:00:00+01:00 for a
-            local day), compared to the millisecond; a window is [after,
-            before), and either bound may be left out. Each bookmark-level filter (source, folder, the saved
-            window) is checked on the document's bookmarks on its own.
-          properties:
-            content_type: { type: array, maxItems: 32, items: { $ref: "#/components/schemas/ContentType" } }
-            host:         { type: array, maxItems: 32, items: { type: string, maxLength: 253 }, description: "URL hosts, matched exactly and case-insensitively" }
-            source:       { type: array, maxItems: 32, items: { $ref: "#/components/schemas/Source" } }
-            site:
-              type: array
-              maxItems: 32
-              items: { type: string, maxLength: 253 }
-              description: >
-                Sites, each a domain such as example.com, without a scheme,
-                path or port. A site is its registrable domain
-                (www.example.com and blog.example.com are example.com), and
-                matches documents on it and on every subdomain of it.
-            folder:
-              type: array
-              maxItems: 32
-              items: { type: string, maxLength: 1024 }
-              description: >
-                Bookmark folders, as stored, the browser's root included
-                ("/Bookmarks Bar/Tech"), matching each folder and every folder
-                under it, case-sensitively, on whole path segments. A missing
-                leading "/" is added and a trailing one dropped; "/" alone is
-                a 400.
-            saved_after:
-              type: string
-              description: >
-                Documents with a bookmark saved at or after this time. Only a
-                bookmark whose saved_date is exact or approx (an upper bound)
-                counts: one with an unknown date is never in a window.
-            saved_before:
-              type: string
-              description: Documents with a bookmark of a known date saved before this time.
-            published_after:
-              type: string
-              description: >
-                Documents published at or after this time. A published date
-                counts only when it is trusted: at most a day after the
-                document's earliest exact save, or of a document with none;
-                a later one is a modification date.
-            published_before:
-              type: string
-              description: Documents with a trusted published date before this time.
-            include_undated:
-              type: boolean
-              description: >
-                Keep, besides the documents the date filters pass, those they
-                can't judge: no bookmark of a known date for the saved window,
-                no trusted published date for the published one. It needs a
-                date filter.
+            Ask the planner what the query means and search by its plan;
+            understanding in the response says how it went. Omitted means
+            false. A daemon from before understanding refuses the field.
+        plan:
+          $ref: "#/components/schemas/Plan"
+          description: >
+            Search by this plan, asking no model: a response's
+            understanding.plan, for another page of its ranking, or with a
+            filter taken out. Not with understand.
       required: [query]
+
+    SearchFilters:
+      type: object
+      description: >
+        Every dimension given applies, and the values within one are
+        alternatives; each list holds at most 32. A filter the server
+        can't take is a 400 naming it (filters.<field>), before the query
+        is embedded. Tag filters, per-request RRF weights and the
+        collapse strategy are not implemented; the server config sets
+        the weights and collapse strategy, and sending any of them is a
+        400. Dates are a day (YYYY-MM-DD), which is midnight UTC, or an
+        RFC 3339 date-time with a zone (2024-03-01T00:00:00+01:00 for a
+        local day), compared to the millisecond; a window is [after,
+        before), and either bound may be left out. Each bookmark-level filter (source, folder, the saved
+        window) is checked on the document's bookmarks on its own.
+      properties:
+        content_type: { type: array, maxItems: 32, items: { $ref: "#/components/schemas/ContentType" } }
+        host:         { type: array, maxItems: 32, items: { type: string, maxLength: 253 }, description: "URL hosts, matched exactly and case-insensitively" }
+        source:       { type: array, maxItems: 32, items: { $ref: "#/components/schemas/Source" } }
+        site:
+          type: array
+          maxItems: 32
+          items: { type: string, maxLength: 253 }
+          description: >
+            Sites, each a domain such as example.com, without a scheme,
+            path or port. A site is its registrable domain
+            (www.example.com and blog.example.com are example.com), and
+            matches documents on it and on every subdomain of it.
+        folder:
+          type: array
+          maxItems: 32
+          items: { type: string, maxLength: 1024 }
+          description: >
+            Bookmark folders, as stored, the browser's root included
+            ("/Bookmarks Bar/Tech"), matching each folder and every folder
+            under it, case-sensitively, on whole path segments. A missing
+            leading "/" is added and a trailing one dropped; "/" alone is
+            a 400.
+        saved_after:
+          type: string
+          description: >
+            Documents with a bookmark saved at or after this time. Only a
+            bookmark whose saved_date is exact or approx (an upper bound)
+            counts: one with an unknown date is never in a window.
+        saved_before:
+          type: string
+          description: Documents with a bookmark of a known date saved before this time.
+        published_after:
+          type: string
+          description: >
+            Documents published at or after this time. A published date
+            counts only when it is trusted: at most a day after the
+            document's earliest exact save, or of a document with none;
+            a later one is a modification date.
+        published_before:
+          type: string
+          description: Documents with a trusted published date before this time.
+        include_undated:
+          type: boolean
+          description: >
+            Keep, besides the documents the date filters pass, those they
+            can't judge: no bookmark of a known date for the saved window,
+            no trusted published date for the published one. It needs a
+            date filter.
+
+    Plan:
+      type: object
+      description: >
+        What a search does for a query besides its words. The planner's
+        plans set content_type (video, repo, pdf, thread), source and the
+        saved and published windows only, a saved bound as the local
+        midnight it starts at (RFC 3339 with the daemon's offset); a plan a
+        client supplies may set any filter.
+      properties:
+        kind:
+          type: string
+          enum: [one, list, evidence, analysis, keywords]
+          description: >
+            What the query wants back: one page it remembers, a list of
+            pages, evidence for a claim, an analysis across many pages, or
+            keywords (the query already is search words).
+        filters: { $ref: "#/components/schemas/SearchFilters" }
+        rewrites:
+          type: array
+          maxItems: 3
+          items: { type: string, minLength: 1 }
+          description: >
+            Other wordings searched with the query in every list, at
+            search.rewrite_weight; each at most 160 bytes once trimmed,
+            with no control character.
+        names:
+          type: array
+          maxItems: 4
+          items: { type: string, minLength: 1 }
+          description: >
+            What the query points at by description, searched in what the
+            documents were saved as (the fields, title and cards lists) at
+            search.name_weight; each at most 100 bytes once trimmed, with
+            no control character.
+      required: [kind]
+
+    Understanding:
+      type: object
+      description: >
+        How the query was understood: present exactly when the request
+        sent understand or plan.
+      properties:
+        status:
+          type: string
+          enum: [planned, supplied, off, cold, checking, unfit, timeout, unavailable, invalid, too_long]
+          description: >
+            planned: the planner's plan was searched. supplied: the
+            request's plan was. Every other status searched the query's
+            words: off, understanding is off (search.understand false) or
+            its model can't answer in JSON; cold, the planner's model is
+            loading, which this request started, so a request a few seconds
+            later is planned; checking, the model is being checked before
+            its first plan, likewise; unfit, the model failed that check,
+            for as long as the daemon runs; timeout, the plan took longer
+            than search.understand_timeout_seconds, or 3 plans in a row did
+            and planning is held for a while; unavailable, Ollama or the
+            model couldn't be reached or run, the model isn't pulled, Ollama
+            keeps unloading it, or questions may not leave this machine for
+            the server configured; invalid, the model's answer couldn't be
+            used; too_long, the query is over 512 bytes, and wasn't sent.
+        reason:
+          type: string
+          description: Why there is no plan, for any status but planned and supplied.
+        model:       { type: string, description: "The planner's model, when one was asked" }
+        took_ms:     { type: integer, description: "How long understanding took, in milliseconds; 0 for a supplied plan" }
+        plan:
+          $ref: "#/components/schemas/Plan"
+          description: >
+            Present for planned and supplied: the plan as applied, without
+            the filters dropped. Send it back as plan for another page.
+        dropped:
+          type: array
+          description: >
+            The plan's filters left out: by the planner's guards (a filter
+            the query's words don't state, a window that can't be), or
+            because the request sets that dimension.
+          items: { $ref: "#/components/schemas/DroppedFilter" }
+      required: [status, took_ms]
+
+    DroppedFilter:
+      type: object
+      properties:
+        field:
+          type: string
+          description: >
+            The dimension: content_type, host, source, site, folder, saved
+            (the window), published (the window) or include_undated.
+        reason: { type: string }
+      required: [field, reason]
 
     SearchHit:
       type: object
@@ -1921,9 +2114,9 @@ components:
       type: object
       properties:
         query:       { type: string }
-        took_ms:     { type: integer, description: "Time the search took, in milliseconds" }
-        bm25_hits:   { type: integer, description: "How many chunks BM25 returned before fusion" }
-        vector_hits: { type: integer, description: "How many chunks the vector index returned before fusion (0 when degraded, and with search.vector_weight 0, which skips the vector search)" }
+        took_ms:     { type: integer, description: "Time the search took, in milliseconds, understanding the query included" }
+        bm25_hits:   { type: integer, description: "How many distinct chunks BM25 returned before fusion, over the query's and its rewrites' lists" }
+        vector_hits: { type: integer, description: "How many distinct chunks the vector index returned before fusion, over the query's and its rewrites' lists (0 when degraded, and with search.vector_weight 0, which skips the vector search)" }
         total:
           type: integer
           description: >
@@ -1961,6 +2154,7 @@ components:
             known date, no trusted published date). They were left out,
             or kept with include_undated; the count is the same either way,
             and on every page of every query with these filters.
+        understanding: { $ref: "#/components/schemas/Understanding" }
         items:
           type: array
           items: { $ref: "#/components/schemas/SearchHit" }

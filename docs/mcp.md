@@ -42,6 +42,13 @@ after the page was first saved. Undated documents are left out unless
 `include_undated`, which needs a date filter. A filter the daemon refuses
 is a tool error naming it (`filters.site: …`).
 
+`search_bookmarks` searches the words and filters it is given, and never
+asks the daemon to understand the question (POST /v1/search's
+`understand`): its caller is already a language model, which writes the
+filters and other wordings itself, as the tool's descriptions guide it to.
+A second, local model would add its guesses to the caller's and seconds to
+a call, ten or so while it loads, of the 30 s a tool call has.
+
 ## Register with Claude Code
 
 ```sh

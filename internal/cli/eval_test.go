@@ -36,6 +36,8 @@ func TestRankQueries(t *testing.T) {
 		var gotK []int
 		s := searchFunc(func(_ context.Context, req client.SearchRequest) (*client.SearchResponse, error) {
 			gotK = append(gotK, req.K)
+			assert.False(t, req.Understand, "an evaluation searches the words, as written")
+			assert.Nil(t, req.Plan)
 			return &client.SearchResponse{Items: hits("https://example.com/"+req.Query, "https://example.com/x")}, nil
 		})
 		ranked, err := rankQueries(context.Background(), s, qs, 5)

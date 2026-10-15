@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/samsar/curio/internal/docmeta"
+	"github.com/samsar/curio/internal/planlabel"
 	"github.com/samsar/curio/internal/store"
 )
 
@@ -398,10 +399,17 @@ type Search struct {
 	Query  string
 	Type   string // the content type the search is limited to; empty for all
 	// Page is the page of results shown, from 1; 0 is the first.
-	Page    int
+	Page int
+	// Plan is the token of the plan the results were searched by
+	// (PlanParam), which the page's other pages and types keep; empty for
+	// a search of the query's words.
+	Plan    string
 	Home    *SearchHome    // set exactly when there is no query
 	Err     *PanelError    // the search failed
 	Results *SearchResults // nil without a query, or when it failed
+	// Understood is how the query was understood, for a search that asked
+	// (Enter, or a plan's link); nil for search as you type.
+	Understood *Understood
 }
 
 // SearchPageSize is how many results a page of search shows. It is fixed,
@@ -447,8 +455,14 @@ func (s Search) Pager() *Pager {
 		Noun: "Results", Href: s.pageHref})
 }
 
-// pageHref is page of the query's results, limited to the type shown.
-func (s Search) pageHref(page int) string { return searchHref(s.Query, s.Type, page) }
+// pageHref is page of the query's results, limited to the type shown and
+// searched by the plan shown.
+func (s Search) pageHref(page int) string { return searchHref(s.Query, s.Type, page, s.Plan) }
+
+// Address is the page's own address, its plan's when it has one: what an
+// understood search's history entry holds, so that reload, back and
+// forward search by the plan rather than asking the model again.
+func (s Search) Address() string { return s.pageHref(s.page()) }
 
 // SearchHome is what the search page shows without a query, under the
 // box. Zero values are unknown: a read the home does without is left out.
@@ -492,13 +506,13 @@ type Tab struct {
 }
 
 // TypeTabs are the search's type filter: a link to the first page of this
-// query limited to each offered type, the current one marked. A type the
-// page doesn't offer (thread, unknown) still limits the search, and marks
-// none.
+// query limited to each offered type, by the plan shown, the current one
+// marked. A type the page doesn't offer (thread, unknown) still limits the
+// search, and marks none.
 func (s Search) TypeTabs() []Tab {
 	tabs := make([]Tab, 0, len(searchTypes))
 	for _, t := range searchTypes {
-		tabs = append(tabs, Tab{Label: t.label, Href: searchHref(s.Query, string(t.contentType), 1),
+		tabs = append(tabs, Tab{Label: t.label, Href: searchHref(s.Query, string(t.contentType), 1, s.Plan),
 			Current: s.Type == string(t.contentType)})
 	}
 	return tabs
@@ -605,30 +619,12 @@ func (h SearchHit) Saved() string {
 	case saved.Folder != "":
 		return "Saved in " + saved.Folder
 	}
-	return "Saved from " + sourceName(h.Bookmarks[saved.Index].Source)
+	return "Saved from " + planlabel.Source(h.Bookmarks[saved.Index].Source)
 }
 
 // Unavailable says why the hit has no page to read, when only what it
 // was saved as is left (docmeta.Unavailable).
 func (h SearchHit) Unavailable() string { return docmeta.Unavailable(h.State) }
-
-// sourceName names a bookmark's source for people; one it doesn't know is
-// shown as stored.
-func sourceName(source string) string {
-	switch source {
-	case store.SourceChrome:
-		return "Chrome"
-	case store.SourceSafari:
-		return "Safari"
-	case store.SourceFirefox:
-		return "Firefox"
-	case store.SourceHTML:
-		return "a bookmarks file"
-	case store.SourceManual:
-		return "curio"
-	}
-	return source
-}
 
 // shownMatches is how many of a hit's matches its result shows; the rest
 // are a click away.
