@@ -1,0 +1,43 @@
+== planned
+understood (gemma4:26b, 1.3 s): list · Videos · Saved Jun 1 – Sep 22, 2018
+also searched: raft consensus; leader election · looked for: In Search of an Understandable Consensus Algorithm, etcd
+
+== planned, filters alone
+understood (gemma4:26b, 1.0 s): list · From Safari · Saved before Apr 18, 2022
+
+== planned, names alone
+understood (gemma4:26b, 2.0 s): one
+looked for: Attention Is All You Need
+
+== supplied
+understood: keywords · Published in 2019
+
+== cold
+searched your words: gemma4:26b is loading
+
+== checking
+searched your words: curio is checking gemma4:26b
+
+== unfit
+searched your words: gemma4:26b didn't pass the check "a month and a type"; set generation.roles.planner.model to a model that passes, or search.understand: false
+
+== timeout
+searched your words: understanding took longer than 5s
+
+== timeout, held
+searched your words: 3 plans in a row took longer than 5s; understanding resumes at 15:02
+
+== unavailable
+searched your words: ollama generate: ollama unreachable
+
+== unavailable, not pulled
+searched your words: gemma4:26b isn't pulled — run curio up
+
+== invalid
+searched your words: the answer isn't JSON
+
+== too long
+searched your words: the question is 600 bytes; curio understands questions of at most 512
+
+== off
+== not asked

@@ -160,10 +160,11 @@ when the entry was first committed.
 - 2026-10-03 — [Page text: not-found notices, parked domains and sign-in forms](#page-text-not-found-notices-parked-domains-and-sign-in-forms)
 - 2026-10-04 — [Interest map: two views of each regrouping, drawn when it is built](#interest-map-two-views-of-each-regrouping-drawn-when-it-is-built)
 - 2026-10-13 — [Search evaluation: graded, per kind, on a copy, never in the repo](#search-evaluation-graded-per-kind-on-a-copy-never-in-the-repo) (revised)
-- 2026-10-13 — [Model roles: a provider and model per use, inheriting generation's](#model-roles-a-provider-and-model-per-use-inheriting-generations)
+- 2026-10-13 — [Model roles: a provider and model per use, inheriting generation's](#model-roles-a-provider-and-model-per-use-inheriting-generations) (revised)
 - 2026-10-13 — [Metadata search: a fields index and a card per document](#metadata-search-a-fields-index-and-a-card-per-document) (revised)
-- 2026-10-14 — [Saved dates and search filters](#saved-dates-and-search-filters)
+- 2026-10-14 — [Saved dates and search filters](#saved-dates-and-search-filters) (revised)
 - 2026-10-14 — [Chunks embedded with their context](#chunks-embedded-with-their-context)
+- 2026-10-14 — [Understanding the question: a planner role, one structured call, grounded filters, a fitness check](#understanding-the-question-a-planner-role-one-structured-call-grounded-filters-a-fitness-check)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -13013,6 +13014,25 @@ many matched queries rank exactly the baseline's documents in its order,
 and names the others by id: "no unfiltered ranking changed" is a line of
 the report. The format stays 1. See "Saved dates and search filters".
 
+**Revised (2026-10-14), understanding:** the planned variants measure
+search understanding. `planned` searches each query by the plan
+config.yaml's planner model gives it (whatever `search.understand` says),
+its filters in place of the query file's, which then are the oracle the
+plan's are compared with; `planned-filters`, `planned-rewrites` and
+`planned-names` search by one part of it. Before the first, the tool pings
+the model (never pulling it), loads it and runs its fitness check, and
+plans every query once for all four, as of `-today`; the check's verdict
+is reported prominently, `planner.check`, and the variants run whatever it
+is. Each planned query records its plan, status, `plan_ms` and dropped
+filters, the `plan` stage counts in its total (Enter to results without
+the API's hydration), each variant counts its plan statuses, and the
+applied filters are compared with the file's in calendar days (same,
+narrower, wider, wrong, missing, extra). `-plans` replays a report's plans
+(matched as `-baseline` matches queries), asking no model, so later work
+is measured without the planner's variance. The text names ids and counts
+only; the log drops `rewrites` and `names` as it drops `query`. The format
+stays 1. See "Understanding the question".
+
 ---
 
 ## Model roles: a provider and model per use, inheriting generation's
@@ -13084,6 +13104,18 @@ know `generation.roles` ("field roles not found in type
 config.Generation", checked with v2.6.0's config loader), so its daemon
 refuses to start and its CLI fails on the same parse; remove the key
 first, as setup.md says.
+
+**Revised (2026-10-14):** a second role, `planner` (search
+understanding), is in use while `search.understand` is on, whatever
+insight says. The daemon pulls its model only with another role's pull
+of the same model (`config.Role.PullsAlone`): with both roles on
+generation.model, the default, it pulls it once for both ("interest
+labels, search understanding"); with the labels off, or on another
+model, `curio up` pulls it, with consent, and until then searches say
+it isn't pulled. `curio up` restarts a daemon from before the role, as
+for one that gained `labels`. The setup texts name both roles. Questions
+leave this machine only for a server the planner role names itself. See
+"Understanding the question".
 
 ---
 
@@ -14267,6 +14299,12 @@ measured against an over-fetch at 4,096: a bound of their own, measured
 against the sized over-fetch, may take a broad filter's cards off the
 exact path.
 
+**Revised (2026-10-14):** the planner sets saved windows from a
+question's own words, as local midnights in the daemon's zone, and never
+`include_undated`, which flooded a window with the undated 40%; the
+dashboard offers a planned date filter's undated documents as a link
+instead. See "Understanding the question".
+
 ---
 
 ## Chunks embedded with their context
@@ -14815,6 +14853,621 @@ rules) is a change in `internal/indexer` and a `ContextVersion` bump with
 a new golden; every home's next start re-embeds its library. Measure it
 first with `make search-eval REINDEX=1` on a copy. The batch size is a
 constant, measured the same way.
+
+---
+
+## Understanding the question: a planner role, one structured call, grounded filters, a fitness check
+
+**Decision:** a search may ask the daemon to understand its question
+first. A writing role, `planner` (search understanding), turns the
+question into a plan in one structured call to a local model: what kind
+of answer it wants, the filters it states (when it was saved or
+published, the type of page, the browser), up to 3 rewrites and up to 4
+names it points at by description. Deterministic code decides what of the
+answer to trust: a strict decoding, filters kept only when the question's
+own words state them, and a three-question fitness check the model must
+pass before any of its plans is used. The engine searches the plan in the
+one fixed-depth ranking every page of a query is cut from: the rewrites
+in every list at half the question's weight, the names in what documents
+were saved as. `curio search` understands by default; the dashboard
+understands on Enter and never while you type; MCP's `search_bookmarks`
+never does.
+
+**Why:** a question says things a literal search can't use. "The talks
+on raft I saved last summer" names a window and a type; "that paper from
+Google on transformers" names a paper by description (made-up examples,
+like every one in this entry). On the graded set, the temporal questions
+under the filters an ideal reading of their words sets went from nDCG@10
+0.406 to 0.932 ("Saved dates and search filters"), but nothing wrote
+those filters; and a question that describes what it wants matches
+neither the words nor, often, the meaning of the page it wants.
+
+### The plan, and the prompt
+
+One `/api/generate` with the answer's JSON schema as Ollama's `format`
+(`generator.JSONGenerator`), greedy (temperature 0, sent: the generator
+dropped a 0 before), at most 256 tokens, `think` false, `keep_alive`
+`search.understand_keep_alive_minutes` (30) and the generator's
+`num_ctx` (8192): the labels' model is the
+planner's by default, and a request with another context size loads the
+model again (measured: 5.1 s on Ollama 0.40.4). The prompt
+(`internal/understand/prompt.go`, about 650 tokens, pinned by golden
+files with the schema; `PromptVersion` is the SHA-256 of the two) defines
+the kinds, asks for names "the question points at by description instead
+of by name … never a name the question already says … never a broad
+category", for rewrites of keywords and names, and for a filter only when
+the question says it, with synthetic worked examples ("in 2018", "in
+March 2019", "last week" in the MCP tool's wording, "N or more years
+ago", the seasons from the first day of their first month to their
+astronomical end). The fixed instructions come first, then today's
+weekday and date in the daemon's zone, then the question. **The prompt
+sends no library content**: no folders, sites or titles. The schema has
+no site, folder, host, `include_undated`, article or unknown: a folder is
+a stored, root-anchored path the model can't name without the library's,
+and a guessed site returns nothing when it is wrong (none of the 50 graded
+questions needed one; routing a named or described site into names
+lifted the site questions instead).
+
+### What a provider receives
+
+Each plan sends the provider exactly the fixed instructions (with their
+synthetic examples), today's weekday and date in the daemon's zone, and
+the question, at most 512 bytes; the fitness check sends its three
+made-up questions the same way. Nothing of the library: no title,
+folder, site, URL or text. The question is the user's own words, so it
+goes only where the user named: the planner role inherits
+`generation.provider` and `generation.base_url`, set for the labels,
+which send cluster terms and titles, not questions. While the resolved
+base URL is off this machine (a host other than loopback or the
+unspecified 0.0.0.0 or ::, which reach this machine), or the provider
+isn't Ollama, and
+`generation.roles.planner` doesn't name that base URL or provider itself,
+the planner sends nothing: every question is `unavailable`, its reason
+naming the key to set (or `search.understand: false`), one WARN at start,
+and `curio doctor` warns of it. Refusing it in `config.Validate` was
+rejected: a 2.6 home with a remote `generation.base_url` would have a
+daemon that refuses to start after the upgrade, for a feature it never
+asked for.
+
+### What code trusts
+
+- **Strict decoding.** One JSON object of the schema's shape, no unknown
+  key, a kind of the set, at most 4 names and 3 rewrites, a name at most
+  100 bytes and a rewrite 160 once trimmed, a reply not cut off at the
+  token cap: anything else is `invalid`, and the question's words are
+  searched. Empty strings and case-insensitive repeats are dropped, so is
+  a rewrite that is the question, and a keywords plan's rewrites.
+- **Grounded filters.** Each filter dimension is kept only when the
+  question's own lowercase ASCII words state it: a saved window needs a
+  year (19xx or 20xx) or a time word (months, their abbreviations, today,
+  week, ago, the seasons, recently…); a published window that and a word
+  of publishing; a content type a word of its lexicon (video: video,
+  talk, youtube, lecture, clip, watch, webinar…; repo: repo, repository,
+  github, gitlab, codebase; pdf; thread: thread, tweet); a browser its
+  name. Then a saved window that starts after tomorrow or ends by 1990 is
+  dropped, and each dimension left must pass `FilterRequest.Resolve`
+  alone, a window as a pair. A dimension that fails is dropped alone, the
+  rest of the plan standing, and the response lists it with why. The
+  lexicons are English: a question in another language keeps its
+  rewrites and names and loses its filters. Measured in review: llama3.2,
+  the weak control, sets every filter on every question; its filters
+  applied as given took all questions' nDCG@10 from 0.655 to 0.27, and
+  with the guards to 0.648.
+- **Saved days are local midnights**, the day the user means starting
+  where they are (measured in review: temporal nDCG@10 0.947 against
+  0.932 for UTC days); published days stay days, stored at UTC
+  midnight.
+- **Never `include_undated`.** With it (measured in review), the
+  temporal questions' nDCG@10 fell from 0.932 to 0.546 and the analytic
+  one's from 0.095 to 0: the 40% of saves without a known date flood the
+  window. The dashboard offers the undated documents as a link on the
+  date's chip instead.
+- **Names the question already states are kept.** Dropping them measured
+  worse in review (0.762 against 0.770).
+
+### Rewrites and names in one ranking
+
+`search.Request` takes `Rewrites` and `Names`. Each rewrite reads all five
+lists at `search.rewrite_weight` (0.5) times each list's weight; each name
+reads the document lists alone (fields, titles, cards) at
+`search.name_weight` (1) times theirs, never BM25 or vector over the
+chunks: a name is what a document is saved as, and a page that merely
+mentions it is not the one asked for. Every text that needs a vector is
+embedded in one call; every chunk list fuses in one RRF in a fixed order,
+then the document lists add query by query, ties by document ID, so the
+pages of a planned query tile its k=100 ranking. A semantic failure drops
+every query's semantic lists. Measured in review with the engine's own
+fusion: rewrites at 0.25 / 0.5 / 1 gave all questions' nDCG@10 0.688 /
+0.693 / 0.690; names at 0.5 / 1 / 2, 0.680 / 0.679 / 0.661; with filters
+and rewrites at 0.5, names on fields and titles at 1 gave 0.770 and adding
+cards 0.776; names alone hurt the list and code kinds (−0.07, −0.05) but
+not in combination; a phrase or one-term title query for a name gained
+nothing.
+
+A planned search makes up to 33 store reads (32 lists, and the count of
+what a date filter couldn't judge) from a pool of 32 connections the
+workers share, so every store read of one search takes one of 6 slots,
+around the call itself (an `errgroup.SetLimit` whose goroutines
+start others can deadlock). Measured in review: p50 0.36 s and p95 0.49 s
+bounded against 0.40 s and 0.55–0.87 s unbounded; a literal search 0.16 s.
+
+### The fitness check
+
+A model that writes plausible plans can still hurt: with the guards,
+llama3.2's rewrites and names cost all questions −0.03 and the owner's
+−0.09 nDCG@10. So before its first plan the planner asks the model three
+made-up questions and compares the raw answers, before any guard: "postgres
+vacuum tuning" must set no filter; "videos about rust ownership I saved in
+October 2017" exactly saved_after 2017-10-01, saved_before 2017-11-01 and
+content_type video; "the paper from Google that introduced the transformer
+architecture" must name "Attention Is All You Need" and set no filter. In
+review gemma4:26b passed all three on two dates and llama3.2 failed all
+three, the same way each time. A probe answered wrong, an answer that
+can't be used, or a request its provider refuses as made (a format or
+option the model doesn't support) makes the model unfit for the life of
+the process (one WARN naming the probe and the fix: another
+`generation.roles.planner.model`, or `search.understand: false`); no
+answer, a timeout, a missing model, a refused caller, a provider that
+can't serve now, or a failure of no known kind says nothing of it, and
+the check is tried again after a minute. What a failure says is read
+from provider-neutral sentinels in `internal/generator`
+(`ErrUnreachable`; `ErrModelMissing`, a 404; `ErrUnauthorized`, 401, 402
+or 403; `ErrUnavailable`, 408, 429 or a 5xx; `ErrBadRequest`, any other
+4xx), which each provider's failures match with their message kept, so a
+cloud provider's network error or expired key never makes a model unfit
+until a restart.
+After a failed check the planner unloads the model (`keep_alive` 0),
+unless a role in use writes with it: an unfit model would otherwise sit
+loaded for its keep-alive, beside the embedder, for nothing. The verdict
+is in memory: a restart checks again.
+
+### Warm-up, keep-alive, and a cold model
+
+A cold load of gemma4:26b took 7.3–10.9 s in review (the first plan
+came 4.4–7.7 s after a cold request here, below), and a generate request
+cancelled during it aborts the load (Ollama 0.40.4: `/api/ps` never lists
+the model afterwards). A planner whose deadline is shorter than the load
+would never warm its own model. So `Plan` first asks `/api/ps` (within
+1 s); a model not loaded starts a background warm-up (a prompt-less
+generate, the same `num_ctx`) on the daemon's lifetime context, never the
+request's, at most one at a time, and the question is answered at once
+with status `cold`, its words searched. The check runs the same way
+(`checking`). A warm-up that fails answers `unavailable` for a minute.
+A model the provider's listing doesn't name answers `unavailable: <model>
+isn't pulled — run curio up` without a warm-up, and is never pulled; one
+whose load says it is missing answers so until a retry, a minute apart,
+finds it. The model stays loaded
+`search.understand_keep_alive_minutes` (30) after each plan or warm-up.
+Rejected: warming on the
+first keystroke, which loads a model of about 19 GB for users who type and
+click without pressing Enter, and warming at start, which loads it on
+every auto-start, searched or not.
+
+### Where the model wasn't measured
+
+Only gemma4:26b was measured as the planner (above). `curio up` picks
+the writing model by memory, and the planner writes with it by default:
+qwen3:4b-instruct under 16 GB, gemma4:12b at 16 GB,
+gemma4:26b-a4b-it-qat at 32 GB, gemma4:26b from 64 GB. The three below
+64 GB are unmeasured as planners: whether they pass the check, how long
+their plans take beside the embedder, and whether Ollama keeps them
+loaded together. The planner is the first use of a writing model that
+must sit in memory beside the embedder while searches run. So a default
+install below 64 GB gets, on its first Enter after a start: a cold load
+of its model (2.5, 7.6 or 16 GB), searched by the words meanwhile, then
+the check. A model that fails it is unloaded and never asked again until
+a restart (unless the labels write with it); one that passes plans every
+question, and three ways it could hurt are bounded:
+
+- **Plans that keep timing out.** After 3 in a row past
+  `search.understand_timeout_seconds`, questions answer `timeout` at
+  once, asking no model ("3 plans in a row took longer than 5s;
+  understanding resumes at 15:02"), for 2 minutes, then 4, 8 and at most
+  15 while the plan asked after each hold times out too; a plan that
+  answers in time, even one that can't be used, ends the run. Plans in
+  flight together that all time out start one hold, not one escalated
+  per plan. Each
+  question would otherwise cost its full timeout before its words were
+  searched.
+- **A model Ollama keeps evicting.** A model found unloaded before its
+  keep-alive ran out (the last answer's or warm-up's, or 5 minutes when
+  another role writes with it, since the labels' requests set Ollama's
+  default) was unloaded for another model, most often the embedder. The
+  second such eviction within an hour holds warming for 15 minutes: a
+  question that finds it unloaded answers `unavailable` ("Ollama unloaded
+  <model> within its keep-alive 2 times, for other models; curio loads it
+  again from 15:17"), one that finds it loaded is planned. Each Enter
+  would otherwise reload gigabytes and stall the index embeds queued
+  behind the load. A model found unloaded after its keep-alive ran out
+  ends the count.
+- **An unfit model's memory.** Freed after the check, as above.
+
+`/v1/healthz`'s `understanding` says each (the verdict and when, the
+holds in effect, the last status and failure), from the planner's memory
+alone; `curio doctor`'s `understanding` check warns of each with its fix,
+`curio status` prints one warning line while one holds, and the
+dashboard's note and `curio search`'s line carry the fix for an unfit
+model.
+
+**Open for the release: measure the three tiers.** No model was pulled
+to measure them. When a tier's model is available, run, with Ollama
+otherwise idle:
+
+```sh
+make planner-check MODEL=gemma4:12b
+```
+
+which needs no library: it runs the fitness check, times plans of eight
+made-up questions against the timeout, embeds a query and reads
+`/api/ps` (both models loaded, or the planner's evicted), and unloads
+the model if it loaded it. Then, on a copy of a library and its graded
+set, with a config naming the tier as the planner
+(`generation.roles.planner.model: gemma4:12b`):
+
+```sh
+make search-eval DB=<copy> QUERIES=<file> CONFIG=<tier.yaml> \
+  VARIANTS=hybrid,planned JSON=<tier.json> BASELINE=<hybrid baseline>
+curl -s http://localhost:11434/api/ps
+```
+
+searcheval reports the check's verdict (`planner.check`), each plan's
+status and time, and the planned variant's nDCG against hybrid's; `/api/ps`
+right after says whether the planner and the embedder stayed loaded
+together. Record each tier here; a tier that fails the check, or whose
+planned nDCG@10 falls below hybrid's, should not understand by default
+(its `curio up` tier then sets `search.understand: false`, or another
+planner model).
+
+### Its model is pulled with consent
+
+The daemon pulls a role's model with `generation.auto_pull` only when the
+role pulls alone (`config.Role.PullsAlone`): the labels do, the planner
+doesn't. Search understanding is on by default, so otherwise a home that
+labels nothing with a writing model (`insight.labeling: terms`, or
+insight off) would start downloading `generation.model`, gigabytes, on
+its first start after the upgrade. The planner's model is pulled by
+`curio up`, or rides on another role's pull of the same model on the
+same server (the labels', by default: both write with
+`generation.model`, pulled once for both). `curio up` offers a model only
+the planner writes with as optional: its models check warns rather than
+fails (`curio doctor`'s too), and a no to the pull leaves the model out,
+says that searches use their words and how to pull it later, and lets
+the run go on; it never writes `search.understand` into config.yaml,
+which it never edits. A planner whose questions are withheld (a remote
+base URL the role doesn't name) gets no model offered at all, the plan
+saying why. Until the model is pulled, searches answer `unavailable:
+<model> isn't pulled — run curio up`: a question that finds the model
+unloaded asks the provider's model listing (local, quick) before
+starting a warm-up, so the first one says so too, and the next question
+after a pull loads it.
+
+### Questions, logs and pages
+
+- **A question over 512 bytes** is searched by its words, status
+  `too_long`, and never sent: it is a paste, not a question, and its
+  plan's prompt would grow with it. The graded questions are at most 130
+  bytes (23 words), half of them 61 or less.
+- **Logs.** Each cause of a plan's failure is logged at WARN the first
+  time since the last plan made, at DEBUG after, so an outage a week
+  later warns again. Asking whether the model is loaded
+  (`unavailable:loaded`), loading it (`unavailable:load`), checking it
+  (`unavailable:check`), asking it for a plan (`unavailable:generate`)
+  and finding it not pulled (`unavailable:missing`) are causes of their
+  own. Every question is one DEBUG line: its status,
+  `took_ms`, model and `PromptVersion`, never its text.
+- **Another site's link.** `isolateDashboard` lets another site's
+  top-level navigation to `/ui/` through, so a link to
+  `/ui/?q=…&understand=1` would load the planner's model for its
+  keep-alive. The page asks the planner only when the browser says the
+  request is the dashboard's own (`Sec-Fetch-Site: same-origin`), the
+  user's (`none`: an address typed, a bookmark, or a link opened from
+  another app, mail, chat or a terminal) or says nothing (a client that
+  isn't a browser, or a Safari before 16.4, which sends no Sec-Fetch
+  headers); no website can make a modern browser send either. Otherwise
+  it searches the words. A `?plan=` asks no model, wherever it comes
+  from.
+- **Plan texts refuse format characters** (Unicode's Cf: bidirectional
+  overrides and isolates, zero-width spaces, soft hyphens), as they refuse
+  control characters: no search needs one, and one can make a chip or the
+  understood line read other than it is. The zero-width non-joiner and
+  joiner (U+200C, U+200D) stay: Persian and Indic words and emoji
+  sequences hold them.
+- **A plan and its query embed fit the CLI's 30 s.**
+  `search.understand_timeout_seconds` plus `search.embed_timeout_seconds`
+  plus 1 s (asking whether the model is loaded) stay under 25 s, which
+  leaves the reads 5 s: past 30 s `curio search` gives up, so a slow
+  Ollama would read as a client timeout instead of a search of the words.
+  The planner holds the sum (`understand.OptionsFrom`): past it, plans get
+  what the embed timeout leaves (24 − embed − 1 s, one WARN at start), and
+  with less than a second left no question is planned, `unavailable`
+  with a reason naming both keys and `search.understand: false`, which
+  doctor and status show. `config.Validate` only bounds
+  `understand_timeout_seconds` to [1, 23]: refusing the sum would refuse a
+  config.yaml 2.6 took, since `embed_timeout_seconds` alone (19 to 29) can
+  reach it, and a refused config stops the daemon (exit 0, which launchd
+  doesn't restart) and every command.
+
+### Ollama shared with the re-embed
+
+The planner and the embedder (an index job's batch of 8, the fed
+re-embed, a search's query) share one Ollama: a plan can queue behind an
+index batch, and a warm-up's load can hold index embeds back. The two
+stay independent. A plan's failure is never reported to the embedder
+hold, which only the index and cards handlers close, so a planner outage
+holds no job; the hold gates job claims alone, so search's query embeds
+never wait on it. A plan queued behind index batches is bounded by the
+planner's timeout and then by the timeout hold, and repeated reloads
+that would stall index embeds by the eviction hold.
+
+Rejected: embedding the question while the plan is made. Its vector
+doesn't depend on the plan, but a planned search embeds its rewrites and
+names after the plan anyway, in the one batch that would hold the
+question, so the overlap saves the cost of one text in that batch:
+measured with qwen3-embedding:0.6b warm and Ollama otherwise idle, a
+batch of the question, 3 rewrites and 4 names took p50 101 ms against
+89 ms without the question (20 each), 12 ms of a planned search's p50
+1.3 s; the question alone took 15 ms, what a search of the words after a
+failed plan would save. A separate embed would also need its failure
+carried into the engine, so a down Ollama isn't waited on twice. The one
+case it would help more, the first search after a cold start, whose
+query embed waited 3.7 s behind the planner's load once (below), is left
+as a known limit.
+
+### Paging by the plan, not a cache
+
+The response carries the plan as applied (`understanding.plan`); a request
+may send one back (`plan`), and no model is asked. An understood search's
+next pages, a filter taken out, the dashboard's reload, back and forward,
+and searcheval's replay all go by it, so its pages are windows of one
+ranking by construction. Rejected: a bounded in-memory plan cache keyed by
+question, day and model, which can't keep page 2 on page 1's pool across a
+restart, an eviction, a change of day or the model's own variance, and
+adds state.
+
+### Surfaces
+
+- **API.** `POST /v1/search` takes `understand` or `plan`, not both. The
+  request's own filters win per dimension (content type, host, source,
+  site, folder, the saved window, the published window, and
+  `include_undated` with the request's dates when it sets any), checked
+  alone first as before; the plan's filter of a dimension the request sets
+  is reported dropped. Every way a question goes without a plan is a 200
+  with the words' results and `understanding.status`: off, cold,
+  checking, unfit, timeout (`search.understand_timeout_seconds`, 5, or
+  held after 3 in a row), unavailable, invalid or too_long.
+- **Dashboard.** Keystrokes stay literal and cost what they did: the
+  input no longer triggers on `search` (which Enter fires on a search
+  box), and its `hx-include` of the form leaves submit buttons out. Enter
+  and the Search button submit the form, whose button is named
+  `understand`; htmx sends the submitter, as a plain GET does. The box
+  and the form share one `hx-sync`, so the box's search still waiting out
+  its 400 ms delay when Enter is pressed was sent after the submit and
+  replaced it: Enter right after typing, the common case, lost its
+  understanding (found in review). htmx keeps that timer to itself, and
+  with `allowEval` off no trigger filter can say "unless submitted
+  since", so `search.js`, which the search page alone loads, drops a
+  field's request as htmx confirms it while its form was submitted since
+  the field last changed; typing on searches the words again. The plan
+  travels as an opaque `?plan=` token, and htmx is told to push the plan's
+  address. The token's JSON leaves &, < and > unescaped (escaped for HTML,
+  each is six bytes, and a plan of them made a 7 KB address the page
+  refused) and plan texts refuse control characters, so a planner's plan
+  at its caps is a token of at most 2,772 bytes, within the 4 KiB the page
+  takes. Each filter is a chip that searches without it.
+- **CLI.** `curio search` understands by default and prints what it
+  understood; `--literal` doesn't. Right after an upgrade an older daemon
+  refuses the field with its unknown-field 400; `curio search` then
+  searches the words and says to restart the daemon. Telling that refusal
+  apart reads the decoder's text, the one place an error is read by its
+  words.
+- **MCP.** `search_bookmarks` gets no `understand`: its caller is a
+  language model that writes filters and rewrites itself, and a second,
+  usually weaker, local model would add 1–3.5 s a call (below), out of
+  the 30 s a tool call has, with guesses that compete with its own. The
+  API's fields stay there if the evidence changes.
+- **searcheval.** The planned variants (`planned` and the ablations
+  `planned-filters`, `planned-rewrites`, `planned-names`) plan every
+  question once with config.yaml's planner as of `-today`, after its
+  check, reported and never a gate; `-plans` replays a report's plans; the
+  query file's filters become the oracle the plan's are compared with.
+
+### The dashboard in a browser
+
+Headless Chrome drove the search page against a scratch daemon on a copy
+of the owner's library (its own home and port, its queue paused), whose
+planner was a fake model that passes the check and answers every
+question with a hostile plan after 1.5 s, at 1440 and 390 px, light and
+dark. All 41 checks passed:
+
+- typing sends no `understand`, and the first Enter, while the model is
+  checked, gets a quiet note, never an alert;
+- Enter and the button each send one understand request, and the page is
+  the plan's address, its understood line shown, with the grounded
+  filters as chips and the others dropped;
+- neither the planned nor the fallback page scrolls sideways in any of
+  the four views;
+- removing a chip, paging and reloading ask no model;
+- a keystroke during the understand request aborts it;
+- Enter 0, 0.2 and 0.35 s after the last keystroke, and the button 0 and
+  0.2 s after it, send one understand request, the only request, which
+  lands understood at the plan's address, and typing on then searches the
+  words;
+- Escape and clearing the box bring the landing back;
+- no script error, CSP violation or console error (the browser's own
+  `/favicon.ico` request aside).
+
+With `search.js` blocked, the control, Enter or the button at 0 and
+0.2 s lost the understanding to the waiting search of the words, as
+review found, and the words' page was shown.
+
+### Measured on the implementation
+
+On a fresh copy of the owner's library and the graded set ("Search
+evaluation"), searcheval with config.yaml's planner (gemma4:26b, Ollama
+0.40.4), `-today` 2026-10-12, against PR 2c's report: `hybrid` ranks all
+50 questions exactly as PR 2c did, so no literal ranking changed. The
+check passed and all 50 questions were planned; the guards dropped none
+of gemma4's filters. nDCG@10 / R@10:
+
+| | hybrid (PR 2c) | planned |
+|---|---|---|
+| all (50) | 0.655 / 0.599 | **0.771 / 0.664** |
+| owner-tagged (8) | 0.342 / 0.297 | 0.388 / 0.266 |
+| temporal (5) | 0.406 / 0.257 | 0.946 / 0.499 |
+| world hop (7) | 0.489 / 0.507 | 0.743 / 0.800 |
+| site or person (6) | 0.554 / 0.371 | 0.603 / 0.431 |
+| vague reference (7) | 0.761 / 1.000 | 0.820 / 0.929 |
+| code (6) | 0.815 / 0.772 | 0.862 / 0.772 |
+| evidence (6) | 0.669 / 0.613 | 0.688 / 0.626 |
+| list (7) | 0.725 / 0.462 | 0.724 / 0.473 |
+| keyword (5) | 0.929 / 0.864 | 0.929 / 0.864 |
+| analytic (1) | 0.000 / 0.000 | 0.258 / 0.023 |
+
+All questions' R@100 went from 0.799 to 0.873 and MRR from 0.824 to
+0.913. No kind fell more than 0.001. The owner-tagged and vague-reference
+questions put fewer judged pages in their top 10 while their nDCG@10
+rose. The review's prototype got 0.770 for all questions, 0.388 for the
+owner's. Replayed from this run's plans (`-plans`, no model asked) on a
+fresh copy after the review's changes and the merge of the chunk
+context, whose chunks predate the context, so the vectors measured are
+the same: hybrid ranked all 50 questions exactly as PR 2c did, and
+planned again got 0.771 / 0.664.
+
+Greedy decoding is not identical from run to run in Ollama. A second run,
+with Ollama otherwise idle, planned 45 of the 50 questions identically.
+The other 5 differed in a rewrite or a name, never in a filter: all
+0.770, site or person 0.587, world hop 0.745, every other group the same.
+This is also why paging carries the plan rather than asking again.
+
+**Ablations** (the plan's parts alone and in pairs, from the same plans),
+nDCG@10 for all / owner-tagged / temporal:
+
+| | all | owner | temporal |
+|---|---|---|---|
+| filters | 0.721 | 0.353 | 0.947 |
+| rewrites | 0.693 | 0.367 | 0.417 |
+| names | 0.678 | 0.315 | 0.406 |
+| filters + rewrites | 0.751 | 0.399 | 0.946 |
+| filters + names | 0.734 | 0.327 | 0.947 |
+| the plan | 0.771 | 0.388 | 0.946 |
+
+Each part adds once the others are there: rewrites +0.037 over
+filters and names, names +0.020 over filters and rewrites, and the
+filters +0.066 over the words alone. The review measured 0.721, 0.751 and
+0.770 along the same chain. Names alone cost the list kind 0.072
+(0.725 → 0.653), but the whole plan costs it nothing (0.724). Names cost
+the owner-tagged questions 0.011 within the whole plan (0.399 → 0.388)
+while adding 0.020 for all questions and 0.132 for world hop, so
+`name_weight` stays at 1.
+
+**Against the oracle.** The query file's filters, an ideal reading of
+the questions' words, lift hybrid to 0.709 for all questions (temporal
+0.932). The plan gets 0.771 (temporal 0.946): its rewrites and names add
+what no filter can. Comparing filters one dimension at a time with the
+oracle: of the oracle's six saved windows, the plans set five to the same
+days and one narrower. None was missing, wider or wrong. Two content
+types were extra, because a query file names no content type.
+
+**The weak control** (llama3.2, `generation.roles.planner` in a scratch
+config). The check failed on its first probe ("no filter"), so a daemon
+never uses its plans and searches the words: 0.655. Forced, searcheval
+plans every question anyway (the check is reported, never a gate). With
+the guards, its plans get 0.622 for all questions and 0.249 for the
+owner's (owner −0.093), and 0.559 for temporal. The guards dropped its
+saved windows on 42 questions, published windows on 30, browsers on 30
+and content types on 31, and kept saved windows on 8. Unguarded (the
+review's prototype, filters applied as given), it got 0.27 for all
+questions.
+
+**Latency.** The quality run's plan stage took p50 2.3 s and p95 3.4 s,
+its slowest plan 3.6 s, while another branch re-embedded a copy of the
+same library through the same Ollama. In two earlier runs under that
+load, 14 and 11 of the 50 plans ran past the 5 s timeout, so the quality
+runs above set `understand_timeout_seconds: 60`, with which no plan
+failed (the key now takes at most 23, and a plan's time is held to the
+CLI's budget: a run that measures ranking under load sets 13, which the
+default embed timeout leaves). With Ollama otherwise idle, a run at the
+default 5 s planned all 50: p50 0.93 s, p95 1.25 s, slowest 1.29 s. The review saw p50 1.0–2.8 s
+and p95 1.6–3.7 s across machine states.
+
+Through a scratch daemon on the copy (its own home and port, auto-pulls
+off, the default 5 s), each round sent the 50 questions as `POST
+/v1/search` with `understand`, warm, and repeated:
+
+| | requests | planned | request p50 / p95 | plan p50 / p95 |
+|---|---|---|---|---|
+| Ollama otherwise idle | 2 × 100 | 200 | 1.32 / 1.67 s, 1.33 / 1.71 s | 1.03 / 1.34 s, 1.10 / 1.35 s |
+| beside another branch's searcheval and tests | 2 × 100 | 200 | 1.44 / 2.11 s, 1.55 / 2.09 s | 1.04 / 1.39 s, 1.16 / 1.56 s |
+
+In the idle rows the machine's other work was test suites that use no
+real Ollama (load averages 6–19). Cold, with the model unloaded by a
+`keep_alive` 0 generate: when the check had already passed, the first
+understood request answered `cold` at once (0.12–0.13 s idle, 0.23 s
+under load). The first planned answer came 4.4–5.1 s after it (6.0–7.7 s
+under load). After a restart, which loads and checks, it answered
+`cold`, then `checking`, then planned 6.3–7.2 s after the first request
+(7.1–7.3 s under load). Once under load, the first answer took 3.7 s:
+its words' query embedding waited behind the planner's load in the same
+Ollama.
+
+### Private data and library content
+
+The owner's questions, judgments, oracle windows, copies and reports stay
+outside the repository; the prompt's examples, the check's probes and the
+tests are made up, and the probes were checked against the private set.
+No log record carries a question, a rewrite or a name (a planner test
+captures every record over a distinctive question; searcheval's log
+drops them). The engine's warning of a degraded search carries the
+query's length (`query_bytes`), never the query, at WARN once an outage
+and DEBUG after, until a search isn't degraded (an engine test captures
+the records). The prompt carries no library content. Putting the
+library's top folders or sites in it would let the model set folder
+filters and name the user's sites, at the cost of sending library
+content to the model and of a longer prompt (about 0.2 s a 100 tokens on
+gemma4:26b). Not measured; a later, opt-in, local-only change.
+
+### Known limits
+
+- The grounding lexicons are English.
+- The fitness check's verdict is in memory: every restart checks again.
+- A plan waits behind a rebuild's labels on the same model.
+- The first understood search after a restart, or after the keep-alive
+  idle (30 minutes by default), searches its words while the model loads
+  and is checked, and that search's query embedding can wait behind the
+  load in the same Ollama (once 3.7 s, measured above).
+- curio up's tiers below 64 GB are unmeasured as planners ("Where the
+  model wasn't measured").
+- A model the check passes can still plan a question wrong; the
+  understood line shows what it did, and each filter can be taken out.
+- Label requests send no `keep_alive`: after a rebuild labels with the
+  model the two roles share, Ollama's 5-minute default replaces the
+  planner's 30 minutes, and a search after that finds the model cold.
+  Sending 30 minutes from the labels would hold the model that long in a
+  home that never searches. The eviction count allows for it: a model
+  another role shares is counted evicted only within 5 minutes of the
+  planner's last answer.
+- Whether the model is loaded is read by name alone. A model another
+  client loaded with another context size counts as loaded, and each plan
+  then reloads it (5.1 s measured) under its 5 s timeout, which aborts the
+  load, so plans time out while that client keeps it so. `/api/ps`
+  reports the loaded context (it read the requested 8192 here, at
+  Ollama's default parallelism); counting a mismatch as not loaded would
+  warm the model in the background instead, but whether Ollama reports it
+  per request or per runner under `OLLAMA_NUM_PARALLEL` wasn't measured,
+  and a per-runner figure would warm it on every search.
+
+**Going back.** An older curio refuses the new keys and role: remove
+`search.understand`, `search.understand_timeout_seconds`,
+`search.understand_keep_alive_minutes`, `search.rewrite_weight`,
+`search.name_weight` and `generation.roles.planner` from config.yaml
+first. An older daemon
+refuses `understand` and `plan` in a request with its unknown-field 400;
+`curio search` falls back to the words.
+
+**How to revisit:** a change of the prompt or schema changes
+`PromptVersion` and its golden files: run `make search-eval` with the
+planned variants and the oracle file, and the weak control, before it is
+recorded. A weight is a config key, measured the same way.
 
 ---
 

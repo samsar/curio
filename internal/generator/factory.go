@@ -12,6 +12,12 @@ import (
 // with nothing to change where a model is used. config.Validate refuses a
 // provider New doesn't know before any caller gets here.
 //
+// What a provider can do beyond prose is the interfaces its Generator
+// implements: a caller that needs JSON under a schema type-asserts
+// JSONGenerator, one that warms the model Warmer. A provider without
+// structured output must not implement JSONGenerator, so that such a
+// caller refuses it rather than parse prose.
+//
 // generator reads config, never the reverse: config is read by every
 // binary, and must not link the clients into them.
 func New(spec config.ModelSpec) (Generator, error) {

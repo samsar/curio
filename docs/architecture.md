@@ -149,8 +149,10 @@ all fetch/index/search/insight workflows.
   alone). What a page changes (refetch, reindex, rebuild, the queue's
   controls, a failure group's refetch) its own script, `actions.js`,
   sends to `/v1` as JSON, from
-  actions built in Go (`internal/ui/actions.go`). Every response carries
-  a strict CSP. See `docs/ui.md`, and decisions.md "Dashboard:
+  actions built in Go (`internal/ui/actions.go`); the search page's
+  `search.js` keeps a keystroke's search, still waiting out its delay,
+  from replacing the understood search Enter sent. Every response
+  carries a strict CSP. See `docs/ui.md`, and decisions.md "Dashboard:
   server-rendered pages in the daemon (phase 1)", "Dashboard: a design
   language under the CSP", "Dashboard: search is home, the Overview
   becomes Status", "Dashboard: actions through /v1, sent by a

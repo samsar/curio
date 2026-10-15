@@ -149,8 +149,9 @@ func (r *Runner) askQuestions(ctx context.Context, plan Plan) error {
 
 // applyStep checks s again, and when it still has something to do, asks
 // for consent, applies it and checks it again. left is the plan from s on,
-// for what a decline leaves to do. applied says whether it applied a fix;
-// res is the check it ended on.
+// for what a decline leaves to do; a no to an Offer leaves only that fix
+// undone, said, and the run goes on. applied says whether it applied a
+// fix; res is the check it ended on.
 func (r *Runner) applyStep(ctx context.Context, s Step, left Plan) (res Result, applied bool, err error) {
 	res = s.Check(ctx)
 	switch {
@@ -162,6 +163,12 @@ func (r *Runner) applyStep(ctx context.Context, s Step, left Plan) (res Result, 
 	ok, err := r.confirm(ctx, s, *res.Fix)
 	if err != nil {
 		return res, false, err
+	}
+	if !ok && res.Fix.Consent == Offer {
+		r.ui.Info(s.Name() + ": " + res.Fix.Declined)
+		// Declined, what it leaves is a warning the run ends on.
+		res.Fix = nil
+		return res, false, nil
 	}
 	if !ok {
 		declined := append(Plan{{Step: s.Name(), Result: res}}, left[1:].Fixes()...)

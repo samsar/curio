@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -87,6 +88,9 @@ type fakeOllama struct {
 	model       string
 	dim         int
 	queryEmbeds atomic.Int32
+	// plan answers a planner's question, the fitness check's included;
+	// nil plays an Ollama without the writing model.
+	plan func(question string) string
 
 	mu                    sync.Mutex
 	digest, version, salt string
@@ -166,9 +170,36 @@ func (f *fakeOllama) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			resp.Embeddings = append(resp.Embeddings, embed(salt, text, f.dim))
 		}
 		assert.NoError(f.t, json.NewEncoder(w).Encode(resp))
+	case "/api/ps":
+		fmt.Fprintf(w, `{"models":[{"name":%q,"model":%q}]}`, config.Default().Generation.Model,
+			config.Default().Generation.Model)
+	case "/api/generate":
+		f.generate(w, r)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// generate answers a planner's request with plan's reply to its question;
+// one without a prompt loads the model.
+func (f *fakeOllama) generate(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Prompt *string         `json:"prompt"`
+		Format json.RawMessage `json:"format"`
+	}
+	if !assert.NoError(f.t, json.NewDecoder(r.Body).Decode(&req)) || f.plan == nil {
+		http.Error(w, `{"error":"model not found"}`, http.StatusNotFound)
+		return
+	}
+	if req.Prompt == nil {
+		fmt.Fprint(w, `{"response":"","done":true,"done_reason":"load"}`)
+		return
+	}
+	assert.NotEmpty(f.t, req.Format, "a plan is asked for under its schema")
+	_, question, _ := strings.Cut(*req.Prompt, "\nQuestion: ")
+	reply, err := json.Marshal(f.plan(strings.TrimSuffix(question, "\n")))
+	assert.NoError(f.t, err)
+	fmt.Fprintf(w, `{"response":%s,"done":true,"done_reason":"stop"}`, reply)
 }
 
 // embedRequest reads an /api/embed request as the daemon must send it:
@@ -264,6 +295,8 @@ generation:
   auto_pull: false
 insight:
   labeling: terms
+search:
+  understand: false
 fetcher:
   native:
     backend: stock
@@ -370,6 +403,87 @@ func TestDaemon_BookmarkIsFetchedIndexedAndFound(t *testing.T) {
 	pidFile, err := os.ReadFile(home.PIDFile())
 	require.NoError(t, err)
 	assert.Empty(t, pidFile, "a clean exit empties the PID file")
+}
+
+// fitAnswers are a fit planner's answers to the fitness check's probes.
+var fitAnswers = map[string]string{
+	"postgres vacuum tuning": `{"kind":"keywords","names":[],"rewrites":[],"filters":{}}`,
+	"videos about rust ownership I saved in October 2017": `{"kind":"list","names":[],"rewrites":[],"filters":` +
+		`{"saved_after":"2017-10-01","saved_before":"2017-11-01","content_type":["video"]}}`,
+	"the paper from Google that introduced the transformer architecture": `{"kind":"one",` +
+		`"names":["Attention Is All You Need"],"rewrites":[],"filters":{}}`,
+}
+
+// TestDaemon_UnderstandsAQuestion: a search that asks for understanding is
+// searched by its words while the planner's model is checked, then by the
+// plan it writes, which the response reports; its pages, asked with that
+// plan, ask the model nothing more.
+func TestDaemon_UnderstandsAQuestion(t *testing.T) {
+	ctx := context.Background()
+	ollama, ollamaURL := serveOllama(t, digestA, "0.34.4")
+	var plans atomic.Int32
+	ollama.plan = func(question string) string {
+		if a, ok := fitAnswers[question]; ok {
+			return a
+		}
+		plans.Add(1)
+		return `{"kind":"one","names":["An Introduction to Zymurgy"],"rewrites":["fermentation chemistry"],` +
+			`"filters":{}}`
+	}
+	pages := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, articleHTML())
+	}))
+	t.Cleanup(pages.Close)
+	listen := freeLoopbackAddr(t)
+	home := newHome(t, listen, ollamaURL)
+	cfg, err := os.ReadFile(home.ConfigPath())
+	require.NoError(t, err)
+	understood := strings.Replace(string(cfg), "search:\n  understand: false\n", "", 1)
+	understood = strings.Replace(understood, "generation:\n", "generation:\n  base_url: "+strconv.Quote(ollamaURL)+"\n", 1)
+	require.NoError(t, os.WriteFile(home.ConfigPath(), []byte(understood), 0o600))
+	baseURL := "http://" + listen
+	ctl := daemonctl.New(home, daemonBin, baseURL)
+	t.Cleanup(func() {
+		if st, err := ctl.Status(context.Background()); err == nil && st.State == daemonctl.Running && st.PID > 0 {
+			_ = syscall.Kill(st.PID, syscall.SIGKILL)
+		}
+	})
+	require.NoError(t, ctl.EnsureRunning(ctx), logTail(home))
+	c := client.New(baseURL)
+	health, err := c.Healthz(ctx)
+	require.NoError(t, err)
+	assert.Contains(t, health.GenerationRoles, "planner")
+
+	created, err := c.CreateBookmark(ctx, client.CreateBookmarkRequest{URL: pages.URL + "/zymurgy"})
+	require.NoError(t, err)
+	docID := *created.Bookmark.DocumentID
+	require.Eventually(t, func() bool {
+		d, err := c.GetDocument(ctx, docID)
+		return err == nil && d.State == string(store.DocStateFetched)
+	}, 30*time.Second, 50*time.Millisecond, logTail(home))
+
+	const question = "that article on brewing chemistry"
+	first, err := c.Search(ctx, client.SearchRequest{Query: question, Understand: true})
+	require.NoError(t, err)
+	require.NotNil(t, first.Understanding)
+	assert.Equal(t, "checking", first.Understanding.Status, "the model is checked before its first plan")
+	var res *client.SearchResponse
+	require.Eventually(t, func() bool {
+		res, err = c.Search(ctx, client.SearchRequest{Query: question, Understand: true})
+		return err == nil && res.Understanding != nil && res.Understanding.Status == "planned"
+	}, 30*time.Second, 100*time.Millisecond, logTail(home))
+	require.NotNil(t, res.Understanding.Plan)
+	assert.Equal(t, []string{"An Introduction to Zymurgy"}, res.Understanding.Plan.Names)
+	assert.Equal(t, config.Default().Generation.Model, res.Understanding.Model)
+	require.NotEmpty(t, res.Items)
+	assert.Equal(t, docID, res.Items[0].Document.ID)
+	asked := plans.Load()
+
+	page, err := c.Search(ctx, client.SearchRequest{Query: question, Plan: res.Understanding.Plan})
+	require.NoError(t, err)
+	assert.Equal(t, "supplied", page.Understanding.Status)
+	assert.Equal(t, asked, plans.Load(), "a supplied plan asks the model nothing")
 }
 
 // getDashboard gets path from the daemon at baseURL, which must answer

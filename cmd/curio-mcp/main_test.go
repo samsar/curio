@@ -676,6 +676,42 @@ func TestMCP_SearchFilters(t *testing.T) {
 	assert.NotContains(t, cs.lastSearch.Load().(map[string]any), "filters", "no filter, none sent")
 }
 
+// TestMCP_SearchIsLiteral: search_bookmarks never asks the daemon to
+// understand the question, nor sends a plan, and its input has neither
+// field: the calling model writes the filters and rewrites itself, and a
+// second, local model would add seconds of the call's budget and guesses
+// that compete with its own (decisions.md "Understanding the question").
+func TestMCP_SearchIsLiteral(t *testing.T) {
+	cs := connectMCP(t)
+	_, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "search_bookmarks",
+		Arguments: map[string]any{"query": "raft talks I saved last summer", "content_type": []any{"video"},
+			"saved_after": "2025-06-01"}})
+	require.NoError(t, err)
+	req := cs.lastSearch.Load().(map[string]any)
+	assert.NotContains(t, req, "understand")
+	assert.NotContains(t, req, "plan")
+
+	tools, err := cs.ListTools(context.Background(), nil)
+	require.NoError(t, err)
+	found := false
+	for _, tool := range tools.Tools {
+		if tool.Name != "search_bookmarks" {
+			continue
+		}
+		found = true
+		schema, err := json.Marshal(tool.InputSchema)
+		require.NoError(t, err)
+		var input struct {
+			Properties map[string]any `json:"properties"`
+		}
+		require.NoError(t, json.Unmarshal(schema, &input))
+		assert.Contains(t, input.Properties, "query")
+		assert.NotContains(t, input.Properties, "understand")
+		assert.NotContains(t, input.Properties, "plan")
+	}
+	assert.True(t, found, "search_bookmarks is listed")
+}
+
 // TestMCP_SearchUndated: a date-filtered search says how many documents
 // it couldn't judge, in the text and the structured output, and whether
 // they were kept; one without a date filter says nothing.

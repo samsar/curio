@@ -73,7 +73,8 @@ func TestMapScripts(t *testing.T) {
 	for _, e := range entries {
 		static = append(static, e.Name())
 	}
-	assert.ElementsMatch(t, append([]string{"app.css", "actions.js", "htmx-" + htmxVersion + ".min.js"}, want...), static)
+	assert.ElementsMatch(t, append([]string{"app.css", "actions.js", "search.js", "htmx-" + htmxVersion + ".min.js"},
+		want...), static)
 }
 
 // mapScriptLines is the longest map.js may be. It holds the two views,

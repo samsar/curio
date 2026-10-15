@@ -22,7 +22,7 @@
 #       constant messages
 #   prealloc, misspell  small wins
 #   depguard       the store boundary, test-only and developer's-tool-only
-#                  dependencies
+#                  dependencies, and a search engine free of language models
 #   nolintlint     keeps suppressions specific and explained
 
 version: "2"
@@ -111,6 +111,23 @@ linters:
               desc: pages get their data through the Deps functions the JSON handlers use, never SQL
             - pkg: github.com/samsar/curio/internal/store/sqlite
               desc: pages get their data through the Deps functions the JSON handlers use
+        # Search ranks whatever plan it is given, and never asks a language
+        # model what a question means: the planner (internal/understand)
+        # reads search, never the reverse, so the engine, the developer's
+        # tools and every caller rank alike with or without a plan. Its
+        # tests may read the planner's share of config.Search.
+        search-llm-free:
+          list-mode: lax
+          files:
+            - "**/internal/search/**"
+            - "!$test"
+          deny:
+            - pkg: github.com/samsar/curio/internal/generator
+              desc: search ranks a plan it is given; understanding a question is internal/understand's
+            - pkg: github.com/samsar/curio/internal/understand
+              desc: understand reads search, never the reverse
+            - pkg: github.com/samsar/curio/internal/ollama
+              desc: search reaches the embedding model through its Embedder alone
         # The terminal UI library is the setup wizard's alone: nothing else
         # prompts, and the daemon and the MCP sidecar must not link it.
         prompts-in-setup:

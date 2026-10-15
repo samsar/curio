@@ -33,6 +33,7 @@ import (
 	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/ui"
 	"github.com/samsar/curio/internal/ui/uitest"
+	"github.com/samsar/curio/internal/understand"
 )
 
 // These tests drive the dashboard's pages over the real API (apitest): each
@@ -494,15 +495,25 @@ func TestUI_Search(t *testing.T) {
 	require.NoError(t, err)
 
 	form := getPage(t, srv, "/ui/", http.StatusOK)
-	assert.Contains(t, form, `<form class="search-hero" action="/ui/" method="get" role="search">`)
-	assert.Contains(t, form, `hx-get="/ui/" hx-trigger="input changed delay:400ms, search"`+
+	// Enter, or the button, submits the form, which understands the
+	// question: the button is named understand, and the form's own
+	// request, on submit, carries it.
+	assert.Contains(t, form, `<form class="search-hero" action="/ui/" method="get" role="search"`+"\n"+
+		` hx-get="/ui/" hx-trigger="submit" hx-sync="closest .search-page:replace"`+"\n"+
+		` hx-target="#results" hx-select="#results > *" hx-select-oob="#search-scope" hx-swap="innerHTML"`+
+		` hx-push-url="true" hx-indicator="#understanding">`)
+	// A keystroke searches the words: its trigger is input alone (search,
+	// which Enter fires on a search box, would be a second request), and
+	// its hx-include of the form leaves the submit button out.
+	assert.Contains(t, form, `hx-get="/ui/" hx-trigger="input changed delay:400ms"`+
 		` hx-sync="closest .search-page:replace" hx-include="closest form"`)
 	assert.Contains(t, form, `hx-target="#results" hx-select="#results > *" hx-select-oob="#search-scope" hx-swap="innerHTML"`)
-	assert.Contains(t, form, `hx-push-url="true"`)
-	assert.Contains(t, form, `hx-indicator="#searching"`)
+	assert.Contains(t, form, `hx-push-url="true" hx-indicator="#searching">`)
+	assert.Contains(t, form, `<p id="understanding" class="htmx-indicator understanding" aria-hidden="true">`+
+		`<span class="spinner"></span>Understanding your question…</p>`)
 	assert.NotContains(t, form, `<ol class="results">`)
 	assert.NotContains(t, form, `class="header-search"`, "the page is its own search box")
-	assert.Contains(t, form, `<button class="btn btn-primary" type="submit" aria-label="Search">`,
+	assert.Contains(t, form, `<button class="btn btn-primary" type="submit" name="understand" value="1" aria-label="Search">`,
 		"named where a phone shows only its icon")
 	assert.Contains(t, form, `<div id="results" aria-live="polite">`+"\n"+`<div class="landing">`)
 
@@ -826,15 +837,16 @@ func (failingRuns) LatestRun(context.Context, string, store.InterestRunStatus) (
 
 // TestUI_SearchHomeReadsOnlyWithoutAQuery: search as you type renders the
 // whole page on every keystroke, so with a query the page reads the search
-// alone, htmx's request as a plain GET; the home's reads, the counts and
-// the interests, run once each without one, and neither runs for a type
-// the page refuses.
+// alone, htmx's request as a plain GET, and never asks the planner; the
+// home's reads, the counts and the interests, run once each without one,
+// and neither runs for a type the page refuses.
 func TestUI_SearchHomeReadsOnlyWithoutAQuery(t *testing.T) {
 	states, runs, members := new(atomic.Int32), new(atomic.Int32), new(atomic.Int32)
+	planner := apitest.NewPlanner(understand.Outcome{Status: understand.StatusCold})
 	srv := apitest.Start(t, func(d *api.Deps) {
 		d.Documents = countingStates{d.Documents, states}
 		d.Insights = countingRuns{d.Insights, runs, members}
-	})
+	}, apitest.WithPlanner(planner))
 	srv.AddInterest(t, "Kafka", srv.AddDocument(t, "https://example.com/kafka", store.DocStateFetched))
 	for _, tc := range []struct {
 		path   string
@@ -859,6 +871,7 @@ func TestUI_SearchHomeReadsOnlyWithoutAQuery(t *testing.T) {
 		assert.Equal(t, tc.reads, runs.Load(), "%s: the latest run", tc.path)
 		assert.Zero(t, members.Load(), "%s: the landing names interests, never reads their members", tc.path)
 	}
+	assert.Empty(t, planner.Questions(), "a keystroke never asks the planner, nor the home")
 }
 
 // TestUI_SearchHome: without a query, the landing names the six largest

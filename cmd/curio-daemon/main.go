@@ -31,6 +31,7 @@ import (
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
 	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
+	"github.com/samsar/curio/internal/understand"
 	"github.com/samsar/curio/internal/version"
 )
 
@@ -454,6 +455,7 @@ type daemon struct {
 	keeper     *keepawake.Keeper
 	scheduler  *insight.Scheduler // nil with insight off
 	savedDates *api.SavedDateClassifier
+	planner    *planner // nil while search.understand is off
 	// hold holds the index and cards jobs back while the embedding model
 	// doesn't answer.
 	hold *jobs.EmbedderHold
@@ -519,6 +521,14 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 		Log:            slog.Default(),
 	})
 	engine := search.New(chunks, docs, index, emb, search.ConfigFrom(cfg))
+	// Built only while its role is in use: with search.understand off, a
+	// search that asks to be understood is told it is off.
+	var planner *planner
+	if slices.Contains(cfg.RolesInUse(), config.RolePlanner) {
+		if planner, err = newPlanner(ctx, cfg); err != nil {
+			return nil, err
+		}
+	}
 
 	// A change of build is verified by re-embedding a sample through the
 	// indexer, so the requests are the ones that made the stored vectors,
@@ -616,8 +626,33 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 	if scheduler != nil {
 		apiDeps.Interests = scheduler
 	}
+	if planner != nil {
+		apiDeps.Planner = planner
+	}
 	return &daemon{apiDeps: apiDeps, pools: pools, drift: driftMonitor, keeper: keeper, scheduler: scheduler,
-		savedDates: savedDates, hold: hold, reembed: reembed}, nil
+		savedDates: savedDates, planner: planner, hold: hold, reembed: reembed}, nil
+}
+
+// planner is search's planner, and the end of its background work's
+// context, so serve stops it however serving ended.
+type planner struct {
+	*understand.Planner
+	stop context.CancelFunc
+}
+
+// newPlanner builds search's planner, writing with the planner role's
+// model. Its background work, loading and checking that model, runs on a
+// context of ctx, the daemon's lifetime, never a request's: a request
+// cancelled during a cold load would abort the load itself. A provider
+// without structured output gets a planner that answers every question
+// off, logged once.
+func newPlanner(ctx context.Context, cfg config.Config) (*planner, error) {
+	gen, err := generator.New(cfg.Generation.Role(config.RolePlanner))
+	if err != nil {
+		return nil, err
+	}
+	lifetime, stop := context.WithCancel(ctx)
+	return &planner{Planner: understand.New(lifetime, gen, understand.OptionsFrom(cfg)), stop: stop}, nil
 }
 
 // driftHold says how the embeddings drifted, as the monitor last reported
@@ -832,30 +867,51 @@ type pullTarget struct {
 
 // pullTargets are the models the daemon keeps pulled: the embedding model
 // with embedding.auto_pull, then, with generation.auto_pull, the writing
-// model of each role in use, each pulled once however many uses share it
-// on one server. A role not in use pulls nothing: its multi-gigabyte model
+// model of each role in use that pulls alone (config.Role.PullsAlone),
+// each pulled once however many uses share it on one server. A role that
+// doesn't pull alone, the planner, joins a target another use pulls
+// already, and pulls nothing of its own: curio up pulls its model, with
+// consent. A role not in use pulls nothing: its multi-gigabyte model
 // would serve no one.
 func pullTargets(cfg config.Config) []pullTarget {
 	var out []pullTarget
-	add := func(baseURL, model, usedFor string, timeoutSeconds int) {
-		baseURL = strings.TrimRight(baseURL, "/")
+	find := func(baseURL, model string) int {
 		for i := range out {
-			if out[i].baseURL == baseURL && out[i].model == model {
-				out[i].usedFor += ", " + usedFor
-				return
+			if out[i].baseURL == strings.TrimRight(baseURL, "/") && out[i].model == model {
+				return i
 			}
 		}
-		out = append(out, pullTarget{baseURL: baseURL, model: model, usedFor: usedFor,
+		return -1
+	}
+	add := func(baseURL, model, usedFor string, timeoutSeconds int) {
+		if i := find(baseURL, model); i >= 0 {
+			out[i].usedFor += ", " + usedFor
+			return
+		}
+		out = append(out, pullTarget{baseURL: strings.TrimRight(baseURL, "/"), model: model, usedFor: usedFor,
 			timeout: time.Duration(timeoutSeconds) * time.Second})
 	}
 	if cfg.Embedding.AutoPull {
 		add(cfg.Embedding.BaseURL, cfg.Embedding.Model, "embeddings", cfg.Embedding.TimeoutSeconds)
 	}
-	if cfg.Generation.AutoPull {
-		for _, r := range cfg.RolesInUse() {
-			if spec := cfg.Generation.Role(r); spec.Provider == config.ProviderOllama {
-				add(spec.BaseURL, spec.Model, r.UsedFor(), spec.TimeoutSeconds)
-			}
+	if !cfg.Generation.AutoPull {
+		return out
+	}
+	var riders []config.Role
+	for _, r := range cfg.RolesInUse() {
+		spec := cfg.Generation.Role(r)
+		switch {
+		case spec.Provider != config.ProviderOllama:
+		case r.PullsAlone():
+			add(spec.BaseURL, spec.Model, r.UsedFor(), spec.TimeoutSeconds)
+		default:
+			riders = append(riders, r)
+		}
+	}
+	for _, r := range riders {
+		spec := cfg.Generation.Role(r)
+		if i := find(spec.BaseURL, spec.Model); i >= 0 {
+			out[i].usedFor += ", " + r.UsedFor()
 		}
 	}
 	return out
@@ -934,7 +990,7 @@ func indexing(queue store.JobStore) func(context.Context) (bool, error) {
 // classifications owed, the embedder hold's probes and the re-embed's feed
 // alongside the API until ctx is cancelled or the API fails, then shuts
 // them down within the documented budget: the keeper releases its hold as
-// its context ends.
+// its context ends, and the planner's background work stops with its own.
 func (d *daemon) serve(ctx context.Context, served *servingAPI) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -962,6 +1018,12 @@ func (d *daemon) serve(ctx context.Context, served *servingAPI) error {
 
 	err := served.wait()
 	cancel()
+	if d.planner != nil {
+		// Its work ends with its context: an Ollama request it has in
+		// flight is abandoned at once.
+		d.planner.stop()
+		d.planner.Wait()
+	}
 	if stuck, drained := d.drain(&workers, workerDrainTimeout); !drained {
 		slog.Warn("jobs still running after the shutdown grace period; exiting anyway "+
 			"(the next start requeues them)", "grace", workerDrainTimeout, "job_ids", stuck)

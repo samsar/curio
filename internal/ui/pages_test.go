@@ -903,7 +903,7 @@ func TestSearch_Paging(t *testing.T) {
 		assert.Equal(t, tc.capped, s.CappedNote(), name)
 		if tc.outOfRange {
 			assert.Equal(t, &PageOutOfRange{Page: s.Page, Pages: tc.pages, First: "/ui/?content_type=pdf&q=kafka",
-				Last: searchHref("kafka", "pdf", tc.pages)}, s.OutOfRange(), name)
+				Last: searchHref("kafka", "pdf", tc.pages, "")}, s.OutOfRange(), name)
 		} else {
 			assert.Nil(t, s.OutOfRange(), "%s: nothing matched, or the page has results", name)
 		}
@@ -917,7 +917,7 @@ func TestSearch_Paging(t *testing.T) {
 		assert.Equal(t, tc.items, pagerItems(p), name)
 		for _, item := range p.Items {
 			if !item.Gap() {
-				assert.Equal(t, searchHref("kafka", "pdf", item.Page), item.Href, name)
+				assert.Equal(t, searchHref("kafka", "pdf", item.Page, ""), item.Href, name)
 			}
 		}
 	}

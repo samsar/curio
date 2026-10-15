@@ -14,6 +14,7 @@ import (
 	"maps"
 	"math"
 	"net"
+	"net/url"
 	"os"
 	"slices"
 	"strconv"
@@ -179,6 +180,35 @@ type Search struct {
 	// MCP client's 30 s request timeout, or a hung Ollama surfaces there as a
 	// client timeout instead of a degraded result.
 	EmbedTimeoutSeconds int `yaml:"embed_timeout_seconds"`
+	// Understand lets a search ask a writing model (the planner role) what
+	// the question means: its date, type and browser filters, a few
+	// rewrites and the names it points at. Default true. Only a search that
+	// asks for it is planned (the CLI's default, the dashboard's Enter),
+	// never search as you type; false plans none. The daemon never pulls
+	// the planner's model for it alone: curio up does, with consent, or
+	// another role's pull of the same model. See docs/decisions.md
+	// "Understanding the question".
+	Understand bool `yaml:"understand"`
+	// UnderstandTimeoutSeconds bounds one plan; a search whose plan takes
+	// longer searches the question's words. Default 5, at most 23. With
+	// EmbedTimeoutSeconds and a second for asking whether the model is
+	// loaded it must stay under 25 s, so an understood search answers
+	// within the CLI's 30 s: the planner shortens it when they don't, or
+	// understands nothing when no time is left (understand.OptionsFrom).
+	// Validate doesn't refuse the sum: embed_timeout_seconds alone, valid
+	// before understanding existed, could make it.
+	UnderstandTimeoutSeconds int `yaml:"understand_timeout_seconds"`
+	// UnderstandKeepAliveMinutes is how long the planner's model stays
+	// loaded after a plan or a warm-up, so a search a few minutes after
+	// the last finds it warm (a cold load takes seconds). Default 30, at
+	// most a day.
+	UnderstandKeepAliveMinutes int `yaml:"understand_keep_alive_minutes"`
+	// RewriteWeight weighs a plan's rewrites against the question in every
+	// list, and NameWeight its names in the document lists alone (fields,
+	// cards and titles): each list's weight times this. Finite and not
+	// negative; 0 leaves them out. Defaults 0.5 and 1.
+	RewriteWeight float64 `yaml:"rewrite_weight"`
+	NameWeight    float64 `yaml:"name_weight"`
 }
 
 type Chunking struct {
@@ -260,19 +290,28 @@ type ModelSpec struct {
 // Role is a use curio puts a writing model to.
 type Role string
 
-// RoleLabels names the interests and their areas.
-const RoleLabels Role = "labels"
+// The roles.
+const (
+	// RoleLabels names the interests and their areas.
+	RoleLabels Role = "labels"
+	// RolePlanner understands a search question: what it asks for, the
+	// filters it states, rewrites and the names it points at.
+	RolePlanner Role = "planner"
+)
 
 // roles are every role, in the order they are listed and pulled: what
-// each writes, and whether the feature it writes for is on.
+// each writes, whether the feature it writes for is on, and whether the
+// daemon pulls its model alone (PullsAlone).
 var roles = []struct {
-	role    Role
-	usedFor string
-	inUse   func(Config) bool
+	role       Role
+	usedFor    string
+	inUse      func(Config) bool
+	pullsAlone bool
 }{
 	{RoleLabels, "interest labels", func(c Config) bool {
 		return c.Insight.Enabled && c.Insight.Labeling == labelingLLM
-	}},
+	}, true},
+	{RolePlanner, "search understanding", func(c Config) bool { return c.Search.Understand }, false},
 }
 
 // Roles lists every role.
@@ -293,6 +332,57 @@ func (r Role) UsedFor() string {
 		}
 	}
 	return ""
+}
+
+// PullsAlone reports whether the daemon pulls r's model on its own, with
+// generation.auto_pull. The planner's doesn't: search understanding is on
+// by default, and a home that labels nothing with a writing model would
+// otherwise download gigabytes on its first start after an upgrade. Its
+// model is pulled by curio up, which asks first, or with the pull of
+// another role in use that writes with the same model.
+func (r Role) PullsAlone() bool {
+	for _, d := range roles {
+		if d.role == r {
+			return d.pullsAlone
+		}
+	}
+	return false
+}
+
+// SharesModel reports whether another role in use writes with r's model on
+// r's server: the model then serves that role too, whatever r does with
+// it.
+func (c Config) SharesModel(r Role) bool {
+	mine := c.Generation.Role(r)
+	for _, o := range c.RolesInUse() {
+		if o == r {
+			continue
+		}
+		theirs := c.Generation.Role(o)
+		if theirs.Provider == mine.Provider && theirs.Model == mine.Model &&
+			strings.TrimRight(theirs.BaseURL, "/") == strings.TrimRight(mine.BaseURL, "/") {
+			return true
+		}
+	}
+	return false
+}
+
+// OnThisMachine reports whether baseURL, a model server's, is on this
+// machine: a loopback host, the unspecified address (0.0.0.0 or ::, which
+// a client connects to this machine through), or empty for the
+// provider's default, which is local.
+func OnThisMachine(baseURL string) bool {
+	if baseURL == "" {
+		return true
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return false
+	}
+	if ip := net.ParseIP(u.Hostname()); ip != nil && ip.IsUnspecified() {
+		return true
+	}
+	return isLoopbackHost(u.Hostname())
 }
 
 // Role is the model r writes with: generation's provider, model, base URL
@@ -316,8 +406,9 @@ func (g Generation) Role(r Role) ModelSpec {
 }
 
 // RolesInUse lists the roles whose feature is on, in Roles' order: labels
-// while insight is enabled and labels its interests with an LLM. A role
-// not in use has no writing model to build, pull or check.
+// while insight is enabled and labels its interests with an LLM, and the
+// planner while search understands questions. A role not in use has no
+// writing model to build, pull or check.
 func (c Config) RolesInUse() []Role {
 	var out []Role
 	for _, r := range roles {
@@ -392,6 +483,15 @@ func Default() Config {
 			TitleWeight:         2,
 			Collapse:            "max",
 			EmbedTimeoutSeconds: 10,
+			// Measured on the owner's library: rewrites at 0.25, 0.5 and 1,
+			// names at 0.5, 1 and 2, and names on the document lists alone
+			// or with the chunk lists. See decisions.md "Understanding the
+			// question".
+			Understand:                 true,
+			UnderstandTimeoutSeconds:   5,
+			UnderstandKeepAliveMinutes: 30,
+			RewriteWeight:              0.5,
+			NameWeight:                 1,
 		},
 		Chunking: Chunking{
 			// 384 words keeps chunks topical, and dense markdown (URLs,
@@ -431,6 +531,15 @@ const ProviderOllama = "ollama"
 
 // labelingLLM is insight.labeling's value for labels an LLM writes.
 const labelingLLM = "llm"
+
+// maxUnderstandSeconds bounds search.understand_timeout_seconds: a plan,
+// a second asking whether the model is loaded and the shortest query
+// embed stay under the 25 s an understood search has within the CLI's
+// 30 s (understand.OptionsFrom holds the sum).
+const maxUnderstandSeconds = 23
+
+// maxKeepAliveMinutes bounds search.understand_keep_alive_minutes: a day.
+const maxKeepAliveMinutes = 24 * 60
 
 // Load reads config.yaml from path. A missing file is not an error; the
 // defaults are returned. An empty or partial file overlays onto defaults.
@@ -583,6 +692,12 @@ func (c Config) Validate() error {
 	if c.Search.EmbedTimeoutSeconds <= 0 {
 		return fmt.Errorf("search.embed_timeout_seconds must be positive, got %d", c.Search.EmbedTimeoutSeconds)
 	}
+	if t := c.Search.UnderstandTimeoutSeconds; t < 1 || t > maxUnderstandSeconds {
+		return fmt.Errorf("search.understand_timeout_seconds must be in [1, %d], got %d", maxUnderstandSeconds, t)
+	}
+	if k := c.Search.UnderstandKeepAliveMinutes; k < 1 || k > maxKeepAliveMinutes {
+		return fmt.Errorf("search.understand_keep_alive_minutes must be in [1, %d], got %d", maxKeepAliveMinutes, k)
+	}
 	if c.Fetcher.Web2MD.TimeoutSeconds <= 0 {
 		return fmt.Errorf("fetcher.web2md.timeout_seconds must be positive, got %d",
 			c.Fetcher.Web2MD.TimeoutSeconds)
@@ -723,9 +838,10 @@ func (d Daemon) SlogLevel() slog.Level {
 	return slog.LevelInfo
 }
 
-// validateWeights checks the RRF weights. NaN or a negative weight corrupts
-// the fused ordering, and with all five at zero every document scores
-// zero.
+// validateWeights checks the RRF weights, the lists' and the ones a plan's
+// rewrites and names multiply them by. NaN or a negative weight corrupts
+// the fused ordering, and with all five lists at zero every document
+// scores zero.
 func validateWeights(s Search) error {
 	for _, w := range []struct {
 		key string
@@ -734,6 +850,7 @@ func validateWeights(s Search) error {
 		{"search.bm25_weight", s.BM25Weight}, {"search.vector_weight", s.VectorWeight},
 		{"search.fields_weight", s.FieldsWeight}, {"search.cards_weight", s.CardsWeight},
 		{"search.title_weight", s.TitleWeight},
+		{"search.rewrite_weight", s.RewriteWeight}, {"search.name_weight", s.NameWeight},
 	} {
 		// Written so NaN, which fails every comparison, is rejected.
 		if !(w.v >= 0) || math.IsInf(w.v, 1) {

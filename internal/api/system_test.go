@@ -21,6 +21,7 @@ import (
 	"github.com/samsar/curio/internal/jobs"
 	"github.com/samsar/curio/internal/ollama"
 	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/understand"
 )
 
 func TestStats(t *testing.T) {
@@ -143,6 +144,41 @@ func TestHealth_GenerationRoles(t *testing.T) {
 		require.Equal(t, http.StatusOK, resp.status, resp.body)
 		assert.Contains(t, resp.body, tc.want)
 	}
+}
+
+// TestHealth_Understanding: healthz says what the planner knows of its
+// model, its times in UTC and only the holds in effect; with no planner,
+// that understanding is off. It never asks the planner's model anything,
+// and never changes the status.
+func TestHealth_Understanding(t *testing.T) {
+	off := newTestServer(t, func(*Deps) {})
+	resp := off.do(t, request{method: http.MethodGet, path: "/v1/healthz"})
+	require.Equal(t, http.StatusOK, resp.status, resp.body)
+	assert.Contains(t, resp.body, `"understanding":{"on":false,"reason":"search understanding is off `+
+		`(search.understand: false)"}`)
+
+	at := time.Date(2026, 10, 14, 9, 30, 0, 0, time.FixedZone("CEST", 2*3600))
+	planner := &fakePlanner{block: true}
+	held := newTestServer(t, func(d *Deps) {
+		d.Planner = statePlanner{Planner: planner, state: understand.State{On: true, Model: "gemma4:26b",
+			Check: understand.CheckFit, CheckedAt: at, Last: understand.StatusTimeout, LastAt: at,
+			TimeoutHoldUntil: at.Add(2 * time.Minute),
+			Failure:          understand.Failure{Cause: "timeout:held", At: at, Err: "3 plans in a row took longer than 5s"}}}
+	})
+	resp = held.do(t, request{method: http.MethodGet, path: "/v1/healthz"})
+	require.Equal(t, http.StatusOK, resp.status, resp.body)
+	var h struct {
+		Status        string              `json:"status"`
+		Understanding UnderstandingHealth `json:"understanding"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(resp.body), &h))
+	assert.Equal(t, "ok", h.Status)
+	assert.Equal(t, UnderstandingHealth{On: true, Model: "gemma4:26b", Check: "fit", CheckedAt: at.UTC(),
+		LastStatus: "timeout", LastAt: at.UTC(), TimeoutHoldUntil: at.Add(2 * time.Minute).UTC(),
+		LastFailure: &UnderstandingFailure{Cause: "timeout:held", At: at.UTC(),
+			Error: "3 plans in a row took longer than 5s"}}, h.Understanding)
+	assert.NotContains(t, resp.body, "eviction_hold_until", "no hold, no field")
+	assert.Zero(t, planner.calls(), "healthz asks the planner nothing")
 }
 
 // TestHealth_YouTubeFetcher: healthz names the yt-dlp the daemon routes

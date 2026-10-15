@@ -95,6 +95,7 @@ func printStatus(ctx context.Context, w io.Writer, env *daemonctl.Env) (answerin
 	}
 	fmt.Fprint(w, embedderHoldWarning(health.EmbedderHold))
 	fmt.Fprint(w, reembedBrakeWarning(health.ReembedBrake))
+	fmt.Fprint(w, understandingWarning(health.Understanding))
 
 	sctx, scancel := context.WithTimeout(ctx, 1*time.Second)
 	defer scancel()
@@ -215,6 +216,32 @@ func reembedBrakeWarning(b *client.ReembedBrake) string {
 	}
 	return fmt.Sprintf("warning: the re-embed for the new chunk context waits until %s: the re-embeds of %s "+
 		"failed in a row (%s); run `curio doctor`\n", localTime(b.Until), plural(b.Failures, "document"), b.Error)
+}
+
+// understandingWarning is the line status prints while search
+// understanding is on but no question gets a plan, for the first that
+// holds of: questions withheld from the model or a provider without
+// structured output, a model that failed its check, a model Ollama keeps
+// unloading, and plans that keep timing out; empty otherwise, and from a
+// daemon that predates saying so. The fix is doctor's.
+func understandingWarning(u *client.UnderstandingHealth) string {
+	switch {
+	case u == nil || !u.On:
+		return ""
+	case u.Reason != "":
+		return fmt.Sprintf("warning: search understanding searches every question's words: %s; run `curio doctor`\n",
+			u.Reason)
+	case u.Check == checkUnfit:
+		return fmt.Sprintf("warning: search understanding searches every question's words: %s failed its check; "+
+			"run `curio doctor`\n", u.Model)
+	case !u.EvictionHoldUntil.IsZero():
+		return fmt.Sprintf("warning: search understanding searches words until %s: Ollama keeps unloading %s for "+
+			"other models; run `curio doctor`\n", localTime(u.EvictionHoldUntil), u.Model)
+	case !u.TimeoutHoldUntil.IsZero():
+		return fmt.Sprintf("warning: search understanding searches words until %s: plans with %s keep timing out; "+
+			"run `curio doctor`\n", localTime(u.TimeoutHoldUntil), u.Model)
+	}
+	return ""
 }
 
 // owedSources names the sources owed a classification: "chrome", "chrome

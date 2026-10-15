@@ -40,6 +40,7 @@ import (
 	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
 	"github.com/samsar/curio/internal/store/sqlite/sqlitetest"
 	"github.com/samsar/curio/internal/ui"
+	"github.com/samsar/curio/internal/understand"
 	"github.com/samsar/curio/migrations"
 )
 
@@ -1089,6 +1090,7 @@ func TestNewInsightEngine_InsightOffWritesNothing(t *testing.T) {
 	require.NoError(t, err)
 	_, source := rebuildLabel(t, eng, insights)
 	assert.Equal(t, store.LabelSourceTerms, source)
+	cfg.Search.Understand = false
 	for _, target := range pullTargets(cfg) {
 		assert.Equal(t, "embeddings", target.usedFor, "only the embedding model is pulled")
 	}
@@ -1098,17 +1100,32 @@ func TestNewInsightEngine_InsightOffWritesNothing(t *testing.T) {
 func TestPullTargets(t *testing.T) {
 	const local = "http://localhost:11434"
 	embeddings := pullTarget{baseURL: local, model: "qwen3-embedding:0.6b", usedFor: "embeddings", timeout: time.Minute}
+	writing := pullTarget{baseURL: local, model: "qwen3:4b-instruct", usedFor: "interest labels, search understanding",
+		timeout: 2 * time.Minute}
 	labels := pullTarget{baseURL: local, model: "qwen3:4b-instruct", usedFor: "interest labels", timeout: 2 * time.Minute}
 	for _, tc := range []struct {
 		name   string
 		mutate func(*config.Config)
 		want   []pullTarget
 	}{
-		{"the defaults", func(*config.Config) {}, []pullTarget{embeddings, labels}},
-		{"no embedding auto-pull", func(c *config.Config) { c.Embedding.AutoPull = false }, []pullTarget{labels}},
+		{"the defaults: both roles on one model", func(*config.Config) {}, []pullTarget{embeddings, writing}},
+		{"no embedding auto-pull", func(c *config.Config) { c.Embedding.AutoPull = false }, []pullTarget{writing}},
 		{"no generation auto-pull", func(c *config.Config) { c.Generation.AutoPull = false }, []pullTarget{embeddings}},
-		{"insight off", func(c *config.Config) { c.Insight.Enabled = false }, []pullTarget{embeddings}},
+		{"insight off: the planner pulls nothing alone", func(c *config.Config) { c.Insight.Enabled = false },
+			[]pullTarget{embeddings}},
 		{"term labels", func(c *config.Config) { c.Insight.Labeling = "terms" }, []pullTarget{embeddings}},
+		{"no understanding", func(c *config.Config) { c.Search.Understand = false }, []pullTarget{embeddings, labels}},
+		{"insight and understanding off", func(c *config.Config) {
+			c.Insight.Enabled, c.Search.Understand = false, false
+		}, []pullTarget{embeddings}},
+		{"the planner on its own model", func(c *config.Config) {
+			c.Generation.Roles = map[config.Role]config.ModelSpec{config.RolePlanner: {Model: "gemma4:26b"}}
+		}, []pullTarget{embeddings, labels}},
+		{"both roles on a model of their own", func(c *config.Config) {
+			c.Generation.Roles = map[config.Role]config.ModelSpec{config.RolePlanner: {Model: "gemma4:26b"},
+				config.RoleLabels: {Model: "gemma4:26b"}}
+		}, []pullTarget{embeddings, {baseURL: local, model: "gemma4:26b",
+			usedFor: "interest labels, search understanding", timeout: 2 * time.Minute}}},
 		{"labels on the embedding model", func(c *config.Config) {
 			c.Generation.Roles = map[config.Role]config.ModelSpec{config.RoleLabels: {Model: "qwen3-embedding:0.6b"}}
 		}, []pullTarget{{baseURL: local, model: "qwen3-embedding:0.6b", usedFor: "embeddings, interest labels",
@@ -1116,8 +1133,8 @@ func TestPullTargets(t *testing.T) {
 		{"one server with and without a trailing slash", func(c *config.Config) {
 			c.Generation.BaseURL = local + "/"
 			c.Generation.Model = "qwen3-embedding:0.6b"
-		}, []pullTarget{{baseURL: local, model: "qwen3-embedding:0.6b", usedFor: "embeddings, interest labels",
-			timeout: time.Minute}}},
+		}, []pullTarget{{baseURL: local, model: "qwen3-embedding:0.6b",
+			usedFor: "embeddings, interest labels, search understanding", timeout: time.Minute}}},
 		{"the labels role on its own server", func(c *config.Config) {
 			c.Generation.Roles = map[config.Role]config.ModelSpec{config.RoleLabels: {BaseURL: "http://127.0.0.1:11500/"}}
 		}, []pullTarget{embeddings, {baseURL: "http://127.0.0.1:11500", model: "qwen3:4b-instruct",
@@ -1136,11 +1153,51 @@ func TestPullTargets(t *testing.T) {
 // model it resolves to.
 func TestGenerationRoles(t *testing.T) {
 	cfg := config.Default()
-	assert.Equal(t, map[string]string{"labels": "qwen3:4b-instruct"}, generationRoles(cfg))
-	cfg.Generation.Roles = map[config.Role]config.ModelSpec{config.RoleLabels: {Model: "gemma4:12b"}}
-	assert.Equal(t, map[string]string{"labels": "gemma4:12b"}, generationRoles(cfg))
+	assert.Equal(t, map[string]string{"labels": "qwen3:4b-instruct", "planner": "qwen3:4b-instruct"},
+		generationRoles(cfg))
+	cfg.Generation.Roles = map[config.Role]config.ModelSpec{config.RoleLabels: {Model: "gemma4:12b"},
+		config.RolePlanner: {Model: "gemma4:26b"}}
+	assert.Equal(t, map[string]string{"labels": "gemma4:12b", "planner": "gemma4:26b"}, generationRoles(cfg))
 	cfg.Insight.Labeling = "terms"
+	assert.Equal(t, map[string]string{"planner": "gemma4:26b"}, generationRoles(cfg))
+	cfg.Search.Understand = false
 	assert.Equal(t, map[string]string{}, generationRoles(cfg))
+}
+
+// TestNewPlanner: the planner writes with the planner role's model, at its
+// own server, and its background work stops with stop: a warm-up in flight
+// is abandoned, and Wait returns.
+func TestNewPlanner(t *testing.T) {
+	loading := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/ps":
+			fmt.Fprint(w, `{"models":[]}`)
+		case "/api/tags":
+			fmt.Fprint(w, `{"models":[{"name":"gemma4:26b"}]}`)
+		case "/api/generate":
+			var req struct {
+				Model string `json:"model"`
+			}
+			assert.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			loading <- req.Model
+			<-r.Context().Done()
+		}
+	}))
+	t.Cleanup(srv.Close)
+	cfg := config.Default()
+	cfg.Generation.BaseURL = "http://127.0.0.1:1"
+	cfg.Generation.Roles = map[config.Role]config.ModelSpec{config.RolePlanner: {Model: "gemma4:26b",
+		BaseURL: srv.URL}}
+
+	p, err := newPlanner(context.Background(), cfg)
+	require.NoError(t, err)
+	out, err := p.Plan(context.Background(), "kafka")
+	require.NoError(t, err)
+	assert.Equal(t, understand.StatusCold, out.Status)
+	assert.Equal(t, "gemma4:26b", <-loading, "the role's model, loading at its server")
+	p.stop()
+	p.Wait()
 }
 
 // syncBuffer is a bytes.Buffer safe for a logger's concurrent writes and

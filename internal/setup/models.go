@@ -9,6 +9,7 @@ import (
 
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/ollama"
+	"github.com/samsar/curio/internal/understand"
 )
 
 // pickSource is where generation.model's pick came from.
@@ -22,10 +23,14 @@ const (
 	fromDaemonDefault                   // config.yaml sets none, so the daemon's default
 )
 
-// wanted is a model and the Ollama that serves it.
+// wanted is a model and the Ollama that serves it. An optional one is
+// wanted only by roles that don't pull alone (config.Role.PullsAlone):
+// search understanding, whose searches use their words without it, so
+// curio up offers it and a no leaves it out.
 type wanted struct {
 	Model
-	baseURL string
+	baseURL  string
+	optional bool
 }
 
 // picks are the models the home needs: the embedding model always, and
@@ -90,13 +95,22 @@ func (w *world) pick(ctx context.Context, hs homeState) (picks, error) {
 	if hs.kind == homeOurs && !w.freshPending() && hs.metaErr == nil && w.formatRefused(hs) == nil {
 		embedding = hs.meta.EmbeddingModel
 	}
-	p.embedding = wanted{knownModel(embedding), cfg.Embedding.BaseURL}
+	p.embedding = wanted{Model: knownModel(embedding), baseURL: cfg.Embedding.BaseURL}
 
 	roles := cfg.RolesInUse()
 	if len(roles) == 0 {
-		p.notes = append(p.notes, "no writing model is pulled: interest labels don't use one "+
-			"(insight.enabled false, or insight.labeling not llm)")
+		p.notes = append(p.notes, "no writing model is pulled: no role writes with one "+
+			"(interest labels are off with insight.enabled false or insight.labeling not llm, "+
+			"search understanding with search.understand false)")
 		return p, nil
+	}
+	if withheld := understand.OptionsFrom(cfg).Withheld; withheld != "" && slices.Contains(roles, config.RolePlanner) {
+		// Its model would write nothing: no question goes to it.
+		roles = slices.DeleteFunc(roles, func(r config.Role) bool { return r == config.RolePlanner })
+		p.notes = append(p.notes, "search understanding's model isn't pulled: "+withheld)
+		if len(roles) == 0 {
+			return p, nil
+		}
 	}
 	var inheriting []config.Role
 	for _, r := range roles {
@@ -105,7 +119,7 @@ func (w *world) pick(ctx context.Context, hs homeState) (picks, error) {
 			inheriting = append(inheriting, r)
 			continue
 		}
-		p.addWriting(wanted{knownModel(own), cfg.Generation.Role(r).BaseURL})
+		p.addWriting(wanted{knownModel(own), cfg.Generation.Role(r).BaseURL, !r.PullsAlone()})
 		p.notes = append(p.notes, fmt.Sprintf("keeping generation.roles.%s.model: %s from config.yaml", r, own))
 	}
 	if len(inheriting) == 0 {
@@ -120,18 +134,21 @@ func (w *world) pick(ctx context.Context, hs homeState) (picks, error) {
 	if err != nil {
 		return p, err
 	}
-	p.generation = &wanted{knownModel(model), cfg.Generation.BaseURL}
+	p.generation = &wanted{Model: knownModel(model), baseURL: cfg.Generation.BaseURL}
 	for _, r := range inheriting {
-		p.addWriting(wanted{p.generation.Model, cfg.Generation.Role(r).BaseURL})
+		p.addWriting(wanted{p.generation.Model, cfg.Generation.Role(r).BaseURL, !r.PullsAlone()})
 	}
 	return p, nil
 }
 
-// addWriting adds m to the writing models unless it is there already.
+// addWriting adds m to the writing models unless it is there already,
+// then required if either wants it so.
 func (p *picks) addWriting(m wanted) {
-	if !slices.ContainsFunc(p.writing, m.same) {
-		p.writing = append(p.writing, m)
+	if i := slices.IndexFunc(p.writing, m.same); i >= 0 {
+		p.writing[i].optional = p.writing[i].optional && m.optional
+		return
 	}
+	p.writing = append(p.writing, m)
 }
 
 // pickGeneration picks generation.model, for the roles that write with
@@ -221,6 +238,8 @@ func (w *world) checkModels(ctx context.Context) Result {
 	case err != nil:
 		res.Status, res.Detail = Fail, "not checked: "+err.Error()
 		res.Fix = &Fix{Summary: "pull " + sized(p.all()) + ", whichever Ollama lacks once it answers"}
+	case len(missing) > 0 && !slices.ContainsFunc(missing, required):
+		return w.offerOptional(ctx, missing, res)
 	case len(missing) > 0:
 		machine, _ := w.probeMachine(ctx) // the machine check reports a failed probe; its volumes are then unknown
 		if short := diskShortage(machine, models(missing)); short != "" {
@@ -235,6 +254,30 @@ func (w *world) checkModels(ctx context.Context) Result {
 	default:
 		res.Status, res.Detail = OK, p.String()+": present"
 	}
+	return res
+}
+
+// required reports whether m is a model curio needs, not one it offers.
+func required(m wanted) bool { return !m.optional }
+
+// offerOptional is the models' check when only optional models are
+// missing, those only search understanding writes with: a warning, never
+// a failure, since searches use their words without them, with a pull
+// offered that a no skips (Offer), and nothing offered when the disk
+// can't take them.
+func (w *world) offerOptional(ctx context.Context, missing []wanted, res Result) Result {
+	without := fmt.Sprintf("%s isn't pulled, and only search understanding writes with it: searches use their "+
+		"words until it is", names(missing))
+	machine, _ := w.probeMachine(ctx) // the machine check reports a failed probe; its volumes are then unknown
+	if short := diskShortage(machine, models(missing)); short != "" {
+		res.Status, res.Detail = Warn, without
+		res.Hint = "not enough disk space to pull it: " + short + "; free up space and run curio up again"
+		return res
+	}
+	res.Status, res.Detail = Warn, without
+	res.Fix = &Fix{Summary: "pull " + sized(missing) + " for search understanding", Consent: Offer,
+		Declined: fmt.Sprintf("not pulling %s: searches use their words; run curio up again to pull it, or set "+
+			"search.understand: false to stop understanding questions", names(missing))}
 	return res
 }
 

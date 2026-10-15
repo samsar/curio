@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -155,7 +156,10 @@ func TestDashboard_SecurityHeaders(t *testing.T) {
 		"/ui/interests?page=2": http.StatusNotFound, "/ui/interests?page=0": http.StatusBadRequest,
 		interest + "?page=2": http.StatusNotFound, interest + "?page=x": http.StatusBadRequest,
 		"/ui/interests/unsorted?page=99": http.StatusNotFound, "/ui/interests/unsorted?page=x": http.StatusBadRequest,
-		"/ui/interests/changes":         http.StatusOK,
+		"/ui/interests/changes":    http.StatusOK,
+		"/ui/?q=text&understand=1": http.StatusOK,
+		"/ui/?q=text&plan=" + base64.RawURLEncoding.EncodeToString([]byte(`{"kind":"one","rewrites":["text"]}`)): http.StatusOK,
+		"/ui/?q=text&plan=not*a*plan":   http.StatusBadRequest,
 		"/ui/interests/map?select=nope": http.StatusBadRequest, "/ui/interests/map?view=map": http.StatusBadRequest,
 		"/ui/interests/nope": http.StatusNotFound,
 	} {
