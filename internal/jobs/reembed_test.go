@@ -787,9 +787,14 @@ func TestReembed_FeedsOneAtATime(t *testing.T) {
 			}
 		}
 	}
+	// The saved page's job done too: under load it can outlast the
+	// re-embed, and the shutdown would requeue it, clearing its started_at.
+	savedDone := `SELECT EXISTS (SELECT 1 FROM jobs WHERE kind = 'index' AND document_id = ? AND status = 'done')`
 	require.Eventually(t, func() bool {
 		left, err := deps.Documents.CountToReembed(ctx, "local", indexer.ContextVersion)
-		return err == nil && left.Documents == 0 && !r.Progress().Active
+		var done bool
+		return err == nil && left.Documents == 0 && !r.Progress().Active &&
+			db.QueryRow(savedDone, saved.ID).Scan(&done) == nil && done
 	}, 10*time.Second, 10*time.Millisecond)
 	cancel()
 	wg.Wait()
@@ -1011,6 +1016,54 @@ func TestReembed_Brake(t *testing.T) {
 	assert.False(t, none.Progress().Brake.On())
 }
 
+// heldTopUp is a re-embed's store whose top-ups each say they began
+// (entered) and wait for release, counted.
+type heldTopUp struct {
+	emptyReembed
+	entered, release chan struct{}
+	calls            atomic.Int32
+}
+
+func (h *heldTopUp) EnqueueReembed(context.Context, string, int, store.ReembedLimits) (int, error) {
+	h.calls.Add(1)
+	h.entered <- struct{}{}
+	<-h.release
+	return 1, nil
+}
+
+// TestReembed_FailureWaitsForATopUp: a failure reported while a top-up
+// that read the brake off is queueing waits for it, so the top-up counted
+// the failing job still in flight, and the brake the failure puts on stops
+// the next one; the brake is read meanwhile without waiting.
+func TestReembed_FailureWaitsForATopUp(t *testing.T) {
+	feed := &heldTopUp{entered: make(chan struct{}, 2), release: make(chan struct{})}
+	r := NewReembed(ReembedOptions{Documents: feed, Log: quietLog, BrakeAfter: 3, BrakeMin: time.Hour})
+	boom := errors.New("HTTP 500: boom")
+	r.Failed("a", boom)
+	r.Failed("b", boom)
+
+	toppedUp := make(chan error, 1)
+	go func() { toppedUp <- r.topUp(context.Background()) }()
+	<-feed.entered
+	reported := make(chan struct{})
+	go func() {
+		r.Failed("c", boom)
+		close(reported)
+	}()
+	select {
+	case <-reported:
+		t.Fatal("a failure reported in the middle of a top-up")
+	case <-time.After(50 * time.Millisecond):
+	}
+	assert.False(t, r.Progress().Brake.On(), "read while the failure waits")
+	close(feed.release)
+	require.NoError(t, <-toppedUp)
+	<-reported
+	assert.True(t, r.Progress().Brake.On())
+	require.NoError(t, r.topUp(context.Background()))
+	assert.Equal(t, int32(1), feed.calls.Load(), "nothing queued once the brake is on")
+}
+
 // badDocuments is an embedding model that fails every batch holding a
 // chunk of a document titled BAD-DOC with err, and embeds the rest.
 type badDocuments struct {
@@ -1108,17 +1161,29 @@ func TestReembed_FewDocumentsFailingOnTheirOwn(t *testing.T) {
 					chunkContexts(t, db, id), "re-embedded")
 				assert.Equal(t, 1, jobsOf(id), "once")
 			}
+			// Kept at its third failure (TestMarkDocFailed_Reembed pins
+			// when). A fourth job is queued only by a top-up between the
+			// third failure recorded and its hook keeping the vectors, once
+			// that failure is FailedWait old: the test's 50 or 400 ms,
+			// unlike the daemon's 15 minutes, can pass while the hook is
+			// slow under load. That job finds the document current, or
+			// fails and keeps it again, with one more line.
+			fourth := 0
 			for _, id := range bad {
 				assert.Equal(t, [][2]any{{"", indexer.ContextVersion}}, chunkContexts(t, db, id),
 					"kept on its earlier vectors")
-				assert.Equal(t, reembedMaxFailures, jobsOf(id), "kept at its third failure")
+				n := jobsOf(id)
+				assert.Contains(t, []int{reembedMaxFailures, reembedMaxFailures + 1}, n, "kept at its third failure")
+				fourth += max(n-reembedMaxFailures, 0)
 			}
 			var notFetched int
 			require.NoError(t, db.QueryRow(`SELECT count(*) FROM documents WHERE state != 'fetched'`).Scan(&notFetched))
 			assert.Zero(t, notFetched)
 			out := logs.String()
 			assert.Equal(t, 1, strings.Count(out, `"msg":"chunk context: documents' re-embeds keep failing`), out)
-			assert.Equal(t, len(bad), strings.Count(out, "a refetch re-indexes it"), out)
+			kept := strings.Count(out, "a refetch re-indexes it")
+			assert.True(t, kept >= len(bad) && kept <= len(bad)+fourth, "%d kept, %d fourth jobs\n%s", kept, fourth,
+				out)
 		})
 	}
 }

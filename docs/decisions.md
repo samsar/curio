@@ -14724,7 +14724,13 @@ meanwhile. Three bounds now, each a backstop for the others:
   and doctor's `chunk context` check names the documents and warns with
   the fix. Three documents in a row, because one document failing again
   and again is its own trouble, which the first bullets and its own count
-  handle, and two could be chance.
+  handle, and two could be chance. The handler reports a failure while
+  its job still runs, and the report waits for a top-up under way
+  (`Reembed.feed`, held from the top-up's read of the brake to its
+  commit): otherwise a top-up that read the brake off just before the
+  third failure could find that job out of flight once it left, and
+  queue a fourth document (`TestReembed_FailureWaitsForATopUp`; CI under
+  load caught it as four jobs and four failures).
 
 So a failure every document's embed meets parks a handful and keeps
 nobody's earlier vectors, and once the model is fixed every document is
