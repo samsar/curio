@@ -68,7 +68,8 @@ func (h pageHandlers) libraryCounts(r *http.Request) *ui.LibraryCounts {
 }
 
 // libraryOrder reads the Library's ?order: "" for Recently saved (absent,
-// empty or "saved", which the form sends), or ui.OrderUpdated. Anything
+// empty, or "saved", which older links and bookmarks name), or
+// ui.OrderUpdated. Anything
 // else is a requestError.
 func libraryOrder(r *http.Request) (string, error) {
 	switch order := r.URL.Query().Get("order"); order {

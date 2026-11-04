@@ -307,6 +307,20 @@ footer.site .container { display: flex; gap: var(--s4); justify-content: space-b
 .page-head { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--s4) var(--s6); margin-bottom: var(--s6); }
 .page-head > .titles { flex: 1 1 24rem; min-width: 0; }
 .page-head h1 { font-size: var(--fs-xl); }
+/* A title and, beside it, its views' switch (the Interests' Map | List). */
+.title-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s3) var(--s5); }
+.view-switch a { gap: 0.35rem; }
+/* Quiet lines under a title in place of a lede (the Interests' list):
+   at most two, the second ending with the page's action. */
+.page-lines { display: grid; gap: var(--s1); margin: calc(-1 * var(--s3)) 0 var(--s6); color: var(--text-3); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
+.page-line { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1) var(--s2); min-width: 0; }
+/* A line of parts: each on one line, a dot before each but the first, so
+   a line that wraps starts with one rather than leaving one at its end. */
+.page-parts > * { white-space: nowrap; }
+.page-parts > * + *::before { content: "·"; margin-right: var(--s2); color: var(--text-3); }
+.rebuild-line .rebuild-actions { margin-left: auto; display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); min-width: 0; max-width: 100%; }
+.rebuild-line .rebuild-state { color: var(--text-3); }
+.rebuild-line .rebuild-state:not(:empty) + .changes-link::before { content: "·"; margin-right: var(--s2); color: var(--text-3); }
 .page-head .lede { margin-top: var(--s2); color: var(--text-2); }
 .page-head .actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); min-width: 0; max-width: 100%; }
 /* A group's title carries its kind's icon (an area's layers, Unsorted's
@@ -413,7 +427,7 @@ input, select, button, textarea { font: inherit; color: inherit; }
 /* Segmented control (throttle, library states) and switch ----------------- */
 
 .segmented {
-  display: inline-flex; flex-wrap: wrap; gap: 2px;
+  display: inline-flex; flex-wrap: wrap; gap: 2px; max-width: 100%;
   padding: 2px;
   background: var(--surface-2);
   border: 1px solid var(--border);
@@ -431,6 +445,8 @@ input, select, button, textarea { font: inherit; color: inherit; }
   background: var(--surface); color: var(--text); box-shadow: var(--shadow-sm), 0 0 0 1px var(--border);
 }
 .segmented .count { color: var(--text-3); font-variant-numeric: tabular-nums; font-weight: var(--fw-medium); }
+.segmented svg { width: 0.875rem; height: 0.875rem; color: var(--text-3); }
+.segmented [aria-current="page"] svg { color: var(--accent); }
 
 .switch { display: inline-flex; align-items: center; gap: var(--s2); cursor: pointer; }
 .switch input {
@@ -613,11 +629,20 @@ table.data .when { color: var(--text-3); font-size: var(--fs-sm); }
 
 col.c-type { width: 6.5rem; }
 col.c-when { width: 7.5rem; }
-/* A save's time: room for "imported" and a date on one line, under what
-   the time is ("date unknown", "saved by"). */
-col.c-saved { width: 11rem; }
+/* A save's time: room for "imported" and how long ago on one line, under
+   "date unknown". */
+col.c-saved { width: 9rem; }
 table.data td.c-when .saved-what, table.data td.c-when .saved-when { display: block; }
-table.data td.c-when .saved-sep { display: none; }
+/* An unknown save date says less than a date: quieter. */
+table.data td.c-when .saved-unknown { font-size: var(--fs-xs); opacity: 0.85; }
+/* The time column's head is the order: a link to the other one; on a
+   phone, which folds that column away, the Document head carries it. */
+table.data th a.sort { color: inherit; }
+table.data th .sort-narrow { display: none; margin-left: var(--s2); }
+table.data th a.sort:hover { color: var(--text); text-decoration: none; }
+/* A row's type: its icon and name, quiet text. */
+table.data td .type { display: inline-flex; align-items: center; gap: 0.35rem; color: var(--text-3); font-size: var(--fs-sm); white-space: nowrap; }
+table.data td .type svg { width: 0.85rem; height: 0.85rem; }
 col.c-sim { width: 6.5rem; }
 /* Room for a four-digit rank, "1,234", and the cell's padding, on a phone too. */
 col.c-rank { width: 3.5rem; }
@@ -677,22 +702,40 @@ a.doc-title:hover { color: var(--accent-text); }
 
 /* Filter bar -------------------------------------------------------------- */
 
-/* The Library's cause filter, which has no field: what it is, and a link
-   that clears it alone. */
-.cause-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s1) var(--s2); margin: calc(-1 * var(--s1)) 0 var(--s4); font-size: var(--fs-sm); }
+/* The Library's toolbar: the state tabs, and at its end the Filters
+   button, a <details> whose panel drops under it, over the list. */
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s3); margin-bottom: var(--s4); }
+/* The button sits at the end of its line, wrapped onto a line of its own
+   too, so the panel, anchored at its right, opens inside the screen. */
+.filter-menu { position: relative; margin-left: auto; }
+.filter-menu > summary { list-style: none; }
+.filter-menu > summary::-webkit-details-marker { display: none; }
+.filter-menu[open] > summary { background: var(--surface-2); }
+.filter-count { color: var(--accent-text); font-variant-numeric: tabular-nums; }
+.filter-panel {
+  position: absolute; right: 0; top: calc(100% + var(--s2)); z-index: 15;
+  width: min(20rem, calc(100vw - 2 * var(--s4)));
+  display: grid; gap: var(--s3);
+  padding: var(--s4);
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); box-shadow: var(--shadow-lg);
+}
+.filter-panel .input, .filter-panel .select { width: 100%; }
+.filter-actions { display: flex; justify-content: flex-end; }
+/* The active filters, each a chip that drops it, and Clear all. */
+.filter-chips { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); margin: calc(-1 * var(--s1)) 0 var(--s4); font-size: var(--fs-sm); }
+.chip .chip-name { font-weight: var(--fw-medium); opacity: 0.8; }
+.clear-all { color: var(--text-3); font-size: var(--fs-xs); font-weight: var(--fw-strong); }
+.clear-all:hover { color: var(--text); }
 
-.toolbar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--s3); margin-bottom: var(--s4); }
-.toolbar .grow { flex: 1 1 auto; }
-.filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--s3); }
-.filters .input { width: 9.5rem; }
-.filters .select { width: 8.75rem; }
-/* The order's select holds "Recently saved" whole. */
-.filters .field-order .select { width: 10.25rem; }
-
-.subnav { display: flex; gap: var(--s5); border-bottom: 1px solid var(--border); margin-bottom: var(--s5); overflow-x: auto; }
+/* The row's rule is an inset shadow, under the current tab's 2px
+   underline, inside the box: a border with the links' underline pulled
+   over it by a negative margin overflowed the box by a pixel, which
+   overflow-x: auto turned into a vertical scrollbar wherever scrollbars
+   always show. */
+.subnav { display: flex; gap: var(--s5); box-shadow: inset 0 -1px 0 var(--border); margin-bottom: var(--s5); overflow-x: auto; overflow-y: hidden; }
 .subnav a {
   display: inline-flex; align-items: center; gap: 0.45rem;
-  padding: 0 0 0.65rem; margin-bottom: -1px;
+  padding: 0 0 0.65rem;
   color: var(--text-3); font-weight: var(--fw-strong);
   border-bottom: 2px solid transparent; white-space: nowrap;
 }
@@ -820,7 +863,6 @@ svg.stackbar rect { shape-rendering: crispEdges; }
 .fill-danger { fill: var(--danger-dot); }
 .fill-neutral { fill: var(--neutral-dot); }
 .fill-accent { fill: var(--accent); }
-.fill-accent-border { fill: var(--accent-border); }
 .fill-track { fill: var(--surface-3); }
 
 .legend { display: flex; flex-wrap: wrap; gap: var(--s2) var(--s5); margin-top: var(--s3); font-size: var(--fs-sm); }
@@ -833,9 +875,7 @@ svg.stackbar rect { shape-rendering: crispEdges; }
 .swatch-warn { background: var(--warn-dot); }
 .swatch-danger { background: var(--danger-dot); }
 .swatch-accent { background: var(--accent); }
-.swatch-accent-border { background: var(--accent-border); }
 .swatch-neutral { background: var(--neutral-dot); }
-.swatch-track { background: var(--surface-3); border: 1px solid var(--border-strong); }
 
 /* Stat tiles --------------------------------------------------------------- */
 
@@ -851,7 +891,7 @@ svg.stackbar rect { shape-rendering: crispEdges; }
 
 /* Search -------------------------------------------------------------------- */
 
-.search-hero { position: relative; width: 100%; max-width: 48rem; margin: var(--s6) auto var(--s8); }
+.search-hero { position: relative; width: 100%; margin: var(--s2) 0 var(--s6); }
 .searchbox { position: relative; }
 .searchbox > svg.icon { position: absolute; left: 1.05rem; top: 50%; transform: translateY(-50%); width: 1.25rem; height: 1.25rem; color: var(--text-3); pointer-events: none; }
 .searchbox input[type="search"] {
@@ -871,6 +911,7 @@ svg.stackbar rect { shape-rendering: crispEdges; }
 .searchbox .searchbox-end { position: absolute; right: 0.45rem; top: 50%; transform: translateY(-50%); display: flex; align-items: center; gap: var(--s2); }
 .searchbox .btn { height: 2.4rem; border-radius: var(--r-md); }
 .search-scope { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); margin-top: var(--s3); font-size: var(--fs-sm); color: var(--text-3); }
+.search-scope:empty { display: none; }
 .search-scope .segmented a { height: 1.625rem; padding: 0 0.6rem; font-size: var(--fs-xs); }
 
 /* While the model plans an understood search: under the box, over the
@@ -903,12 +944,17 @@ svg.stackbar rect { shape-rendering: crispEdges; }
 .htmx-request .htmx-indicator, .htmx-request.htmx-indicator { opacity: 1; }
 .spinner { width: 1rem; height: 1rem; border-radius: 50%; border: 2px solid var(--surface-3); border-top-color: var(--accent); animation: spin 0.8s linear infinite; }
 
-/* The results column fills the page up to its measure: a flex item with
+/* The results fill the page's container, as every page's content does;
+   their passages keep their reading measure (.snippet). A flex item with
    auto margins would shrink to its min-content width, which a result's
    one-line address makes wider than a phone. */
-.results { width: 100%; max-width: 48rem; margin: 0 auto; }
-.results-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--s3); margin-bottom: var(--s2); color: var(--text-3); font-size: var(--fs-sm); }
-.results-head strong { color: var(--text); font-weight: var(--fw-heading); }
+.results { width: 100%; }
+/* The results' head: a quiet line, its count wrapping beside the toggle
+   where it doesn't fit (a phone), never cut. */
+.results-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s3); margin-bottom: var(--s1); color: var(--text-3); font-size: var(--fs-xs); }
+.results-head > span { min-width: 0; }
+.results-head strong { color: var(--text-2); font-weight: var(--fw-strong); }
+.results-head .toggle { flex: none; }
 .toggle { display: inline-flex; align-items: center; gap: var(--s2); cursor: pointer; }
 .toggle input { accent-color: var(--accent); margin: 0; }
 /* With nothing to score, the Show scores checkbox stays in the results,
@@ -939,7 +985,9 @@ ol.results { list-style: none; padding: 0; }
    that is gone, a second. */
 .saved-as { margin-top: var(--s2); color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .saved-gone { margin-top: var(--s1); color: var(--text-3); font-size: var(--fs-sm); }
-.result-foot { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); margin-top: var(--s3); }
+.result-foot { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); margin-top: var(--s2); }
+/* A foot with nothing shown (one passage, no badge, scores off) takes no room. */
+.result-foot:not(:has(details, .badge)) { margin-top: 0; }
 .result-foot details { font-size: var(--fs-sm); color: var(--text-3); }
 .result-foot summary { cursor: pointer; }
 .result-foot details[open] { flex-basis: 100%; }
@@ -963,10 +1011,14 @@ body:has(#show-scores:checked) .score { display: inline; }
    swap .landing out. No script. */
 
 /* The box stands where the results will have it, so the first keystroke's
-   results don't move it. */
-.search-page:has(.landing) .search-hero { margin-bottom: var(--s6); }
-main.page:has(.landing) { padding-bottom: var(--s12); }
-.landing { width: 100%; max-width: 48rem; margin: 0 auto; display: grid; gap: var(--s4); }
+   results don't move it; under it, the landing fills the screen to its
+   foot, where the interests line sits: the page is the box, and the
+   interests are there, out of the way, with no scrolling. */
+main.page:has(.landing) { padding-bottom: var(--s6); }
+/* The screen less the header (and its 1px rule) and main's padding. */
+.search-page:has(.landing) { display: flex; flex-direction: column; --landing-pad: calc(var(--header-h) + 1px + var(--s8) + var(--s6)); min-height: calc(100vh - var(--landing-pad)); min-height: calc(100dvh - var(--landing-pad)); }
+.search-page:has(.landing) #results { flex: 1 0 auto; display: flex; flex-direction: column; }
+.landing { width: 100%; flex: 1 0 auto; display: flex; flex-direction: column; justify-content: flex-end; }
 
 /* One quiet line of interests: inline text that wraps like a sentence.
    A name is a label an LLM or a page's words made, of any length: it
@@ -1086,17 +1138,15 @@ aside.side { display: grid; gap: var(--s4); align-content: start; }
 .interest .stats { display: flex; align-items: center; gap: var(--s3); color: var(--text-3); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; flex-wrap: wrap; }
 .interest .stats b { color: var(--text); font-weight: var(--fw-heading); }
 .interest .stats .new b { color: var(--accent-text); }
-.interest .summary { color: var(--text-2); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
+.interest .summary { color: var(--text-2); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
 .interest .members { list-style: none; padding: 0; margin-top: auto; border-top: 1px solid var(--border); padding-top: var(--s3); display: grid; gap: 0.35rem; font-size: var(--fs-sm); }
 .interest .members > li { min-width: 0; }
 .interest .members a { display: block; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .interest .members a:hover { color: var(--accent-text); text-decoration: none; }
 .interest .all { font-size: var(--fs-sm); font-weight: var(--fw-strong); }
-/* An area's interests: each name on one line, cut, then a bar scaled to
-   the area's largest, and its size. */
-.interest .children > li { display: grid; grid-template-columns: minmax(0, 1fr) 3rem 2.5rem; align-items: center; gap: var(--s3); }
+/* An area's interests: each name on one line, cut, then its size. */
+.interest .children > li { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--s3); }
 .interest .children .unlabeled { font-style: italic; }
-.interest .children svg.stackbar { height: 0.375rem; }
 .interest .children .n { color: var(--text-3); font-variant-numeric: tabular-nums; text-align: right; }
 
 /* The lineage note's lines, and the changes page's. */
@@ -1119,9 +1169,6 @@ td .badge.fit-new { margin-top: var(--s1); }
    doesn't fit drops whole; a flex item shrinks instead. */
 .nearest-sub { display: none; align-items: baseline; gap: 0.3rem; min-width: 0; margin-top: 0.15rem; color: var(--text-3); font-size: var(--fs-sm); white-space: nowrap; }
 
-.coverage { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s1); }
-.coverage .legend { margin-top: var(--s2); }
-.coverage .legend .run { margin-left: auto; color: var(--text-3); }
 
 /* Interest map ------------------------------------------------------------- */
 
@@ -1372,8 +1419,7 @@ td .badge.fit-new { margin-top: var(--s1); }
   .searchbox input[type="search"] { padding-right: 3.25rem; height: 3rem; }
   .searchbox .btn .label { display: none; }
   .searchbox .btn { width: 2.4rem; padding: 0; }
-  .search-hero { margin-top: var(--s2); margin-bottom: var(--s6); }
-  .search-page:has(.landing) .search-hero { margin-bottom: var(--s5); }
+  .search-page:has(.landing) { --landing-pad: calc(var(--header-h) + 1px + var(--s5) + var(--s6)); }
   .explore-line li:nth-child(n+5) { display: none; }
 
   /* The Library: Type and Updated fold into the line under the title, and
@@ -1383,6 +1429,7 @@ td .badge.fit-new { margin-top: var(--s1); }
   .nearest-sub { display: flex; }
   table.data th, table.data td { padding-left: var(--s3); padding-right: var(--s3); }
   .doc-sub .narrow { display: inline; }
+  table.data th .sort-narrow { display: inline; }
   .doc-sub .wide { display: none; }
   .doc-saved {
     display: block;
@@ -1423,10 +1470,6 @@ td .badge.fit-new { margin-top: var(--s1); }
   .cause .count { grid-column: 2; grid-row: 2; text-align: left; display: flex; align-items: baseline; gap: var(--s2); }
   .cause .cause-actions, .cause .bar { grid-column: 1 / -1; }
   .bars li { grid-template-columns: minmax(0, 7rem) minmax(0, 1fr) 3rem; }
-  .filters { width: 100%; }
-  .filters .field { flex: 1 1 8rem; }
-  .filters .field-order { flex-basis: 10.25rem; }
-  .filters .input, .filters .select, .filters .field-order .select { width: 100%; }
   .card-head, .card-body { padding-left: var(--s4); padding-right: var(--s4); }
   .related li, .bookmark-list li { padding-left: var(--s4); padding-right: var(--s4); }
   .center-card { padding: var(--s6) var(--s4); }

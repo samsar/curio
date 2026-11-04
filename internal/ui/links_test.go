@@ -116,25 +116,52 @@ func TestFailuresLinks(t *testing.T) {
 		"no state: the list's cause filter takes dead documents; documents, which the tag counts")
 }
 
-// TestClearCauseHref: clearing the cause keeps every other filter, the
-// order and the page size, and drops the cause and the cursor, in either
-// order.
-func TestClearCauseHref(t *testing.T) {
+// TestWithoutFilterHref: dropping one filter keeps every other, the
+// order and the page size, and drops the cursor, in either order; a name
+// that isn't a filter's drops nothing.
+func TestWithoutFilterHref(t *testing.T) {
 	for _, order := range []string{"", OrderUpdated} {
 		f := LibraryFilters{Order: order, State: "failed", ContentType: "pdf", Host: "a&b=c.example",
 			Folder: "/100% Reading/#1", Cause: "a&cause=b #1", Limit: 7}
-		want := url.Values{"state": {"failed"}, "content_type": {"pdf"}, "host": {"a&b=c.example"},
-			"folder": {"/100% Reading/#1"}, "limit": {"7"}}
+		all := url.Values{"state": {"failed"}, "content_type": {"pdf"}, "host": {"a&b=c.example"},
+			"folder": {"/100% Reading/#1"}, "cause": {"a&cause=b #1"}, "limit": {"7"}}
 		if order != "" {
-			want.Set("order", order)
+			all.Set("order", order)
 		}
-		u := parseHref(t, clearCauseHref(f))
-		assert.Equal(t, "/ui/library", u.Path, order)
-		assert.Equal(t, want, u.Query(), order)
+		for name, param := range map[string]string{filterState: "state", filterType: "content_type",
+			filterHost: "host", filterFolder: "folder", filterCause: "cause"} {
+			want := url.Values{}
+			for k, v := range all {
+				if k != param {
+					want[k] = v
+				}
+			}
+			u := parseHref(t, withoutFilterHref(f, name))
+			assert.Equal(t, "/ui/library", u.Path, name)
+			assert.Equal(t, want, u.Query(), "%s, order %q", name, order)
+		}
+		assert.Equal(t, all, parseHref(t, withoutFilterHref(f, "bogus")).Query())
 	}
-	assert.Equal(t, "/ui/library", clearCauseHref(LibraryFilters{Cause: "anti_bot"}))
+	assert.Equal(t, "/ui/library", withoutFilterHref(LibraryFilters{Cause: "anti_bot"}, filterCause))
 	assert.Equal(t, "/ui/library?order=updated",
-		clearCauseHref(LibraryFilters{Order: OrderUpdated, Cause: "anti_bot"}))
+		withoutFilterHref(LibraryFilters{Order: OrderUpdated, Cause: "anti_bot"}, filterCause))
+}
+
+// TestOtherOrderHref: the time column's head leads to the other order,
+// the filters and the page size kept; the default names no order.
+func TestOtherOrderHref(t *testing.T) {
+	f := LibraryFilters{State: "pending", Host: "a&b=c.example", Limit: 7}
+	assert.Equal(t, url.Values{"order": {OrderUpdated}, "state": {"pending"}, "host": {"a&b=c.example"},
+		"limit": {"7"}}, parseHref(t, otherOrderHref(f)).Query())
+	for _, order := range []string{"", OrderSaved} {
+		f.Order = order
+		assert.Equal(t, OrderUpdated, parseHref(t, otherOrderHref(f)).Query().Get("order"), order)
+	}
+	f.Order = OrderUpdated
+	assert.Equal(t, url.Values{"state": {"pending"}, "host": {"a&b=c.example"}, "limit": {"7"}},
+		parseHref(t, otherOrderHref(f)).Query(), "back to the default, which names no order")
+	assert.Equal(t, "/ui/library", otherOrderHref(LibraryFilters{Order: OrderUpdated}))
+	assert.Equal(t, "/ui/library?order=updated", otherOrderHref(LibraryFilters{}))
 }
 
 // TestSearchHref: a search's query, type, page and plan round-trip,
@@ -186,21 +213,26 @@ func TestStateTabHref(t *testing.T) {
 }
 
 // TestNavItems: the navigation in its order, each item linking where an
-// error page's Retry does.
+// error page's Retry does, but Interests, which opens on their map, unless
+// the map is off.
 func TestNavItems(t *testing.T) {
-	items := navItems()
+	items := navItems(false)
 	navs := make([]Nav, 0, len(items))
 	for _, item := range items {
 		navs = append(navs, item.Nav)
-		assert.Equal(t, navHref(item.Nav), item.Href, item.Nav)
+		if item.Nav != NavInterests {
+			assert.Equal(t, navHref(item.Nav), item.Href, item.Nav)
+		}
 		assert.NotEmpty(t, item.Label, item.Nav)
 	}
 	assert.Equal(t, []Nav{NavSearch, NavLibrary, NavInterests, NavStatus}, navs)
-	assert.Equal(t, []string{"/ui/", "/ui/library", "/ui/interests", "/ui/status"},
+	assert.Equal(t, mapHref(MapQuery{}), items[2].Href, "the map's own address, By group")
+	assert.Equal(t, []string{"/ui/", "/ui/library", "/ui/interests/map", "/ui/status"},
 		[]string{items[0].Href, items[1].Href, items[2].Href, items[3].Href})
 	assert.Equal(t, []string{"search", "library", "sparkles", "activity"},
 		[]string{items[0].Icon, items[1].Icon, items[2].Icon, items[3].Icon})
 	assert.Len(t, navHrefs, len(items), "every page with an address is in the navigation")
+	assert.Equal(t, navHref(NavInterests), navItems(true)[2].Href, "the map off: the list")
 }
 
 func TestOutbound(t *testing.T) {
@@ -309,14 +341,14 @@ func TestPageHrefs(t *testing.T) {
 // other form refused, naming the forms there are.
 func TestParseMapQuery(t *testing.T) {
 	for query, want := range map[string]MapQuery{
-		"":                               {View: MapViewSimilarity},
-		"view=similarity":                {View: MapViewSimilarity},
-		"view=groups":                    {View: MapViewGroups},
-		"select=unsorted":                {View: MapViewSimilarity, Select: MapSelection{Kind: MapSelectUnsorted}},
-		"select=area%3Aa1":               {View: MapViewSimilarity, Select: MapSelection{Kind: MapSelectArea, ID: "a1"}},
-		"select=interest:i1":             {View: MapViewSimilarity, Select: MapSelection{Kind: MapSelectInterest, ID: "i1"}},
-		"view=groups&select=document:d1": {View: MapViewGroups, Select: MapSelection{Kind: MapSelectDocument, ID: "d1"}},
-		"select=document:a:b:c":          {View: MapViewSimilarity, Select: MapSelection{Kind: MapSelectDocument, ID: "a:b:c"}},
+		"":                                   {View: MapViewGroups},
+		"view=groups":                        {View: MapViewGroups},
+		"view=similarity":                    {View: MapViewSimilarity},
+		"select=unsorted":                    {View: MapViewGroups, Select: MapSelection{Kind: MapSelectUnsorted}},
+		"select=area%3Aa1":                   {View: MapViewGroups, Select: MapSelection{Kind: MapSelectArea, ID: "a1"}},
+		"select=interest:i1":                 {View: MapViewGroups, Select: MapSelection{Kind: MapSelectInterest, ID: "i1"}},
+		"view=similarity&select=document:d1": {View: MapViewSimilarity, Select: MapSelection{Kind: MapSelectDocument, ID: "d1"}},
+		"select=document:a:b:c":              {View: MapViewGroups, Select: MapSelection{Kind: MapSelectDocument, ID: "a:b:c"}},
 	} {
 		q, err := url.ParseQuery(query)
 		require.NoError(t, err)
@@ -345,11 +377,11 @@ func TestParseMapQuery(t *testing.T) {
 // odd its ID.
 func TestMapHref(t *testing.T) {
 	assert.Equal(t, "/ui/interests/map", mapHref(MapQuery{}))
-	assert.Equal(t, "/ui/interests/map", mapHref(MapQuery{View: MapViewSimilarity}))
-	assert.Equal(t, "/ui/interests/map?view=groups", mapHref(MapQuery{View: MapViewGroups}))
+	assert.Equal(t, "/ui/interests/map", mapHref(MapQuery{View: MapViewGroups}), "By group is the default")
+	assert.Equal(t, "/ui/interests/map?view=similarity", mapHref(MapQuery{View: MapViewSimilarity}))
 	assert.Equal(t, "/ui/interests/map?select=area%3Aa1", mapHref(MapQuery{Select: MapSelection{Kind: MapSelectArea,
 		ID: "a1"}}))
-	assert.Equal(t, "/ui/interests/map?select=unsorted&view=groups", mapHref(MapQuery{View: MapViewGroups,
+	assert.Equal(t, "/ui/interests/map?select=unsorted&view=similarity", mapHref(MapQuery{View: MapViewSimilarity,
 		Select: MapSelection{Kind: MapSelectUnsorted}}))
 	for _, kind := range []string{MapSelectArea, MapSelectInterest, MapSelectDocument} {
 		for _, id := range []string{"i1", "a/b?#&=", evilAttr, evilScript, "x:y"} {
@@ -363,8 +395,8 @@ func TestMapHref(t *testing.T) {
 			}
 		}
 	}
-	u := parseHref(t, mapHref(MapQuery{View: MapViewGroups, Select: MapSelection{Kind: MapSelectUnsorted}}))
+	u := parseHref(t, mapHref(MapQuery{View: MapViewSimilarity, Select: MapSelection{Kind: MapSelectUnsorted}}))
 	got, err := ParseMapQuery(u.Query())
 	require.NoError(t, err)
-	assert.Equal(t, MapQuery{View: MapViewGroups, Select: MapSelection{Kind: MapSelectUnsorted}}, got)
+	assert.Equal(t, MapQuery{View: MapViewSimilarity, Select: MapSelection{Kind: MapSelectUnsorted}}, got)
 }

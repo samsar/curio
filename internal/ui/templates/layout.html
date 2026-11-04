@@ -41,7 +41,7 @@ address, is the Status page's alone (Layout.Footer).
 <div class="container">
 <a class="brand" href="{{navHref "search"}}" aria-label="curio: search">{{template "logo"}}<span class="word">curio</span></a>
 <nav aria-label="Main">
-{{range navItems}}<a href="{{.Href}}"{{if eq .Nav $.Layout.Nav}} aria-current="page"{{end}}>{{template "icon" .Icon}}<span>{{.Label}}</span></a>
+{{range navItems .Layout.MapOff}}<a href="{{.Href}}"{{if eq .Nav $.Layout.Nav}} aria-current="page"{{end}}>{{template "icon" .Icon}}<span>{{.Label}}</span></a>
 {{end}}</nav>
 <div class="site-tools">
 {{block "header-search" .}}<form class="header-search" action="{{navHref "search"}}" method="get" role="search">
@@ -77,15 +77,28 @@ role: a polled region holding it would announce it on every poll.
 {{- end}}
 
 {{/*
-A bookmark's saved time, a SavedTime, as its saved date says: "saved" and
-when, for an exact date; "saved by" an upper bound; or "date unknown" and
-when curio imported it. An inexact time's title says what it means. In a
-table's time column, its two parts take a line each.
+A bookmark's saved time, a SavedTime, as its saved date says, on one line:
+"saved" and when, for an exact date; "saved ~" and how long ago, for an
+upper bound; or "date unknown" and when curio imported it. An inexact
+time's title says what it means. The document page's bookmarks and a
+phone's line under a save's name show it.
 */}}
 {{define "saved-time" -}}
 {{if .Exact}}saved {{template "reltime" .At}}
-{{- else}}<span class="saved-time" title="{{.Why}}"><span class="saved-what">{{.What}}</span>
-{{- with .Then}}<span class="saved-sep"> ·</span>{{end}} <span class="saved-when">{{with .Then}}{{.}} {{end}}<time datetime="{{datetime .Shown}}">{{ago .Shown}}</time></span></span>{{end}}
+{{- else if .Approx}}<span class="saved-time" title="{{.Why}}">saved ~<time datetime="{{datetime .At}}">{{ago .At}}</time></span>
+{{- else}}<span class="saved-time" title="{{.Why}}">date unknown · imported <time datetime="{{datetime .Imported}}">{{ago .Imported}}</time></span>{{end}}
+{{- end}}
+
+{{/*
+A save's time in the Library's Saved column, whose head says "Saved":
+when, for an exact date; "~" and how long ago, for an upper bound; or,
+quieter, "date unknown" over when curio imported it. An inexact time's
+title says what it means.
+*/}}
+{{define "saved-column" -}}
+{{if .Exact}}{{template "reltime" .At}}
+{{- else if .Approx}}<span class="saved-time" title="{{.Why}}">~<time datetime="{{datetime .At}}">{{ago .At}}</time></span>
+{{- else}}<span class="saved-time saved-unknown" title="{{.Why}}"><span class="saved-what">date unknown</span> <span class="saved-when">imported <time datetime="{{datetime .Imported}}">{{ago .Imported}}</time></span></span>{{end}}
 {{- end}}
 
 {{/*
@@ -147,12 +160,12 @@ role.
 {{- end}}
 
 {{/*
-The Interests' subnav, an InterestsViews: the List of the interests and
-their Map, the current one marked. Only whole pages carry it, never a
-polled region.
+The Interests' views, an InterestsViews: a switch beside their title
+between the Map, their first view, and the List, the current one marked.
+Only whole pages carry it, never a polled region.
 */}}
-{{define "interests-subnav" -}}
-<nav class="subnav" aria-label="Interests views"><a href="{{.ListHref}}"{{if not .OnMap}} aria-current="page"{{end}}>List</a><a href="{{.MapHref}}"{{if .OnMap}} aria-current="page"{{end}}>Map</a></nav>
+{{define "interests-views" -}}
+<nav class="segmented view-switch" aria-label="Interests views"><a href="{{.MapHref}}"{{if .OnMap}} aria-current="page"{{end}}>{{template "icon" "map"}}Map</a><a href="{{.ListHref}}"{{if not .OnMap}} aria-current="page"{{end}}>{{template "icon" "list"}}List</a></nav>
 {{- end}}
 
 {{/* A link to a group or a document on the interest map, when it has one. */}}
@@ -235,7 +248,7 @@ page lists its items with Unsorted's card after them.
 
 {{/*
 An area's or an interest's card: an area names its largest interests,
-each with its size and a bar scaled to the largest, and leads to the rest;
+each with its size, and leads to the rest;
 an interest shows its most similar members.
 */}}
 {{define "interest-item" -}}
@@ -246,7 +259,7 @@ an interest shows its most similar members.
 <h2>{{template "icon" "layers"}}<a href="{{interestHref .ID}}">{{with .Label}}{{.}}{{else}}<span class="unlabeled">Unlabeled area</span>{{end}}</a></h2>
 <div class="stats"><span><b>{{num .Size}}</b> documents</span><span><b>{{num .NumChildren}}</b> {{if eq .NumChildren 1}}interest{{else}}interests{{end}}</span>{{with .New}}<span class="new"><b>{{num .}}</b> new</span>{{end}}</div>
 {{with .Summary}}<p class="summary">{{summaryText .}}</p>{{end}}
-{{with .Children}}<ul class="members children">{{range .}}<li><a href="{{interestHref .ID}}" title="{{.Name}}">{{with .Label}}{{.}}{{else}}<span class="unlabeled">Unlabeled interest</span>{{end}}</a>{{template "stackbar" (childBar .Size $.Largest)}}<span class="n">{{num .Size}}</span></li>{{end}}</ul>{{end}}
+{{with .Children}}<ul class="members children">{{range .}}<li><a href="{{interestHref .ID}}" title="{{.Name}}">{{with .Label}}{{.}}{{else}}<span class="unlabeled">Unlabeled interest</span>{{end}}</a><span class="n">{{num .Size}}</span></li>{{end}}</ul>{{end}}
 <a class="all" href="{{interestHref .ID}}">{{with .MoreChildren}}+ {{count . "more interest" "more interests"}}{{else}}All {{count .NumChildren "interest" "interests"}}{{end}} →</a>
 {{- end}}
 

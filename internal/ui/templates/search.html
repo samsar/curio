@@ -1,8 +1,11 @@
 {{/*
-Search is the home. Without a query, #results holds the landing, under
-the box in the upper third: a line of the largest interests, and
-nothing else (the Library lists the newest saves). With one, it holds
-the results.
+Search is the home. Without a query, the page is the box alone, where
+results keep it, and #results holds the landing: a column as tall as the
+screen under the box, with a line of the largest interests at its foot,
+and nothing else (the Library lists the newest saves). The type tabs show
+only with a query or a type chosen (#search-scope is empty otherwise, and
+still swapped). With a query, #results holds the results, in the same
+container as every page's, their passages at their reading measure.
 
 Search as you type: htmx sends the form's query, and the type the
 search is limited to, 400 ms after the last keystroke, and the answer,
@@ -82,9 +85,11 @@ text/template keeps a block's default over an empty define.
 </div>
 <p id="understanding" class="htmx-indicator understanding" aria-hidden="true"><span class="spinner"></span>Understanding your question…</p>
 <div class="search-scope" id="search-scope">
+{{- if .ShowsTypes}}
 <span>In</span>
 <div class="segmented" role="group" aria-label="Type">{{range .TypeTabs}}<a href="{{.Href}}"{{if .Current}} aria-current="page"{{end}}>{{.Label}}</a>{{end}}</div>
 {{with .Type}}<input type="hidden" name="content_type" value="{{.}}">{{end}}
+{{end -}}
 </div>
 </form>
 <div id="results" aria-live="polite">
@@ -152,8 +157,9 @@ there.
 {{- end}}
 
 {{/*
-One result, a ShownHit: where it lives, its title, its passages, or what
-it was saved as, and its type, its badge when it has one, and its score.
+One result, a ShownHit: where it lives, after its type's icon, its title,
+its best passage, or what it was saved as, its badge when it has one, its
+score, and its other passages a click away.
 */}}
 {{define "result" -}}
 {{$hit := .}}<li class="result">
@@ -162,7 +168,7 @@ it was saved as, and its type, its badge when it has one, and its score.
 {{range .ShownMatches}}{{template "match" .}}{{end}}
 {{- if not .Matches}}{{with .Saved}}<p class="saved-as" title="{{.}}">{{.}}</p>{{end}}{{end}}
 {{- with .Unavailable}}<p class="saved-gone">Saved — {{.}}{{with outbound $hit.URL}} · <a href="{{.}}" rel="noopener noreferrer" target="_blank">the original address</a>{{end}}</p>{{end}}
-<div class="result-foot">{{with .ContentType}}<span class="tag">{{.}}</span>{{end}}{{with .Badge}}<span class="badge badge-accent plain">{{.}}</span>{{end}}<span class="score">score {{printf "%.4f" .Score}}</span>
+<div class="result-foot">{{with .Badge}}<span class="badge badge-accent plain">{{.}}</span>{{end}}<span class="score">score {{printf "%.4f" .Score}}</span>
 {{- with .MoreMatches}}<details><summary>{{count (len .) "more passage" "more passages"}}</summary>{{range .}}{{template "match" .}}{{end}}</details>{{end}}</div>
 </li>
 {{- end}}
