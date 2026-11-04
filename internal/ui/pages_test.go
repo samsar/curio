@@ -65,17 +65,16 @@ func TestLibrary_Table(t *testing.T) {
 	out := render(t, r, PageLibrary, lib)
 	doc := parse(t, out)
 
-	assert.Contains(t, out, `<colgroup><col><col class="c-state"><col class="c-type"><col class="c-when"></colgroup>`)
+	assert.Contains(t, out, `<colgroup><col><col class="c-type"><col class="c-when"></colgroup>`)
 	rows := byID(doc, "rows")
 	require.NotNil(t, rows)
 	trs := children(rows, "tr")
 	require.Len(t, trs, len(lib.Rows))
 	for i, tr := range trs {
 		tds := children(tr, "td")
-		require.Len(t, tds, 4, "row %d", i)
-		assert.Equal(t, "state-cell", attrValue(tds[1], "class"), "row %d", i)
-		assert.Equal(t, "c-type", attrValue(tds[2], "class"), "row %d", i)
-		assert.Equal(t, "c-when when", attrValue(tds[3], "class"), "row %d", i)
+		require.Len(t, tds, 3, "row %d", i)
+		assert.Equal(t, "c-type", attrValue(tds[1], "class"), "row %d", i)
+		assert.Equal(t, "c-when when", attrValue(tds[2], "class"), "row %d", i)
 	}
 
 	assert.Contains(t, out, `<a class="doc-title" href="/ui/documents/a" title="`+strings.Repeat("A long title ", 25)+`">`)
@@ -83,10 +82,10 @@ func TestLibrary_Table(t *testing.T) {
 		html.EscapeString(untitled)+`">`+html.EscapeString(strings.TrimPrefix(untitled, "https://"))+"</a>")
 	assert.Contains(t, out, `<span class="host" title="`+html.EscapeString(untitled)+`">www.google.com</span>`,
 		"an untitled row's host under its name")
-	assert.Contains(t, out, `<span class="doc-error" title="permanent failure: native: origin blocked the request (likely anti-bot)">`+
+	assert.Contains(t, out, `<span class="doc-error warn" title="permanent failure: native: origin blocked the request (likely anti-bot)">`+
 		`<span class="err-cause">Blocked by bot protection</span> <span class="msg">origin blocked the request (likely anti-bot)</span></span>`)
-	assert.Contains(t, out, `<span class="doc-error"><span class="err-cause">Dead link</span> </span>`, "a cause without an error")
-	assert.Equal(t, 2, strings.Count(out, `class="doc-error"`), "only the failed and dead rows")
+	assert.Contains(t, out, `<span class="doc-error neutral"><span class="err-cause">Dead link</span> </span>`, "a cause without an error")
+	assert.Equal(t, 2, strings.Count(out, `class="doc-error `), "only the failed and dead rows, in their cause's tone")
 	assert.Contains(t, out, `<span class="sep narrow">·</span><span class="narrow">article</span>`, "the type, on a phone")
 	assert.Contains(t, out, `<span class="narrow"><time datetime="`, "the time, on a phone")
 	assert.Contains(t, out, `<span class="badge state-dead">dead</span>`)
@@ -188,7 +187,8 @@ func TestLibrary_Saved(t *testing.T) {
 	assert.Contains(t, out, `<span class="sep wide">·</span><span class="wide">chrome</span>`, "no folder, no title")
 	assert.Contains(t, out, `<time datetime="`+datetime(saved)+`"`)
 	assert.Contains(t, out, `<span class="doc-title untitled" title="No document">No document</span>`)
-	assert.Contains(t, out, `<td class="state-cell"></td>`+"\n"+`<td class="c-type"></td>`, "no document, no state or type")
+	assert.Contains(t, out, `<span class="doc-sub"><span class="host"`, "no document, no state")
+	assert.Contains(t, out, `<td class="c-type"></td>`, "no document, no type")
 	assert.Contains(t, out, `<div class="load-more" id="more"><a class="btn" href="/ui/library?cursor=c&amp;order=saved"`)
 	assert.Equal(t, 1, strings.Count(out, `<p class="table-note">Newest saves first, one row per bookmark: `+
 		`a page saved in two browsers is listed twice. A save without a known date, from a source that keeps none `+
@@ -465,6 +465,25 @@ func interestPage(page, size int) InterestPage {
 	return InterestPage{Layout: Layout{Title: in.Label, Nav: NavInterests}, Interest: in, Page: page}
 }
 
+// TestInterest_Summaries: a description is shown without the stock
+// opening a writing model gives it, on an interest's page, in its card and
+// in an area's, and the cohesion is a number, with no bar.
+func TestInterest_Summaries(t *testing.T) {
+	r := newRenderer(t)
+	page := interestPage(1, 3)
+	page.Interest.Summary = "This group focuses on sourdough baking and its starters."
+	out := render(t, r, PageInterest, page)
+	assert.Contains(t, out, `<p class="lede">Sourdough baking and its starters.</p>`)
+	assert.Contains(t, out, `<span class="text sim" title="How alike its documents are, from 0 (not at all) to 1 (the same)">how alike 0.59</span>`)
+	assert.NotContains(t, out, "<meter")
+
+	cards := interestsPage(1)
+	cards.Interests[0].Summary = "A collection of resources covering trail running and race nutrition."
+	out = render(t, r, PageInterests, cards)
+	assert.Contains(t, out, `<p class="summary">Trail running and race nutrition.</p>`)
+	assert.NotContains(t, out, "<meter")
+}
+
 // TestInterestPage_Pages: an interest's members are ranked across its
 // pages, with a pager under them that counts the documents shown of all of
 // them, and the head names the run the interest comes from.
@@ -677,7 +696,7 @@ func TestStatus_Failures(t *testing.T) {
 	assert.Contains(t, out, `<a class="more" href="/ui/failures">All failures →</a>`)
 	assert.Contains(t, out, `<li><a class="label" href="/ui/failures#cause-anti_bot" title="Blocked by bot protection">`+
 		`Blocked by bot protection</a><svg class="stackbar" viewBox="0 0 100 10" preserveAspectRatio="none" aria-hidden="true">`+
-		`<rect class="fill-track" x="0" y="0" width="100" height="10"/><rect class="fill-danger" x="0.000" y="0" width="100.000" height="10"/></svg>`+
+		`<rect class="fill-track" x="0" y="0" width="100" height="10"/><rect class="fill-warn" x="0.000" y="0" width="100.000" height="10"/></svg>`+
 		`<span class="n">926</span></li>`)
 	assert.Contains(t, out, `<rect class="fill-neutral" x="0.000" y="0" width="88.445" height="10"/></svg><span class="n">819</span>`)
 	assert.Contains(t, out, `<a class="label" href="/ui/failures#cause-dead_link" title="Dead link">`)
@@ -784,6 +803,72 @@ func TestSearch_Results(t *testing.T) {
 	assert.Contains(t, typed, `<input type="hidden" name="content_type" value="pdf">`)
 	assert.Contains(t, typed, `<a href="/ui/?content_type=pdf&amp;q=kafka" aria-current="page">PDFs</a>`)
 	assert.NotContains(t, render(t, r, PageSearch, Search{Layout: layout, Home: &SearchHome{}}), `name="content_type"`)
+}
+
+// TestSearch_HomeLately: the home lists the newest saves with the lists'
+// row partial, under a head that leads to all of them, and says how many
+// documents were placed since the rebuild, leading to Unsorted when they
+// all went there and to the Interests otherwise; each only when it has
+// something to show.
+func TestSearch_HomeLately(t *testing.T) {
+	r := newRenderer(t)
+	layout := Layout{Title: "Search", Nav: NavSearch}
+	saved := SavedTime{At: time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC), Date: "exact"}
+	home := &SearchHome{New: 3, NewUnsorted: 1, Lately: []LibraryRow{
+		{DocumentID: "a", Title: "Sourdough starters", URL: "https://bread.example/starters", State: "fetched",
+			When: saved.At, Saved: &saved, Source: "chrome"},
+		{DocumentID: "b", URL: "https://gone.example/page", State: "dead", When: saved.At, Saved: &saved,
+			Source: "safari", FailureCause: "dead_link"},
+	}}
+	out := render(t, r, PageSearch, Search{Layout: layout, Home: home})
+	assert.Contains(t, out, `<h2 id="lately">Lately saved</h2><a class="more" href="/ui/library?order=saved">All saves →</a>`)
+	assert.Contains(t, out, `<a class="doc-title" href="/ui/documents/a" title="Sourdough starters">Sourdough starters</a>`)
+	assert.Contains(t, out, `<span class="doc-error neutral"><span class="err-cause">Dead link</span> </span>`)
+	assert.Equal(t, 2, strings.Count(out, `<td class="c-when when">saved <time`), "each save's time")
+	assert.Contains(t, out, `<p class="home-new"><a href="/ui/interests">3 documents new since the interests were rebuilt →</a></p>`)
+	assert.Less(t, strings.Index(out, "home-new"), strings.Index(out, `id="lately"`), "interests, then the saves")
+
+	home.NewUnsorted = 3
+	assert.Contains(t, render(t, r, PageSearch, Search{Layout: layout, Home: home}),
+		`<p class="home-new"><a href="/ui/interests/unsorted">3 documents new`, "all of them in Unsorted")
+
+	// A save's time says once when it was saved, on one line: never "saved
+	// by", and on a phone as a plain time after the type, not a line of its
+	// own.
+	times := savedTimes(saved.At)
+	rows := make([]LibraryRow, 0, len(times))
+	for i := range times {
+		rows = append(rows, LibraryRow{DocumentID: "s" + strconv.Itoa(i), Title: "Save", URL: "https://example.com/",
+			State: "fetched", ContentType: "article", When: saved.At, Saved: &times[i], Source: "chrome"})
+	}
+	out = render(t, r, PageSearch, Search{Layout: layout, Home: &SearchHome{Lately: rows}})
+	assert.NotContains(t, out, "saved by")
+	assert.NotContains(t, out, "doc-saved")
+	assert.Contains(t, out, `<td class="c-when when"><span class="saved-time" title="Saved on or before `)
+	assert.Contains(t, out, `">saved <time datetime="`+datetime(saved.At)+`"`, "an upper bound: saved, when")
+	assert.Contains(t, out, `">imported <time datetime="`+datetime(times[2].Imported)+`"`, "no date: when it was imported")
+	assert.Equal(t, len(rows), strings.Count(out, `<span class="sep narrow">·</span><span class="narrow"><time`),
+		"on a phone, a plain time")
+
+	none := render(t, r, PageSearch, Search{Layout: layout, Home: &SearchHome{}})
+	assert.NotContains(t, none, "Lately saved")
+	assert.NotContains(t, none, "home-new")
+}
+
+// TestLibrary_StateBadges: a row reads as a bookmark: a fetched document
+// has no state badge, any other its own at the head of the line under
+// its name; there is no State column.
+func TestLibrary_StateBadges(t *testing.T) {
+	r := newRenderer(t)
+	rows := []LibraryRow{{DocumentID: "a", URL: "https://example.com/a", State: "fetched"},
+		{DocumentID: "b", URL: "https://example.com/b", State: "pending"},
+		{DocumentID: "c", URL: "https://example.com/c", State: "failed"}}
+	out := render(t, r, PageLibrary, Library{Layout: Layout{Title: "Library", Nav: NavLibrary}, PageSize: 50, Rows: rows})
+	assert.NotContains(t, out, `state-fetched`)
+	assert.NotContains(t, out, `>State</th>`, "no State column")
+	assert.Contains(t, out, `<span class="doc-sub"><span class="badge state-pending">pending</span><span class="host"`)
+	assert.Contains(t, out, `<span class="doc-sub"><span class="badge state-failed">failed</span><span class="host"`)
+	assert.Equal(t, 2, strings.Count(out, `<span class="badge state-`))
 }
 
 // TestLibrary_Tabs: the state tabs keep the other filters, mark the
@@ -1759,7 +1844,7 @@ func TestFailures_Page(t *testing.T) {
 	assert.Equal(t, "cause-new_cause", cards[12])
 
 	assert.Contains(t, out, `<li class="card cause" id="cause-anti_bot">`+"\n"+
-		`<span class="cause-icon danger"><svg class="icon"`)
+		`<span class="cause-icon warn"><svg class="icon"`)
 	assert.Contains(t, out, `<h2>Blocked by bot protection <code>anti_bot</code></h2>`+"\n"+
 		`<p class="why">The site blocked curio&#39;s request:`)
 	assert.Contains(t, out, `<div class="hosts" role="group" aria-label="Top hosts">`+
@@ -2044,9 +2129,9 @@ func TestInterests_Cards(t *testing.T) {
 	v.Interests[1].Loose = 1
 	out := render(t, r, PageInterests, v)
 	assert.Contains(t, out, `<div class="stats"><span><b>84</b> documents</span><span title="Loose fits are close to this interest without being grouped in it, and never name it"><b>2</b> loose fits</span>`+
-		`<span class="new"><b>3</b> new</span><span class="meter-row"`)
-	assert.Contains(t, out, `<div class="stats"><span><b>83</b> documents</span><span title="Loose fits are close to this interest without being grouped in it, and never name it"><b>1</b> loose fit</span><span class="meter-row"`)
-	assert.Contains(t, out, `<div class="stats"><span><b>82</b> documents</span><span class="meter-row"`, "none of either")
+		`<span class="new"><b>3</b> new</span><span class="sim"`)
+	assert.Contains(t, out, `<div class="stats"><span><b>83</b> documents</span><span title="Loose fits are close to this interest without being grouped in it, and never name it"><b>1</b> loose fit</span><span class="sim"`)
+	assert.Contains(t, out, `<div class="stats"><span><b>82</b> documents</span><span class="sim"`, "none of either")
 
 	area := Interest{ID: "a1", Area: true, Label: "Cloud", Size: 120, New: 4, NumChildren: 2,
 		Children: []Interest{{ID: "i1", Label: "AWS", Size: 70}, {ID: "i2", Label: "GCP", Size: 50}}}
@@ -2118,8 +2203,7 @@ func TestInterestPage_NewBand(t *testing.T) {
 	assert.Contains(t, out, `<h2 id="new-band">New since the last rebuild</h2><p>Shown where they are most alike; the next rebuild decides where they belong.</p>`)
 	assert.Contains(t, out, `<tr class="fit-new"><td><a class="doc-title untitled" href="/ui/documents/n1" title="Placed &lt;here&gt;">`+
 		`Placed &lt;here&gt;</a>`)
-	assert.Contains(t, out, `<span class="badge plain fit-new">new</span></td><td><span class="meter-row">`+
-		`<meter class="meter" min="0" max="1" value="0.61">0.61</meter>0.61</span></td></tr>`)
+	assert.Contains(t, out, `<span class="badge plain fit-new">new</span></td><td><span class="sim">0.61</span></td></tr>`, "a similarity is a number, no bar")
 	assert.Contains(t, out, `<p class="table-note">and 21 more</p>`)
 	band, members := strings.Index(out, `id="new-band"`), strings.Index(out, `<tr class="fit-member">`)
 	assert.Less(t, band, members, "above the ranked members")

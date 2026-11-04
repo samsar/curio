@@ -27,7 +27,7 @@ document's name, as the Library folds its type and time.
 <div class="table-scroll">
 <table class="data">
 <colgroup><col><col class="c-nearest"><col class="c-sim"></colgroup>
-<thead><tr><th scope="col">Document</th><th scope="col" class="c-nearest">Nearest interest</th><th scope="col">Similarity</th></tr></thead>
+<thead><tr><th scope="col">Document</th><th scope="col" class="c-nearest">Nearest interest</th><th scope="col" class="c-sim">Similarity</th></tr></thead>
 <tbody>
 {{range .Documents}}<tr class="{{fitClass "unsorted"}}"><td>{{template "doc-cell" .Cell}}<span class="nearest-sub">nearest {{template "nearest" .Nearest}}</span></td><td class="c-nearest">{{template "nearest" .Nearest}}</td><td>{{template "similarity" .Similarity}}</td></tr>
 {{end}}</tbody>

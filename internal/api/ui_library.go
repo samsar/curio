@@ -122,8 +122,17 @@ func (h pageHandlers) librarySaves(ctx context.Context, r *http.Request) (ui.Lib
 	}
 	vm := ui.Library{Filters: ui.LibraryFilters{Order: ui.OrderSaved, State: string(opts.State),
 		ContentType: string(opts.ContentType), Host: opts.Host, Folder: opts.FolderPath, Cause: string(opts.Cause),
-		Limit: linkLimit(opts.Limit)}, NextCursor: resp.NextCursor, PageSize: opts.Limit}
-	for _, b := range resp.Items {
+		Limit: linkLimit(opts.Limit)}, NextCursor: resp.NextCursor, PageSize: opts.Limit, Rows: saveRows(resp.Items)}
+	return vm, nil
+}
+
+// saveRows are saves as the lists of saves show them, the Library's Date
+// saved order and the search home's Lately saved: a row a save, so an
+// untitled document is named by that bookmark's own title, and a failed
+// or dead one says why it failed.
+func saveRows(items []BookmarkListItem) []ui.LibraryRow {
+	rows := make([]ui.LibraryRow, 0, len(items))
+	for _, b := range items {
 		saved := savedTime(b.SavedAt, b.CreatedAt, b.SavedDate)
 		row := ui.LibraryRow{DocumentID: deref(b.DocumentID), Title: deref(b.DocumentTitle),
 			BookmarkTitle: strings.TrimSpace(deref(b.Title)), URL: b.URL, State: b.DocumentState,
@@ -132,9 +141,9 @@ func (h pageHandlers) librarySaves(ctx context.Context, r *http.Request) (ui.Lib
 		if failureCurrent(store.DocState(b.DocumentState)) {
 			row.LastError, row.FailureCause = b.DocumentLastError, b.DocumentFailureCause
 		}
-		vm.Rows = append(vm.Rows, row)
+		rows = append(rows, row)
 	}
-	return vm, nil
+	return rows
 }
 
 // linkLimit is a page size as the Library's links carry it on: 0, which

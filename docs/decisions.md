@@ -15785,6 +15785,107 @@ of its own, so it never breaks inside the timestamp.
 **How to revisit:** a page test pins each sentence; the screenshots at
 1440 and 390, both themes, are the check for layout.
 
+## Dashboard: the category standard
+
+**Decision:** the dashboard is for taking stock of what was saved, mostly
+as reference, not a reading app (PRODUCT.md). Its look stays the one it
+had, made precise in the manner of the best developer tools, with no
+themed world: the palette family and system fonts kept, refined rather
+than replaced. The terminal tie-ins, the density, the Failures taxonomy
+and the interest map (map.js untouched) are as they were. UI only: no
+/v1 change.
+
+**The home leads with the box and what was saved lately.** The landing
+put the box a sixth of the way down and the interests line at the foot of
+the screen, with about 900 px of nothing between. Now the box stands
+where results keep it (a first keystroke no longer moves it), and under
+its type tabs, in its 48 rem column: the interests line (its label and
+**All N →** on one row, the names under it), one line when documents were
+placed since the rebuild ("N documents new since the interests were
+rebuilt", to Unsorted when all of them went there, else to Interests,
+whose cards count each group's), and **Lately saved**: the eight newest
+saves (`ui.HomeLately`), read through `listBookmarks` in the saved order,
+the Library's Date saved list, rendered by the same `doc-cell` row. A
+save's time there is one line, "saved 4 d ago" (an upper bound's meaning
+on hover) or "imported 4 d ago" for an unknown date (`saved-ago`), never
+the Library column's two-line "saved by" / "4 d ago", which read "saved
+by 4 d ago" on one; the row already names the browser, so the time
+doesn't. The interests line separates its names by a gap, not a "·",
+which a wrap left at a line's start or end. The
+home's reads stay without a query only (`TestUI_SearchHomeReadsOnlyWithoutAQuery`
+counts the saves read too) and each degrades alone. The new count is
+the run's placement counts, read apart from the interests (`placedSince`,
+one `PlacementCounts`), so its failure leaves the line of interests and
+only drops the count; the `Bare` interests read still reads no area's
+interests or member. At 390 px the box is first, then the interests, then
+the saves.
+
+**A Library row reads as a bookmark.** Every row carried a green
+"fetched" pill, 70% of them saying nothing. The State column is gone; a
+row that isn't fetched shows its state's badge at the head of the line
+under its name (`DocCell.Badge`), and the state tabs stay. A column of
+badges only for the other rows was the alternative: it left a mostly empty
+7 rem column, and on a phone squeezed every host to a few characters.
+
+**Red only for outages.** The state bar drew failed in danger red, and
+eight of the fourteen causes were red, so Status and Failures read as an
+emergency over pages that are simply gone. Now danger is kept for what is
+wrong with curio's own machinery (Health's Ollama, the attention
+callouts); a cause is warn when it will pass or the owner can act on it
+(anti-bot, unreachable, timeout, network, rate limited, index, which a
+reindex retries) and neutral when it is a verdict a refetch won't change
+(dead link, login wall, HTTP error, TLS, Jina's refusal, unsupported, too
+large, other). `causeTone` is the one list: the Failures cards' icons,
+Status's cause bars (`causeBar`) and a row's cause line all take it. The
+states follow: pending accent (work under way), failed warn, dead
+neutral, fetched ok.
+
+**Status balances its columns.** The board was 2:1, the left column
+about 1,000 px tall and the right 600. It is 3:2, the jobs beside the
+queue on the left and why documents failed under health and progress on
+the right, so the two end within about 100 px of each other. On a phone,
+where the board is one column, the columns' wrappers are `display:
+contents` and each card has an order: the library, health, progress, the
+queue, why documents failed, the jobs, so health is seen before the
+queue's controls. Health has nothing focusable, so the tab order (the
+DOM's) still meets the queue's controls in the order they are seen.
+
+**Descriptions lose their stock opening.** About 20 of the 24 areas'
+descriptions, and most interests', open with "A collection of resources
+covering…", "This group focuses on…", "Technical documentation for…".
+`summaryText` drops such an opening at display, by one anchored,
+case-insensitive pattern (`summaryLeadRE`: a subject and verb, a
+collection of something, a kind of resource and its preposition, or "An
+analysis of"), and the fillers after it ("the", "various"), and
+capitalises what is left unless its first word mixes cases (iOS, eBPF).
+Too little left (under 12 characters) shows the description as stored,
+and so does anything without such an opening. The stored label and
+summary never change, and the interest map, which draws them in its own
+script, shows them as stored.
+
+**Similarity is a number, not a bar.** Cohesion and a member's similarity
+sit between about 0.5 and 0.9 on a 0-to-1 `<meter>`, so every bar looked
+the same. Scaling the meter to that range would need a documented range
+that holds for every library and model; instead the bar goes and the
+number stays, two decimals, tabular, right-aligned in its column
+("0.55 alike" on a card, "how alike 0.55" in a head). The column is 6.5
+rem.
+
+**The craft pass.** Four font weights as tokens (`--fw-medium` 520,
+`--fw-strong` 560, `--fw-heading` 620, `--fw-display` 660) replace nine
+ad hoc values; the brand and a result's title sit on the type scale
+(`--fs-md`), and a page's title on a phone is `--fs-xl-sm` (20 px). A
+card's head and body share one inset (s5), a heading sitting closer to
+its body (s3) than to the card's edge; table cells are s3 by s4, heads s2
+by s4. Counts in badges, tags, ledes, card heads, stats and rows are
+tabular. `TestStylesheet` still holds the tokens-only rules.
+
+**How to revisit:** the page tests pin the home's lists, the badges, the
+tones and the numbers (`TestSearch_HomeLately`, `TestUI_SearchHomeLately`,
+`TestLibrary_StateBadges`, `TestCauses_IconAndTone`, `TestSummaryText`,
+`TestInterest_Summaries`); layout is checked by screenshots at 1440 and
+390, both themes.
+
 ---
 
 ## Open questions

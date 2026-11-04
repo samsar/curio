@@ -404,10 +404,7 @@ func (d Deps) interests(ctx context.Context, opts interestsOpts) (InterestListRe
 	if err != nil {
 		return InterestListResponse{}, err
 	}
-	for _, n := range placed {
-		resp.NumNew += n
-	}
-	resp.NumNewUnsorted = placed[""]
+	resp.NumNew, resp.NumNewUnsorted = placedTotals(placed)
 	for i := range resp.Items {
 		resp.Items[i].New = placed[resp.Items[i].ID]
 	}
@@ -422,6 +419,27 @@ func (d Deps) interests(ctx context.Context, opts interestsOpts) (InterestListRe
 		return InterestListResponse{}, err
 	}
 	return resp, nil
+}
+
+// placedSince counts the documents placed since run was rebuilt, and those
+// of them placed into Unsorted, for a page that says how many are new
+// without listing where (the search home).
+func (d Deps) placedSince(ctx context.Context, runID string) (total, unsorted int, err error) {
+	placed, err := d.Insights.PlacementCounts(ctx, runID)
+	if err != nil {
+		return 0, 0, err
+	}
+	total, unsorted = placedTotals(placed)
+	return total, unsorted, nil
+}
+
+// placedTotals sums PlacementCounts' answer, by interest ("" for
+// Unsorted): every document placed, and those placed into Unsorted.
+func placedTotals(placed map[string]int) (total, unsorted int) {
+	for _, n := range placed {
+		total += n
+	}
+	return total, placed[""]
 }
 
 // groupPage reads the latest done run and the page of its groups opts

@@ -166,9 +166,9 @@ func TestFetcherNames(t *testing.T) {
 
 func TestStateNames(t *testing.T) {
 	for state, want := range map[string][2]string{
-		"pending": {"state-pending", "warn"},
+		"pending": {"state-pending", "accent"},
 		"fetched": {"state-fetched", "ok"},
-		"failed":  {"state-failed", "danger"},
+		"failed":  {"state-failed", "warn"},
 		"dead":    {"state-dead", "neutral"},
 		evilAttr:  {"", "neutral"},
 		"":        {"", "neutral"},
@@ -228,9 +228,9 @@ func TestBars(t *testing.T) {
 	segments := stateBar([]Count{{Name: "dead", Count: 1}, {Name: "failed", Count: 1}, {Name: "pending", Count: 1},
 		{Name: "fetched", Count: 1}})
 	assert.Equal(t, []BarSegment{
-		{Class: "fill-warn", X: "0.000", Width: "25.000"},
+		{Class: "fill-accent", X: "0.000", Width: "25.000"},
 		{Class: "fill-ok", X: "25.000", Width: "25.000"},
-		{Class: "fill-danger", X: "50.000", Width: "25.000"},
+		{Class: "fill-warn", X: "50.000", Width: "25.000"},
 		{Class: "fill-neutral", X: "75.000", Width: "25.000"},
 	}, segments)
 
@@ -319,14 +319,15 @@ func TestFixedSets(t *testing.T) {
 	assert.Equal(t, at.Local().Format("Jan 2, 2006"), localDay(at), "the daemon's day")
 }
 
-// TestCauseBar: a cause's bar is scaled to the cause with the most, dead
-// links drawn neutral like the dead state, every other cause danger.
+// TestCauseBar: a cause's bar is scaled to the cause with the most, in
+// its tone: warn for what will pass, neutral for a verdict and for a cause
+// this build doesn't know.
 func TestCauseBar(t *testing.T) {
-	assert.Equal(t, []BarSegment{{Class: "fill-danger", X: "0.000", Width: "100.000"}}, causeBar("anti_bot", 926, 926))
+	assert.Equal(t, []BarSegment{{Class: "fill-warn", X: "0.000", Width: "100.000"}}, causeBar("anti_bot", 926, 926))
 	assert.Equal(t, []BarSegment{{Class: "fill-neutral", X: "0.000", Width: "88.445"}}, causeBar("dead_link", 819, 926))
-	assert.Equal(t, []BarSegment{{Class: "fill-danger", X: "0.000", Width: "26.350"}}, causeBar(evilAttr, 244, 926),
+	assert.Equal(t, []BarSegment{{Class: "fill-neutral", X: "0.000", Width: "26.350"}}, causeBar(evilAttr, 244, 926),
 		"a cause this build has no words for")
-	assert.Equal(t, []BarSegment{{Class: "fill-danger", X: "0.000", Width: "100.000"}}, causeBar("tls", 5, 3),
+	assert.Equal(t, []BarSegment{{Class: "fill-neutral", X: "0.000", Width: "100.000"}}, causeBar("tls", 5, 3),
 		"never past the bar's end")
 	for _, tc := range []struct{ n, most int }{{0, 926}, {-1, 926}, {5, 0}, {5, -1}} {
 		assert.Empty(t, causeBar("anti_bot", tc.n, tc.most), "%d of %d", tc.n, tc.most)
