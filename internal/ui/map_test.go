@@ -57,8 +57,8 @@ func TestD3IsPinned(t *testing.T) {
 
 // TestMapScripts: the map's page loads the d3 modules in an order where
 // each comes after those it reads from the d3 global as it loads, then
-// map.js; static/ holds those files, htmx's, actions.js and app.css, and
-// nothing else.
+// map.js; static/ holds those files, htmx's, actions.js, search.js,
+// theme.js and app.css, and nothing else.
 func TestMapScripts(t *testing.T) {
 	want := make([]string, 0, len(d3Modules)+1)
 	for _, m := range d3Modules {
@@ -73,7 +73,7 @@ func TestMapScripts(t *testing.T) {
 	for _, e := range entries {
 		static = append(static, e.Name())
 	}
-	assert.ElementsMatch(t, append([]string{"app.css", "actions.js", "search.js", "htmx-" + htmxVersion + ".min.js"},
+	assert.ElementsMatch(t, append([]string{"app.css", "actions.js", "search.js", "theme.js", "htmx-" + htmxVersion + ".min.js"},
 		want...), static)
 }
 

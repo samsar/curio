@@ -6,7 +6,7 @@ this one. Every page has a #more, an empty one without rows, so the last
 one clears it. htmx asks for the next page with how many rows the page
 shows so far (shown), so that its #showing, which replaces this one,
 counts them all; the plain link leaves it out, since that page shows only
-its own rows. The Date saved note sits outside both, so it shows once.
+its own rows. The Recently saved note sits outside both, so it shows once.
 
 A row reads as a bookmark: there is no State column, and a fetched
 document, the usual case, has no state badge; any other has its own, at
@@ -28,7 +28,7 @@ toolbar names it, with a link that clears it alone.
 <label class="field"><span>Type</span><select class="select" name="content_type"><option value="">Any type</option>{{range contentTypes}}<option{{if eq . $.Filters.ContentType}} selected{{end}}>{{.}}</option>{{end}}</select></label>
 <label class="field"><span>Host</span><input class="input" name="host" value="{{.Filters.Host}}" placeholder="example.com"></label>
 <label class="field"><span>Folder</span><input class="input" name="folder" value="{{.Filters.Folder}}" placeholder="/Reading"></label>
-<label class="field"><span>Order</span><select class="select" name="order"><option value="updated">Last updated</option><option value="saved"{{if .Filters.Saved}} selected{{end}}>Date saved</option></select></label>
+<label class="field field-order"><span>Order</span><select class="select" name="order"><option value="saved">Recently saved</option><option value="updated"{{if not .Filters.Saved}} selected{{end}}>Last updated</option></select></label>
 {{with .Filters.State}}<input type="hidden" name="state" value="{{.}}">{{end}}
 {{with .Filters.Cause}}<input type="hidden" name="cause" value="{{.}}">{{end}}
 {{with .Filters.Limit}}<input type="hidden" name="limit" value="{{.}}">{{end}}

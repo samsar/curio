@@ -727,7 +727,7 @@ func TestUI_DocumentReads(t *testing.T) {
 }
 
 // TestUI_LibraryReads: the Library is one list read and the counts in
-// either order: the documents in Last updated, the saves in Date saved,
+// either order: the documents in Last updated, the saves in Recently saved,
 // each row's document from that same read, never a read per row. A query
 // it doesn't take reads nothing.
 func TestUI_LibraryReads(t *testing.T) {
@@ -743,7 +743,8 @@ func TestUI_LibraryReads(t *testing.T) {
 		status int
 		want   map[string]int
 	}{
-		{"/ui/library", http.StatusOK, map[string]int{"documents": 1, "stats": 1}},
+		{"/ui/library", http.StatusOK, map[string]int{"saves": 1, "stats": 1}},
+		{"/ui/library?order=updated", http.StatusOK, map[string]int{"documents": 1, "stats": 1}},
 		{"/ui/library?order=updated&state=failed", http.StatusOK, map[string]int{"documents": 1, "stats": 1}},
 		{"/ui/library?order=saved", http.StatusOK, map[string]int{"saves": 1, "stats": 1}},
 		{"/ui/library?order=saved&state=failed&limit=2", http.StatusOK, map[string]int{"saves": 1, "stats": 1}},
@@ -1118,8 +1119,8 @@ func TestUI_InterestsReads(t *testing.T) {
 	getPage(t, srv, "/ui/interests/"+areas.Areas[0]+"?page=x", http.StatusBadRequest)
 	assert.Empty(t, r.take())
 	getPage(t, srv, "/ui/", http.StatusOK)
-	assert.Equal(t, map[string]int{"stats": 1, "saves": 1, "done run": 1, "interests": 1, "new counts": 1}, r.take(),
-		"the search home names the areas and counts what was placed since, never reading their interests")
+	assert.Equal(t, map[string]int{"stats": 1, "done run": 1, "interests": 1}, r.take(),
+		"the search home names the areas, never reading their interests, and lists no saves")
 
 	enqueueRebuild(t, srv)
 	_, err := srv.Deps.Queue.ClaimNext(context.Background(), []store.JobKind{store.JobKindCluster})

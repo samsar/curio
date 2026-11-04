@@ -136,9 +136,9 @@ all fetch/index/search/insight workflows.
   hand-written, and codegen is deferred
 - The dashboard: GET-only HTML pages under `/ui/` on the same port and
   origin (`/` redirects there; `daemon.ui: false` turns them off): search
-  is the home at `/ui/`, then the Library (documents most recently
-  updated first, or in its Date saved order the saves, newest saved
-  first, and its Failures tab at `/ui/failures`, the failed and dead
+  is the home at `/ui/`, then the Library (the saves, newest saved
+  first, or in its Last updated order the documents most recently
+  updated first, and its Failures tab at `/ui/failures`, the failed and dead
   documents grouped by cause), the Interests (and their map at
   `/ui/interests/map`, drawn in the browser by `static/map.js` from `GET
   /v1/interests/map` with ten vendored d3 modules), and Status at
@@ -154,13 +154,16 @@ all fetch/index/search/insight workflows.
   sends to `/v1` as JSON, from
   actions built in Go (`internal/ui/actions.go`); the search page's
   `search.js` keeps a keystroke's search, still waiting out its delay,
-  from replacing the understood search Enter sent. Every response
+  from replacing the understood search Enter sent; `theme.js`, loaded
+  first on every page, applies and keeps the header button's theme
+  choice. Every response
   carries a strict CSP. See `docs/ui.md`, and decisions.md "Dashboard:
   server-rendered pages in the daemon (phase 1)", "Dashboard: a design
   language under the CSP", "Dashboard: search is home, the Overview
   becomes Status", "Dashboard: actions through /v1, sent by a
-  first-party module", "Library: a Date saved order lists saves" and
-  "Dashboard: the Failures tab"
+  first-party module", "Library: a Date saved order lists saves",
+  "Dashboard: the Failures tab" and "Dashboard: a quieter home, saves
+  first, a theme button"
 - Internal worker pools process jobs from the SQLite-backed queue: fetch,
   index, cluster (one goroutine), cards (one goroutine, which embeds
   the documents' stale cards) and summarize (one goroutine, the summary

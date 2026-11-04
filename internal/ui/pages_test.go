@@ -53,15 +53,16 @@ func TestLibrary_Table(t *testing.T) {
 	r := newRenderer(t)
 	at := time.Now().Add(-3 * time.Hour)
 	untitled := "https://www.google.com/search?q=angular&ei=" + strings.Repeat("CgZwc3ktYWIQ", 50)
-	lib := Library{Layout: Layout{Title: "Library", Nav: NavLibrary}, PageSize: 50, NextCursor: "c", Rows: []LibraryRow{
-		{DocumentID: "a", Title: strings.Repeat("A long title ", 25), URL: "https://example.com/a", State: "fetched",
-			ContentType: "article", When: at},
-		{DocumentID: "b", URL: untitled, State: "fetched", ContentType: "unknown", When: at},
-		{DocumentID: "c", URL: "https://twitter.com/x/status/1", State: "failed", ContentType: "unknown", When: at,
-			FailureCause: "anti_bot", LastError: "permanent failure: native: origin blocked the request (likely anti-bot)"},
-		{DocumentID: "d", URL: "https://gone.example/", State: "dead", ContentType: "unknown", When: at,
-			FailureCause: "dead_link"},
-	}}
+	lib := Library{Layout: Layout{Title: "Library", Nav: NavLibrary}, Filters: LibraryFilters{Order: OrderUpdated},
+		PageSize: 50, NextCursor: "c", Rows: []LibraryRow{
+			{DocumentID: "a", Title: strings.Repeat("A long title ", 25), URL: "https://example.com/a", State: "fetched",
+				ContentType: "article", When: at},
+			{DocumentID: "b", URL: untitled, State: "fetched", ContentType: "unknown", When: at},
+			{DocumentID: "c", URL: "https://twitter.com/x/status/1", State: "failed", ContentType: "unknown", When: at,
+				FailureCause: "anti_bot", LastError: "permanent failure: native: origin blocked the request (likely anti-bot)"},
+			{DocumentID: "d", URL: "https://gone.example/", State: "dead", ContentType: "unknown", When: at,
+				FailureCause: "dead_link"},
+		}}
 	out := render(t, r, PageLibrary, lib)
 	doc := parse(t, out)
 
@@ -101,17 +102,17 @@ func TestLibrary_Table(t *testing.T) {
 // holds an empty #more.
 func TestLibrary_Empty(t *testing.T) {
 	r := newRenderer(t)
-	lib := Library{Layout: Layout{Title: "Library", Nav: NavLibrary}, Filters: LibraryFilters{State: "pending",
-		ContentType: "pdf", Host: "arxiv.org", Folder: "/Reading", Limit: 5}}
+	lib := Library{Layout: Layout{Title: "Library", Nav: NavLibrary}, Filters: LibraryFilters{Order: OrderUpdated,
+		State: "pending", ContentType: "pdf", Host: "arxiv.org", Folder: "/Reading", Limit: 5}}
 	out := render(t, r, PageLibrary, lib)
 	assert.Contains(t, out, "<h2>No documents match</h2>")
 	assert.Contains(t, out, "Nothing in the library has state <code>pending</code>, type <code>pdf</code>, "+
 		"host <code>arxiv.org</code>, folder <code>/Reading</code>.")
 	assert.Contains(t, out, "A host matches exactly")
-	assert.Contains(t, out, `<a class="btn" href="/ui/library">Clear filters</a>`)
+	assert.Contains(t, out, `<a class="btn" href="/ui/library?order=updated">Clear filters</a>`)
 	assert.Contains(t, out, `<div class="load-more" id="more"></div>`)
 
-	lib.Filters = LibraryFilters{Limit: 5}
+	lib.Filters = LibraryFilters{Order: OrderUpdated, Limit: 5}
 	out = render(t, r, PageLibrary, lib)
 	assert.Contains(t, out, "<h2>Your library is empty</h2>")
 	assert.Contains(t, out, "<code>curio import chrome</code>")
@@ -151,7 +152,8 @@ func TestDocRef(t *testing.T) {
 	assert.Equal(t, "example.com", row.Cell().Where, "an unnamed row's host under its address")
 }
 
-// TestLibrary_Saved: in the Date saved order the time column reads Saved
+// TestLibrary_Saved: in the Recently saved order, the default, the time
+// column reads Saved
 // and holds when each page was saved, a row names the browser it came
 // from on a wide screen, with the folder on hover, a note explains the
 // rows, and the Showing line counts saves: of the library's bookmarks with
@@ -171,7 +173,8 @@ func TestLibrary_Saved(t *testing.T) {
 				Source: "chrome"},
 		}}
 	out := render(t, r, PageLibrary, lib)
-	assert.Contains(t, out, `<option value="saved" selected>Date saved</option>`)
+	assert.Contains(t, out, `<option value="saved">Recently saved</option><option value="updated">Last updated</option>`,
+		"the default order first, chosen")
 	assert.Contains(t, out, `<th scope="col" class="c-when">Saved</th>`)
 	assert.Contains(t, out, `<col class="c-when c-saved">`)
 	assert.Contains(t, out, `<td class="c-when when">saved <time datetime="`+datetime(saved)+`"`, "an exact save")
@@ -189,13 +192,13 @@ func TestLibrary_Saved(t *testing.T) {
 	assert.Contains(t, out, `<span class="doc-title untitled" title="No document">No document</span>`)
 	assert.Contains(t, out, `<span class="doc-sub"><span class="host"`, "no document, no state")
 	assert.Contains(t, out, `<td class="c-type"></td>`, "no document, no type")
-	assert.Contains(t, out, `<div class="load-more" id="more"><a class="btn" href="/ui/library?cursor=c&amp;order=saved"`)
+	assert.Contains(t, out, `<div class="load-more" id="more"><a class="btn" href="/ui/library?cursor=c"`)
 	assert.Equal(t, 1, strings.Count(out, `<p class="table-note">Newest saves first, one row per bookmark: `+
 		`a page saved in two browsers is listed twice. A save without a known date, from a source that keeps none `+
 		`or a browser's bulk import, is marked so and listed by the time it carries.</p>`))
 	assert.Contains(t, out, `<p class="pager-summary mt-4" id="showing">Showing 2 of 7,497 saves.</p>`)
-	assert.Contains(t, out, `<a href="/ui/library?order=saved&amp;state=failed">Failed <span class="count">2,150</span></a>`,
-		"the tabs keep the order and count documents")
+	assert.Contains(t, out, `<a href="/ui/library?state=failed">Failed <span class="count">2,150</span></a>`,
+		"the tabs keep the order, the default, and count documents")
 
 	for _, f := range []LibraryFilters{{State: "failed"}, {ContentType: "pdf"}, {Host: "example.com"},
 		{Folder: "/Reading"}, {Cause: "anti_bot"}} {
@@ -218,12 +221,13 @@ func TestLibrary_Saved(t *testing.T) {
 	lib.Filters.Host = "nothing.example"
 	out = render(t, r, PageLibrary, lib)
 	assert.Contains(t, out, "<h2>No saves match</h2>")
-	assert.Contains(t, out, `<a class="btn" href="/ui/library?order=saved">Clear filters</a>`, "it keeps the order")
+	assert.Contains(t, out, `<a class="btn" href="/ui/library">Clear filters</a>`, "it keeps the order, the default")
 
-	lib.Filters.Order = ""
+	lib.Filters.Order = OrderUpdated
 	out = render(t, r, PageLibrary, lib)
-	assert.Contains(t, out, `<option value="updated">Last updated</option><option value="saved">Date saved</option>`)
+	assert.Contains(t, out, `<option value="saved">Recently saved</option><option value="updated" selected>Last updated</option>`)
 	assert.Contains(t, out, "<h2>No documents match</h2>")
+	assert.Contains(t, out, `<a class="btn" href="/ui/library?order=updated">Clear filters</a>`, "it keeps the order")
 }
 
 // interestsPage is page of a run of 222 interests, its cards as many as
@@ -805,56 +809,6 @@ func TestSearch_Results(t *testing.T) {
 	assert.NotContains(t, render(t, r, PageSearch, Search{Layout: layout, Home: &SearchHome{}}), `name="content_type"`)
 }
 
-// TestSearch_HomeLately: the home lists the newest saves with the lists'
-// row partial, under a head that leads to all of them, and says how many
-// documents were placed since the rebuild, leading to Unsorted when they
-// all went there and to the Interests otherwise; each only when it has
-// something to show.
-func TestSearch_HomeLately(t *testing.T) {
-	r := newRenderer(t)
-	layout := Layout{Title: "Search", Nav: NavSearch}
-	saved := SavedTime{At: time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC), Date: "exact"}
-	home := &SearchHome{New: 3, NewUnsorted: 1, Lately: []LibraryRow{
-		{DocumentID: "a", Title: "Sourdough starters", URL: "https://bread.example/starters", State: "fetched",
-			When: saved.At, Saved: &saved, Source: "chrome"},
-		{DocumentID: "b", URL: "https://gone.example/page", State: "dead", When: saved.At, Saved: &saved,
-			Source: "safari", FailureCause: "dead_link"},
-	}}
-	out := render(t, r, PageSearch, Search{Layout: layout, Home: home})
-	assert.Contains(t, out, `<h2 id="lately">Lately saved</h2><a class="more" href="/ui/library?order=saved">All saves →</a>`)
-	assert.Contains(t, out, `<a class="doc-title" href="/ui/documents/a" title="Sourdough starters">Sourdough starters</a>`)
-	assert.Contains(t, out, `<span class="doc-error neutral"><span class="err-cause">Dead link</span> </span>`)
-	assert.Equal(t, 2, strings.Count(out, `<td class="c-when when">saved <time`), "each save's time")
-	assert.Contains(t, out, `<p class="home-new"><a href="/ui/interests">3 documents new since the interests were rebuilt →</a></p>`)
-	assert.Less(t, strings.Index(out, "home-new"), strings.Index(out, `id="lately"`), "interests, then the saves")
-
-	home.NewUnsorted = 3
-	assert.Contains(t, render(t, r, PageSearch, Search{Layout: layout, Home: home}),
-		`<p class="home-new"><a href="/ui/interests/unsorted">3 documents new`, "all of them in Unsorted")
-
-	// A save's time says once when it was saved, on one line: never "saved
-	// by", and on a phone as a plain time after the type, not a line of its
-	// own.
-	times := savedTimes(saved.At)
-	rows := make([]LibraryRow, 0, len(times))
-	for i := range times {
-		rows = append(rows, LibraryRow{DocumentID: "s" + strconv.Itoa(i), Title: "Save", URL: "https://example.com/",
-			State: "fetched", ContentType: "article", When: saved.At, Saved: &times[i], Source: "chrome"})
-	}
-	out = render(t, r, PageSearch, Search{Layout: layout, Home: &SearchHome{Lately: rows}})
-	assert.NotContains(t, out, "saved by")
-	assert.NotContains(t, out, "doc-saved")
-	assert.Contains(t, out, `<td class="c-when when"><span class="saved-time" title="Saved on or before `)
-	assert.Contains(t, out, `">saved <time datetime="`+datetime(saved.At)+`"`, "an upper bound: saved, when")
-	assert.Contains(t, out, `">imported <time datetime="`+datetime(times[2].Imported)+`"`, "no date: when it was imported")
-	assert.Equal(t, len(rows), strings.Count(out, `<span class="sep narrow">·</span><span class="narrow"><time`),
-		"on a phone, a plain time")
-
-	none := render(t, r, PageSearch, Search{Layout: layout, Home: &SearchHome{}})
-	assert.NotContains(t, none, "Lately saved")
-	assert.NotContains(t, none, "home-new")
-}
-
 // TestLibrary_StateBadges: a row reads as a bookmark: a fetched document
 // has no state badge, any other its own at the head of the line under
 // its name; there is no State column.
@@ -863,7 +817,8 @@ func TestLibrary_StateBadges(t *testing.T) {
 	rows := []LibraryRow{{DocumentID: "a", URL: "https://example.com/a", State: "fetched"},
 		{DocumentID: "b", URL: "https://example.com/b", State: "pending"},
 		{DocumentID: "c", URL: "https://example.com/c", State: "failed"}}
-	out := render(t, r, PageLibrary, Library{Layout: Layout{Title: "Library", Nav: NavLibrary}, PageSize: 50, Rows: rows})
+	out := render(t, r, PageLibrary, Library{Layout: Layout{Title: "Library", Nav: NavLibrary},
+		Filters: LibraryFilters{Order: OrderUpdated}, PageSize: 50, Rows: rows})
 	assert.NotContains(t, out, `state-fetched`)
 	assert.NotContains(t, out, `>State</th>`, "no State column")
 	assert.Contains(t, out, `<span class="doc-sub"><span class="badge state-pending">pending</span><span class="host"`)
@@ -878,25 +833,25 @@ func TestLibrary_Tabs(t *testing.T) {
 	r := newRenderer(t)
 	counts := &LibraryCounts{Documents: 7467, Bookmarks: 7497, ByState: map[string]int{"fetched": 4498, "failed": 2150,
 		"dead": 819}}
-	lib := Library{Layout: Layout{Title: "Library", Nav: NavLibrary}, Filters: LibraryFilters{State: "failed"},
+	lib := Library{Layout: Layout{Title: "Library", Nav: NavLibrary}, Filters: LibraryFilters{Order: OrderUpdated, State: "failed"},
 		Counts: counts, PageSize: 50, Shown: 50, NextCursor: "c",
 		Rows: []LibraryRow{{DocumentID: "a", URL: "https://example.com/a", State: "failed"}}}
 	out := render(t, r, PageLibrary, lib)
 	assert.Contains(t, out, `<div class="segmented" role="group" aria-label="State">`+
-		`<a href="/ui/library">All <span class="count">7,467</span></a>`+
-		`<a href="/ui/library?state=fetched">Fetched <span class="count">4,498</span></a>`+
-		`<a href="/ui/library?state=pending">Pending <span class="count">0</span></a>`+
-		`<a href="/ui/library?state=failed" aria-current="page">Failed <span class="count">2,150</span></a>`+
-		`<a href="/ui/library?state=dead">Dead <span class="count">819</span></a></div>`)
+		`<a href="/ui/library?order=updated">All <span class="count">7,467</span></a>`+
+		`<a href="/ui/library?order=updated&amp;state=fetched">Fetched <span class="count">4,498</span></a>`+
+		`<a href="/ui/library?order=updated&amp;state=pending">Pending <span class="count">0</span></a>`+
+		`<a href="/ui/library?order=updated&amp;state=failed" aria-current="page">Failed <span class="count">2,150</span></a>`+
+		`<a href="/ui/library?order=updated&amp;state=dead">Dead <span class="count">819</span></a></div>`)
 	assert.Contains(t, out, `<input type="hidden" name="state" value="failed">`)
 	assert.NotContains(t, out, `<select class="select" name="state"`)
 	assert.Contains(t, out, `<p class="lede">7,467 documents from 7,497 bookmarks.</p>`)
 	assert.Contains(t, out, `<p class="pager-summary mt-4" id="showing">Showing 51 of 2,150 documents, most recently updated first.</p>`)
-	assert.Contains(t, out, `href="/ui/library?cursor=c&amp;state=failed" hx-get="/ui/library?cursor=c&amp;shown=51&amp;state=failed"`)
+	assert.Contains(t, out, `href="/ui/library?cursor=c&amp;order=updated&amp;state=failed" hx-get="/ui/library?cursor=c&amp;order=updated&amp;shown=51&amp;state=failed"`)
 	assert.Contains(t, out, `hx-select-oob="#more,#showing">Load 50 more</a>`)
 
 	for _, f := range []LibraryFilters{{ContentType: "pdf"}, {Host: "arxiv.org"}, {Folder: "/Reading"}, {Cause: "anti_bot"}} {
-		f.State = "failed"
+		f.Order, f.State = OrderUpdated, "failed"
 		lib.Filters = f
 		out := render(t, r, PageLibrary, lib)
 		assert.NotContains(t, render1(t, stateTabs(t, out)), `class="count"`, "%+v: the tabs count no filtered list", f)
@@ -906,14 +861,14 @@ func TestLibrary_Tabs(t *testing.T) {
 		assert.Contains(t, out, `aria-current="page">Failed</a>`, "%+v", f)
 	}
 
-	lib.Filters, lib.Counts = LibraryFilters{}, nil
+	lib.Filters, lib.Counts = LibraryFilters{Order: OrderUpdated}, nil
 	out = render(t, r, PageLibrary, lib)
 	assert.NotContains(t, out, `class="count"`, "no counts read")
-	assert.Contains(t, out, `<a href="/ui/library" aria-current="page">All</a>`)
+	assert.Contains(t, out, `<a href="/ui/library?order=updated" aria-current="page">All</a>`)
 	assert.Contains(t, out, `<p class="lede">Every page curio saved for you.</p>`)
 	assert.NotContains(t, out, `name="state"`, "no state to keep")
 
-	lib.Counts, lib.Filters = counts, LibraryFilters{State: "dead"}
+	lib.Counts, lib.Filters = counts, LibraryFilters{Order: OrderUpdated, State: "dead"}
 	lib.Shown = 819
 	assert.Contains(t, render(t, r, PageLibrary, lib), `>Showing 820 documents, most recently updated first.</p>`,
 		"more rows shown than the count: the library changed between pages")
@@ -1848,13 +1803,13 @@ func TestFailures_Page(t *testing.T) {
 	assert.Contains(t, out, `<h2>Blocked by bot protection <code>anti_bot</code></h2>`+"\n"+
 		`<p class="why">The site blocked curio&#39;s request:`)
 	assert.Contains(t, out, `<div class="hosts" role="group" aria-label="Top hosts">`+
-		`<a class="tag" id="host-anti_bot-0" href="/ui/library?cause=anti_bot&amp;host=stackoverflow.com" title="stackoverflow.com">`+
+		`<a class="tag" id="host-anti_bot-0" href="/ui/library?cause=anti_bot&amp;host=stackoverflow.com&amp;order=updated" title="stackoverflow.com">`+
 		`<span class="name">stackoverflow.com</span> <span class="n">169</span></a>`+
-		`<a class="tag" id="host-anti_bot-1" href="/ui/library?cause=anti_bot&amp;host=medium.com" title="medium.com">`)
+		`<a class="tag" id="host-anti_bot-1" href="/ui/library?cause=anti_bot&amp;host=medium.com&amp;order=updated" title="medium.com">`)
 	assert.Contains(t, out, `<div class="count"><div class="value">927<span class="visually-hidden"> documents,</span></div>`+
 		`<div class="pct">31%<span class="visually-hidden"> of failures</span></div></div>`)
-	assert.Contains(t, out, `<a class="btn btn-sm btn-ghost" id="view-anti_bot" href="/ui/library?cause=anti_bot">View in Library →</a>`)
-	assert.Contains(t, out, `<a class="btn btn-sm btn-ghost" id="view-dead_link" href="/ui/library?cause=dead_link">`,
+	assert.Contains(t, out, `<a class="btn btn-sm btn-ghost" id="view-anti_bot" href="/ui/library?cause=anti_bot&amp;order=updated">View in Library →</a>`)
+	assert.Contains(t, out, `<a class="btn btn-sm btn-ghost" id="view-dead_link" href="/ui/library?cause=dead_link&amp;order=updated">`,
 		"the list's cause filter takes dead documents; state=dead is refetch-all's rule alone")
 	assert.Contains(t, out, `<li class="card cause" id="cause-dead_link">`+"\n"+`<span class="cause-icon neutral">`)
 	assert.Contains(t, out, `<li class="card cause" id="cause-timeout">`+"\n"+`<span class="cause-icon warn">`)

@@ -167,6 +167,7 @@ when the entry was first committed.
 - 2026-10-14 — [Understanding the question: a planner role, one structured call, grounded filters, a fitness check](#understanding-the-question-a-planner-role-one-structured-call-grounded-filters-a-fitness-check)
 - 2026-11-03 — [Jina answers are stored without the site's chrome](#jina-answers-are-stored-without-the-sites-chrome)
 - 2026-11-03 — [Summaries: one structured call per document, stored for the reranker](#summaries-one-structured-call-per-document-stored-for-the-reranker)
+- 2026-11-04 — [Dashboard: a quieter home, saves first, a theme button](#dashboard-a-quieter-home-saves-first-a-theme-button)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -8133,6 +8134,12 @@ in monospace; and focus is a 2px outline in `--focus`, never the ring
 alone. See "Dashboard: honest search, visible focus, confirms and plain
 words".
 
+**Revised (2026-11-04):** the product now sets `data-theme`: a header
+button forces the theme not in effect, kept per browser while it differs
+from the system's; `:root[data-theme="light"]` and both dark blocks set
+`color-scheme` to match. See "Dashboard: a quieter home, saves first, a
+theme button".
+
 ---
 
 ## Dashboard: search is home, the Overview becomes Status
@@ -8661,6 +8668,12 @@ column widens to 11rem (`col.c-saved`) and splits an inexact time over
 two lines, and on a phone, whose time column folds away, a save's time
 takes a line of its own under where it lives (`.doc-saved`). See "Saved
 dates and search filters".
+
+**Revised (2026-11-04):** the saves order is the default, named Recently
+saved, and Last updated is the one an address names (`order=updated`);
+`order=saved` still reads as the default. GET /v1/documents is
+unchanged. See "Dashboard: a quieter home, saves first, a theme
+button".
 
 ---
 
@@ -15888,6 +15901,11 @@ tones and the numbers (`TestSearch_HomeLately`, `TestUI_SearchHomeLately`,
 `TestInterest_Summaries`); layout is checked by screenshots at 1440 and
 390, both themes.
 
+**Revised (2026-11-04):** the home's Lately saved and its line of
+documents new since the rebuild are gone; the Library opens on the newest
+saves instead. See "Dashboard: a quieter home, saves first, a theme
+button".
+
 ---
 
 ## Summaries: one structured call per document, stored for the reranker
@@ -16506,6 +16524,72 @@ share and a hand check of faithfulness before it is recorded. A use of
 summaries in ranking, the list's weight or the reranker's input, is
 measured on replayed summaries (`SUMMARIES=`) against the pick rule
 above.
+
+---
+
+## Dashboard: a quieter home, saves first, a theme button
+
+**Decision:** four changes to the dashboard, UI only (no /v1 change).
+
+**The home is the box and the interests.** Lately saved and the "N
+documents new since the interests were rebuilt" line made the home a
+second Library. Both are gone: under the box and its type tabs is the
+line of the largest interests, and nothing else. The home's reads are the
+counts (for the placeholder) and the bare interests; it lists no saves
+(`TestUI_SearchHomeReadsOnlyWithoutAQuery` counts that none is read) and
+reads no placement counts. `SearchHome.New`, `NewUnsorted`, `Lately`,
+`HomeLately`, `NewHref`, `SavesHref`, `LibraryRow.LatelyCell`,
+`SavedTime.Ago`, the `saved-ago` partial and `Deps.placedSince` went with
+them; `listBookmarks` stays for GET /v1/bookmarks and the Library.
+
+**The Library opens newest saves first.** What was saved lately is what
+the owner opens the Library for, so the saves order is its default,
+labelled Recently saved, and Last updated the other option. An address
+names the order only when it isn't the default (`order=updated`);
+`libraryQuery` derives it from `LibraryFilters.Saved`, so an `Order` of
+"" or `OrderSaved` builds the same link, and `?order=saved` from an old
+bookmark still reads as the default. A cursor still records its order, so
+one carried into the other order is a 400 as before. Links whose counts
+count documents lead to Last updated, where a row is a document: Status's
+state legend (`stateHref`) and the Failures tab's host tags and View in
+Library (`causeHref`, `causeHostHref`), whose counts the saves list,
+listing a page saved twice twice, wouldn't match. GET /v1/documents and
+GET /v1/bookmarks keep their defaults.
+
+**The footer is Status's.** The daemon's version and address are
+machinery, read where the machinery is. `Layout.Footer`, set by the Status
+handler alone, shows it; every other page, the error and starting pages
+included, has none.
+
+**A theme button.** The pages followed `prefers-color-scheme` only. A
+sun/moon button at the end of the header now switches to the theme not in
+effect, by `data-theme` on `<html>`, which app.css already honoured for
+both themes. The choice is kept in the browser's `localStorage`
+(`curio-theme`) only while it differs from the system's: picking the
+system's theme forgets it, so the page follows the system again, and a
+system change that makes the kept choice the system's own forgets it too.
+`static/theme.js` does it: one strict IIFE that sends nothing, at most 80
+lines (`TestThemeScript`; the only dashboard script allowed
+`localStorage`, every access in a `try`, so a refused storage leaves the
+button working for the page's lifetime), loaded first in `<head>`, before
+the stylesheet and without `defer` (`TestPages_Scripts`), since the CSP
+allows no inline script and a deferred one would paint the system's theme
+first. The button is a `<button type="button">`, `.js-only`, whose name
+says what it does ("Switch to dark theme", set by theme.js) rather than
+`aria-pressed`: a pressed state beside a name that changes would be read
+as two answers to one question. Its icon is CSS's, a moon while light is
+in effect and a sun while dark is, by the same selectors as the tokens, so
+it is right before any script runs. Native controls follow the forced
+theme: `:root[data-theme="light"]` sets `color-scheme: light`, both dark
+blocks `color-scheme: dark`. The interest map already redrew on a
+`data-theme` change (a MutationObserver beside its `prefers-color-scheme`
+listener), so map.js is unchanged.
+
+**How to revisit:** `TestUI_SearchHomeIsMinimal`, `TestLibraryOrderLinks`,
+`TestUI_Library`, `TestUI_LibrarySaved`, `TestPages_Layout` (the footer
+on Status alone, the button on every page), `TestPages_Scripts` and
+`TestThemeScript` pin it; layout is checked by screenshots at 1440 and
+390, both themes and after a toggle.
 
 ---
 

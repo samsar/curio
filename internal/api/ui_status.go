@@ -33,6 +33,7 @@ func (h pageHandlers) status(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	vm := ui.Status{Layout: h.pages.layout("Status", ui.NavStatus), Poll: poll}
+	vm.Layout.Footer = true // the one page that names the daemon's version and address
 	if poll != ui.PollHealth {
 		h.statusLive(r, &vm)
 	}

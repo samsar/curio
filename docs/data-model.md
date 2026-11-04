@@ -427,7 +427,7 @@ bookmark is never in a saved window. See decisions.md "Saved dates and
 search filters".
 
 `GET /v1/bookmarks` lists by `created_at` by default and by `saved_at`
-with `order=saved`, the Library's Date saved order, each through its own
+with `order=saved`, the Library's default Recently saved order, each through its own
 index (`idx_bookmarks_tenant_created`, `idx_bookmarks_tenant_saved`);
 `idx_bookmarks_document (document_id, saved_at, id)` reads one document's
 bookmarks newest saved first, and serves the search filters' seeks of

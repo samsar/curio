@@ -16,8 +16,8 @@ func TestLinks(t *testing.T) {
 	assert.Equal(t, "/ui/documents/a%2Fb%3F%23", documentHref("a/b?#"), "one path segment")
 	assert.Equal(t, "/ui/documents/x?images=1", documentImagesHref("x"))
 	assert.Equal(t, "/ui/interests/%20x", interestHref(" x"))
-	assert.Equal(t, "/ui/library?state=failed", stateHref("failed"))
-	assert.Equal(t, "/ui/library?cause=anti_bot", causeHref("anti_bot"))
+	assert.Equal(t, "/ui/library?order=updated&state=failed", stateHref("failed"), "documents, which it counts")
+	assert.Equal(t, "/ui/library?cause=anti_bot&order=updated", causeHref("anti_bot"), "documents, which it counts")
 	assert.Equal(t, "/ui/library", libraryHref(LibraryFilters{}, ""))
 	assert.Equal(t, "/ui/", navHref(NavSearch))
 	assert.Equal(t, "/ui/status", navHref(NavStatus))
@@ -35,8 +35,8 @@ func TestLinks(t *testing.T) {
 		"the next page keeps every filter")
 
 	for href, want := range map[string]url.Values{
-		stateHref("a&b=c #1"): {"state": {"a&b=c #1"}},
-		causeHref("a&b=c #1"): {"cause": {"a&b=c #1"}},
+		stateHref("a&b=c #1"): {"state": {"a&b=c #1"}, "order": {OrderUpdated}},
+		causeHref("a&b=c #1"): {"cause": {"a&b=c #1"}, "order": {OrderUpdated}},
 	} {
 		u := parseHref(t, href)
 		assert.Equal(t, "/ui/library", u.Path, href)
@@ -51,33 +51,37 @@ func TestLinks(t *testing.T) {
 	assert.NotContains(t, href, "shown=", "the plain link doesn't")
 }
 
-// TestLibraryOrderLinks: the Date saved order round-trips through every
-// Library link, and the default order is left out; clearing the filters
-// keeps the order and drops the rest.
+// TestLibraryOrderLinks: the Last updated order round-trips through every
+// Library link, and the default, Recently saved, is left out, however it
+// is named; clearing the filters keeps the order and drops the rest.
 func TestLibraryOrderLinks(t *testing.T) {
-	saved := LibraryFilters{Order: OrderSaved, State: "failed", Host: "a&b=c.example", Folder: "/100% Reading/#1",
-		Limit: 7}
+	updated := LibraryFilters{Order: OrderUpdated, State: "failed", Host: "a&b=c.example",
+		Folder: "/100% Reading/#1", Limit: 7}
 	for name, href := range map[string]string{
-		"next page": libraryHref(saved, "cursor+/="),
-		"load more": libraryMoreHref(saved, "cursor+/=", 150),
-		"state tab": stateTabHref(saved, "dead"),
+		"next page": libraryHref(updated, "cursor+/="),
+		"load more": libraryMoreHref(updated, "cursor+/=", 150),
+		"state tab": stateTabHref(updated, "dead"),
 	} {
-		assert.Equal(t, OrderSaved, parseHref(t, href).Query().Get("order"), name)
+		assert.Equal(t, OrderUpdated, parseHref(t, href).Query().Get("order"), name)
 	}
-	assert.Equal(t, "/ui/library?order=saved", clearFiltersHref(saved))
-	assert.Equal(t, "/ui/library?order=saved", libraryHref(LibraryFilters{Order: OrderSaved}, ""))
+	assert.Equal(t, "/ui/library?order=updated", clearFiltersHref(updated))
+	assert.Equal(t, "/ui/library?order=updated", libraryHref(LibraryFilters{Order: OrderUpdated}, ""))
 
-	updated := saved
-	updated.Order = ""
-	for name, href := range map[string]string{
-		"next page":     libraryHref(updated, "c"),
-		"load more":     libraryMoreHref(updated, "c", 1),
-		"state tab":     stateTabHref(updated, "dead"),
-		"clear filters": clearFiltersHref(updated),
-	} {
-		assert.NotContains(t, parseHref(t, href).Query(), "order", "%s: the default order is left out", name)
+	for _, order := range []string{"", OrderSaved} {
+		saved := updated
+		saved.Order = order
+		assert.True(t, saved.Saved(), order)
+		for name, href := range map[string]string{
+			"next page":     libraryHref(saved, "c"),
+			"load more":     libraryMoreHref(saved, "c", 1),
+			"state tab":     stateTabHref(saved, "dead"),
+			"clear filters": clearFiltersHref(saved),
+		} {
+			assert.NotContains(t, parseHref(t, href).Query(), "order", "%s: the default order is left out", name)
+		}
+		assert.Equal(t, "/ui/library", clearFiltersHref(saved))
 	}
-	assert.Equal(t, "/ui/library", clearFiltersHref(updated))
+	assert.False(t, updated.Saved())
 }
 
 func parseHref(t *testing.T, href string) *url.URL {
@@ -105,16 +109,18 @@ func TestFailuresLinks(t *testing.T) {
 
 	u = parseHref(t, causeHostHref("anti_bot", "a&b=c.example:8080"))
 	assert.Equal(t, "/ui/library", u.Path)
-	assert.Equal(t, url.Values{"cause": {"anti_bot"}, "host": {"a&b=c.example:8080"}}, u.Query())
-	assert.Equal(t, "/ui/library?cause=dead_link&host=gone.example", causeHostHref("dead_link", "gone.example"),
-		"no state: the list's cause filter takes dead documents")
+	assert.Equal(t, url.Values{"cause": {"anti_bot"}, "host": {"a&b=c.example:8080"}, "order": {OrderUpdated}},
+		u.Query())
+	assert.Equal(t, "/ui/library?cause=dead_link&host=gone.example&order=updated",
+		causeHostHref("dead_link", "gone.example"),
+		"no state: the list's cause filter takes dead documents; documents, which the tag counts")
 }
 
 // TestClearCauseHref: clearing the cause keeps every other filter, the
 // order and the page size, and drops the cause and the cursor, in either
 // order.
 func TestClearCauseHref(t *testing.T) {
-	for _, order := range []string{"", OrderSaved} {
+	for _, order := range []string{"", OrderUpdated} {
 		f := LibraryFilters{Order: order, State: "failed", ContentType: "pdf", Host: "a&b=c.example",
 			Folder: "/100% Reading/#1", Cause: "a&cause=b #1", Limit: 7}
 		want := url.Values{"state": {"failed"}, "content_type": {"pdf"}, "host": {"a&b=c.example"},
@@ -127,7 +133,8 @@ func TestClearCauseHref(t *testing.T) {
 		assert.Equal(t, want, u.Query(), order)
 	}
 	assert.Equal(t, "/ui/library", clearCauseHref(LibraryFilters{Cause: "anti_bot"}))
-	assert.Equal(t, "/ui/library?order=saved", clearCauseHref(LibraryFilters{Order: OrderSaved, Cause: "anti_bot"}))
+	assert.Equal(t, "/ui/library?order=updated",
+		clearCauseHref(LibraryFilters{Order: OrderUpdated, Cause: "anti_bot"}))
 }
 
 // TestSearchHref: a search's query, type, page and plan round-trip,

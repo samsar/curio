@@ -14,11 +14,12 @@ import (
 const maxShown = 1_000_000
 
 // library answers GET /ui/library: a page of the library in its order.
-// Last updated, the default, lists documents under the filters GET
-// /v1/documents takes, parsed and checked the same way, so a Library URL's
-// query is a valid /v1/documents query. Date saved (order=saved) lists
-// saves under the same filters, through GET /v1/bookmarks' order=saved
-// and its parsing, source aside: the Library has no source filter. Each
+// Recently saved, the default, lists saves, newest saved first, under the
+// filters GET /v1/documents takes, through GET /v1/bookmarks' order=saved
+// and its parsing, source aside: the Library has no source filter. Last
+// updated (order=updated) lists documents under the same filters, parsed
+// and checked as GET /v1/documents does, so its URL's query, less the
+// order, is a valid /v1/documents query. Each
 // failed or dead row says why it failed. An order, filter or cursor the
 // list can't take, a cursor of the other order among them, is a 400 page
 // that offers the first page. The library's counts label the state tabs,
@@ -37,10 +38,10 @@ func (h pageHandlers) library(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var vm ui.Library
-	if order == ui.OrderSaved {
-		vm, err = h.librarySaves(ctx, r)
-	} else {
+	if order == ui.OrderUpdated {
 		vm, err = h.libraryDocuments(ctx, r)
+	} else {
+		vm, err = h.librarySaves(ctx, r)
 	}
 	if err != nil {
 		h.writePageError(w, r, err, ui.NavLibrary)
@@ -66,17 +67,17 @@ func (h pageHandlers) libraryCounts(r *http.Request) *ui.LibraryCounts {
 		ByState: st.DocumentsByState}
 }
 
-// libraryOrder reads the Library's ?order: "" for Last updated (absent,
-// empty or "updated", which the form sends), or ui.OrderSaved. Anything
+// libraryOrder reads the Library's ?order: "" for Recently saved (absent,
+// empty or "saved", which the form sends), or ui.OrderUpdated. Anything
 // else is a requestError.
 func libraryOrder(r *http.Request) (string, error) {
 	switch order := r.URL.Query().Get("order"); order {
-	case "", ui.OrderUpdated:
+	case "", ui.OrderSaved:
 		return "", nil
-	case ui.OrderSaved:
+	case ui.OrderUpdated:
 		return order, nil
 	default:
-		return "", badRequest("order %q must be one of: %s, %s", order, ui.OrderUpdated, ui.OrderSaved)
+		return "", badRequest("order %q must be one of: %s, %s", order, ui.OrderSaved, ui.OrderUpdated)
 	}
 }
 
@@ -92,8 +93,9 @@ func (h pageHandlers) libraryDocuments(ctx context.Context, r *http.Request) (ui
 	if err != nil {
 		return ui.Library{}, err
 	}
-	vm := ui.Library{Filters: ui.LibraryFilters{State: string(opts.State), ContentType: string(opts.ContentType),
-		Host: opts.Host, Folder: opts.Folder, Cause: string(opts.Cause), Limit: linkLimit(opts.Limit)},
+	vm := ui.Library{Filters: ui.LibraryFilters{Order: ui.OrderUpdated, State: string(opts.State),
+		ContentType: string(opts.ContentType), Host: opts.Host, Folder: opts.Folder, Cause: string(opts.Cause),
+		Limit: linkLimit(opts.Limit)},
 		NextCursor: resp.NextCursor, PageSize: opts.Limit}
 	for _, doc := range resp.Items {
 		row := ui.LibraryRow{DocumentID: doc.ID, Title: deref(doc.Title),
@@ -107,7 +109,7 @@ func (h pageHandlers) libraryDocuments(ctx context.Context, r *http.Request) (ui
 	return vm, nil
 }
 
-// librarySaves is the Library in the Date saved order: a page of saves,
+// librarySaves is the Library in the Recently saved order: a page of saves,
 // newest saved first, as GET /v1/bookmarks?order=saved lists them, each
 // with its document. A row is a save, so an untitled document is named
 // by that bookmark's own title.
@@ -120,16 +122,15 @@ func (h pageHandlers) librarySaves(ctx context.Context, r *http.Request) (ui.Lib
 	if err != nil {
 		return ui.Library{}, err
 	}
-	vm := ui.Library{Filters: ui.LibraryFilters{Order: ui.OrderSaved, State: string(opts.State),
+	vm := ui.Library{Filters: ui.LibraryFilters{State: string(opts.State),
 		ContentType: string(opts.ContentType), Host: opts.Host, Folder: opts.FolderPath, Cause: string(opts.Cause),
 		Limit: linkLimit(opts.Limit)}, NextCursor: resp.NextCursor, PageSize: opts.Limit, Rows: saveRows(resp.Items)}
 	return vm, nil
 }
 
-// saveRows are saves as the lists of saves show them, the Library's Date
-// saved order and the search home's Lately saved: a row a save, so an
-// untitled document is named by that bookmark's own title, and a failed
-// or dead one says why it failed.
+// saveRows are saves as the Library's Recently saved order shows them: a
+// row a save, so an untitled document is named by that bookmark's own
+// title, and a failed or dead one says why it failed.
 func saveRows(items []BookmarkListItem) []ui.LibraryRow {
 	rows := make([]ui.LibraryRow, 0, len(items))
 	for _, b := range items {

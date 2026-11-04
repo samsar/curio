@@ -50,6 +50,9 @@ type Layout struct {
 	Nav     Nav    // the current navigation item
 	Version string // the daemon's
 	Listen  string // the address the daemon listens on; empty when unknown
+	// Footer shows the footer naming the daemon's version and address:
+	// set by the Status page alone, where what curio runs as belongs.
+	Footer bool
 }
 
 // PanelError is why a panel's data couldn't be read: the message, and the
@@ -566,31 +569,7 @@ type SearchHome struct {
 	// AllInterests how many it has.
 	Interests    []Interest
 	AllInterests int
-	// New counts the documents placed since the latest rebuild, and
-	// NewUnsorted those of them placed into Unsorted.
-	New, NewUnsorted int
-	// Lately are the newest saves, newest first, as the Library's Date
-	// saved order lists them (HomeLately of them at most); none when they
-	// couldn't be read.
-	Lately []LibraryRow
 }
-
-// HomeLately is how many of the newest saves the search home lists.
-const HomeLately = 8
-
-// NewHref is where the home's "new since the rebuild" line leads: to
-// Unsorted when every new document was placed there, else to the
-// Interests, whose cards count each group's new documents.
-func (h SearchHome) NewHref() string {
-	if h.New > 0 && h.New == h.NewUnsorted {
-		return unsortedHref(1, "")
-	}
-	return navHref(NavInterests)
-}
-
-// SavesHref is the Library in the Date saved order, all of the saves the
-// home's Lately saved begins.
-func (SearchHome) SavesHref() string { return libraryHref(LibraryFilters{Order: OrderSaved}, "") }
 
 // Placeholder is the search box's placeholder: how many documents there
 // are to search, when the home knows.
@@ -829,9 +808,9 @@ func (m Match) Scores() string {
 	return strings.Join(parts, " · ")
 }
 
-// Library is a page of the library under the filters: documents, most
-// recently updated first, or in the Date saved order saves, newest saved
-// first.
+// Library is a page of the library under the filters: saves, newest
+// saved first, or in the Last updated order documents, most recently
+// updated first.
 type Library struct {
 	Layout     Layout
 	Filters    LibraryFilters
@@ -928,7 +907,7 @@ func (l Library) CountsApply() bool {
 func (l Library) ShownThrough() int { return l.Shown + len(l.Rows) }
 
 // OfTotal is how many rows the rows shown are of, for "Showing N of M":
-// in the Date saved order the library's bookmarks, with no filter at all,
+// in the Recently saved order the library's bookmarks, with no filter at all,
 // and otherwise the current state's documents, when the counts apply. It
 // is 0 when there is no such count, or it falls behind the rows shown, as
 // it does when the library changed between pages.
@@ -948,9 +927,9 @@ func (l Library) OfTotal() int {
 	return total
 }
 
-// The Library's orders, as its order parameter names them: Last updated,
-// the default, lists documents, and Date saved lists saves. Links leave
-// the default out.
+// The Library's orders, as its order parameter names them: Recently
+// saved, the default, lists saves, and Last updated lists documents.
+// Links leave the default out.
 const (
 	OrderUpdated = "updated"
 	OrderSaved   = "saved"
@@ -960,13 +939,14 @@ const (
 // GET /v1/documents and GET /v1/bookmarks take. Empty fields filter
 // nothing; Limit 0 is the default page size. The order is no filter.
 type LibraryFilters struct {
-	Order                                   string // "" for Last updated, or OrderSaved
+	Order                                   string // "" for Recently saved, or OrderUpdated
 	State, ContentType, Host, Folder, Cause string
 	Limit                                   int
 }
 
-// Saved reports whether the page lists saves, in the Date saved order.
-func (f LibraryFilters) Saved() bool { return f.Order == OrderSaved }
+// Saved reports whether the page lists saves, in the Recently saved
+// order.
+func (f LibraryFilters) Saved() bool { return f.Order != OrderUpdated }
 
 // Filter is one filter a Library page applies: its name and value.
 type Filter struct {
@@ -988,14 +968,14 @@ func (f LibraryFilters) Active() []Filter {
 // Filtered reports whether any filter filters something.
 func (f LibraryFilters) Filtered() bool { return len(f.Active()) > 0 }
 
-// LibraryRow is one row of the list: a document, or in the Date saved
+// LibraryRow is one row of the list: a document, or in the Recently saved
 // order a save and its document. LastError and FailureCause are set only
 // while the document is failed or dead.
 type LibraryRow struct {
 	DocumentID string // empty for a save linked to no document
 	Title      string // the document's; empty for an untitled document
 	// BookmarkTitle names an untitled document: its newest titled
-	// bookmark's title, or in the Date saved order the save's own.
+	// bookmark's title, or in the Recently saved order the save's own.
 	BookmarkTitle string
 	URL           string
 	State         string // the document's; empty for a save linked to none
@@ -1016,18 +996,6 @@ func (r LibraryRow) Cell() DocCell {
 	ref := DocRef{ID: r.DocumentID, Title: r.Title, Fallback: r.BookmarkTitle, URL: r.URL}
 	return DocCell{Ref: ref, Where: ref.where(), Source: r.Source, Folder: r.Folder, ContentType: r.ContentType,
 		When: r.When, Saved: r.Saved, FailureCause: r.FailureCause, LastError: r.LastError, State: r.State}
-}
-
-// LatelyCell is the row's cell in the search home's Lately saved: Cell,
-// but with the save's time as a plain time (SavedTime.Ago), so the line
-// under its name on a phone says when as "· 4 d ago", once, never "saved
-// by".
-func (r LibraryRow) LatelyCell() DocCell {
-	cell := r.Cell()
-	if r.Saved != nil {
-		cell.Saved, cell.When = nil, r.Saved.Ago()
-	}
-	return cell
 }
 
 // DocRef names a document in a list (the doc-title partial): by its
@@ -1550,15 +1518,6 @@ func (s SavedTime) Shown() time.Time {
 		return s.At
 	}
 	return s.Imported
-}
-
-// Ago is the time a one-line list says a save was saved: when, for an
-// exact date; else Shown, the upper bound or when curio imported it.
-func (s SavedTime) Ago() time.Time {
-	if s.Exact() {
-		return s.At
-	}
-	return s.Shown()
 }
 
 // Why is an inexact time's title: what the time means.

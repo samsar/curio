@@ -324,11 +324,16 @@ func libraryMoreHref(f LibraryFilters, cursor string, shown int) string {
 }
 
 // libraryQuery is the query of the Library under f from the page after
-// cursor: the order unless it is the default, the filters that filter
-// something, and the page size when it isn't the default.
+// cursor: the order unless it is the default (Recently saved, which
+// names none), the filters that filter something, and the page size when
+// it isn't the default.
 func libraryQuery(f LibraryFilters, cursor string) url.Values {
 	q := url.Values{}
-	for name, v := range map[string]string{"order": f.Order, "state": f.State, "content_type": f.ContentType,
+	order := ""
+	if !f.Saved() {
+		order = OrderUpdated
+	}
+	for name, v := range map[string]string{"order": order, "state": f.State, "content_type": f.ContentType,
 		"host": f.Host, "folder": f.Folder, "cause": f.Cause, "cursor": cursor} {
 		if v != "" {
 			q.Set(name, v)
@@ -340,8 +345,13 @@ func libraryQuery(f LibraryFilters, cursor string) url.Values {
 	return q
 }
 
-// stateHref is the Library of the documents in state.
-func stateHref(state string) string { return libraryHref(LibraryFilters{State: state}, "") }
+// stateHref is the Library of the documents in state, in the Last
+// updated order, which lists documents: the link's count (Status's legend)
+// counts them, where the Recently saved order would list a page saved
+// twice twice.
+func stateHref(state string) string {
+	return libraryHref(LibraryFilters{Order: OrderUpdated, State: state}, "")
+}
 
 // stateTabHref is the first page of the Library under f with its state
 // filter set to state, or dropped for "".
@@ -364,13 +374,18 @@ func clearCauseHref(f LibraryFilters) string {
 }
 
 // causeHref is the Library of the documents that failed for cause, dead
-// links among them: the list's cause filter takes every state.
-func causeHref(cause string) string { return libraryHref(LibraryFilters{Cause: cause}, "") }
+// links among them: the list's cause filter takes every state. Like
+// stateHref, it lists documents (Last updated), which the Failures tab
+// counts.
+func causeHref(cause string) string {
+	return libraryHref(LibraryFilters{Order: OrderUpdated, Cause: cause}, "")
+}
 
 // causeHostHref is the Library of the documents on host that failed for
-// cause: a host tag of cause's card, which the tag counts exactly.
+// cause: a host tag of cause's card, which the tag counts exactly, so in
+// the Last updated order, a row a document.
 func causeHostHref(cause, host string) string {
-	return libraryHref(LibraryFilters{Cause: cause, Host: host}, "")
+	return libraryHref(LibraryFilters{Order: OrderUpdated, Cause: cause, Host: host}, "")
 }
 
 // navHrefs are the navigation's pages.

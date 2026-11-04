@@ -175,7 +175,7 @@ func listBookmarksOpts(r *http.Request) (store.ListBookmarksOpts, error) {
 
 // bookmarksPageOpts reads the query of a page of bookmarks in order: the
 // state, content_type, host, folder and cause filters, a cursor that order
-// issued, and the page size in Limit. The Library's Date saved order reads
+// issued, and the page size in Limit. The Library's Recently saved order reads
 // its page with it too, having no source filter. A filter or cursor the
 // list can't take is a requestError.
 func bookmarksPageOpts(r *http.Request, order store.BookmarkOrder) (store.ListBookmarksOpts, error) {

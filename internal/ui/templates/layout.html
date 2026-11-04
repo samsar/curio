@@ -13,6 +13,13 @@ actions.js marks <html> with data-js as it loads: a control that needs it
 carries js-only, which app.css hides until then, and what stands in for it
 without JavaScript (a command, the queue's settings) carries no-js. The
 stale note shows while a poller's requests go unanswered (data-stale).
+
+theme.js loads first, before the stylesheet and without defer, so that a
+theme chosen with the header's button (#theme-toggle) applies before the
+first paint. The button is js-only: without JavaScript the pages follow
+the system's theme. Its icon is CSS's (the one of the theme it switches
+to), its name theme.js's. The footer, naming the daemon's version and
+address, is the Status page's alone (Layout.Footer).
 */}}
 {{define "layout" -}}
 <!doctype html>
@@ -22,6 +29,7 @@ stale note shows while a poller's requests go unanswered (data-stale).
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false,"historyCacheSize":0,"refreshOnHistoryMiss":true,"selfRequestsOnly":true,"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},{"code":"[45]..","swap":true,"error":true}]}'>
 <title>{{.Layout.Title}} · curio</title>
+<script src="{{asset "theme.js"}}"></script>
 <link rel="stylesheet" href="{{asset "app.css"}}">
 <script src="{{asset "htmx-2.0.11.min.js"}}" defer></script>
 <script src="{{asset "actions.js"}}" defer></script>
@@ -40,6 +48,7 @@ stale note shows while a poller's requests go unanswered (data-stale).
 {{template "icon" "search"}}
 <input type="search" name="q" placeholder="Search the library" aria-label="Search the library">
 </form>{{end}}
+<button class="btn btn-ghost theme-toggle js-only" id="theme-toggle" type="button" aria-label="Switch theme" title="Switch theme"><span class="to-dark">{{template "icon" "moon"}}</span><span class="to-light">{{template "icon" "sun"}}</span></button>
 </div>
 </div>
 </header>
@@ -49,7 +58,7 @@ stale note shows while a poller's requests go unanswered (data-stale).
 {{template "content" .}}
 </div>
 </main>
-<footer class="site"><div class="container"><span>curio-daemon {{.Layout.Version}}</span>{{with .Layout.Listen}}<span>{{.}} · this Mac only</span>{{end}}</div></footer>
+{{if .Layout.Footer}}<footer class="site"><div class="container"><span>curio-daemon {{.Layout.Version}}</span>{{with .Layout.Listen}}<span>{{.}} · this Mac only</span>{{end}}</div></footer>{{end}}
 </body>
 </html>
 {{- end}}
