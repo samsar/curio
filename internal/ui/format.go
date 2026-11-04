@@ -187,15 +187,17 @@ func stateClass(state string) string {
 }
 
 // stateTone is the tone a document state is drawn in, for bar fills and
-// legend swatches: ok, warn, danger or neutral.
+// legend swatches: ok for fetched, accent for pending (work under way),
+// warn for failed (a refetch may help), neutral for dead and anything
+// else. None is danger, which the dashboard keeps for outages.
 func stateTone(state string) string {
 	switch store.DocState(state) {
 	case store.DocStateFetched:
 		return "ok"
 	case store.DocStatePending:
-		return "warn"
+		return "accent"
 	case store.DocStateFailed:
-		return "danger"
+		return "warn"
 	case store.DocStateDead:
 	}
 	return "neutral"
@@ -325,14 +327,11 @@ func stateBar(counts []Count) []BarSegment {
 }
 
 // causeBar draws the n documents that failed for cause as a bar scaled to
-// most, the count of the cause with the most: neutral for dead links, as
-// the dead state is drawn, and danger for every other cause.
+// most, the count of the cause with the most, in the cause's tone
+// (causeTone): warn for what will pass or can be acted on, neutral for a
+// verdict.
 func causeBar(cause string, n, most int) []BarSegment {
-	class := "fill-danger"
-	if store.FailureCause(cause) == store.FailureCauseDeadLink {
-		class = "fill-neutral"
-	}
-	return barSegments([]barPart{{value: n, class: class}}, most)
+	return barSegments([]barPart{{value: n, class: "fill-" + causeTone(cause)}}, most)
 }
 
 // coverageBar draws a run's coverage parts, in order, as shares of total,

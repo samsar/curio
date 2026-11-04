@@ -260,6 +260,7 @@ func sampleVariants(t testing.TB) map[string][]any {
 	return map[string][]any{
 		PageSearch: {
 			Search{Layout: layout(NavSearch), Type: "pdf", Home: &SearchHome{Searchable: 4498, AllInterests: 222,
+				New: 9, NewUnsorted: 9, Lately: append([]LibraryRow{row}, saves...),
 				Interests: []Interest{
 					{ID: evilAttr, Label: evilScript, Size: 90},
 					{ID: "long", Label: strings.Repeat("W", 200), Size: 80},
@@ -718,6 +719,7 @@ func partialSamples(t testing.TB) map[string][]any {
 		"icons.html":  {nil},
 		"reltime":     {time.Time{}, at},
 		"saved-time":  append(anys(savedTimes(at)), SavedTime{}),
+		"saved-ago":   append(anys(savedTimes(at)), SavedTime{}),
 		"doc-title": {DocRef{ID: evilAttr, Title: evilScript, URL: evilURL}, DocRef{ID: evilAttr, URL: evilURL},
 			DocRef{Title: evilScript, URL: evilURL}, DocRef{ID: evilAttr, Fallback: evilScript, URL: evilURL},
 			DocRef{Fallback: evilAttr + evilQuotes, URL: evilURL}},

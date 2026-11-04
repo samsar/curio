@@ -10,24 +10,27 @@ type causeText struct {
 }
 
 // causes are the words, icon and tone of every store.FailureCause
-// (TestCauses checks that each has them). A tone is one of stateTone's:
-// warn where the sentence says a refetch later usually works; neutral for
-// a dead link, drawn as the dead state is, and where a refetch can't
-// change the verdict or it isn't the site refusing; danger, the failed
-// state's, for the rest.
+// (TestCauses checks that each has them). A tone is warn or neutral, never
+// danger, which the dashboard keeps for an outage curio itself has (Status's
+// health): warn for what will pass or what the owner can act on (a block, a
+// host down for now, a timeout, a dropped connection, a rate limit, an
+// index that gave up, which a reindex retries); neutral for a verdict a
+// refetch won't change (a dead link, drawn as the dead state is, a login,
+// an error status, a certificate, a refusal, a page curio can't read, one
+// too large) and for other.
 var causes = map[store.FailureCause]causeText{
 	store.FailureCauseDeadLink: {"Dead link", "The page is gone: a 404 or 410, a “not found” page, " +
 		"or a redirect onto a site's front page. A refetch helps only if it came back.", "unlink", "neutral"},
 	store.FailureCauseAntiBot: {"Blocked by bot protection", "The site blocked curio's request: " +
-		"a 403 or 503, or a bot check or block page.", "shield-alert", "danger"},
+		"a 403 or 503, or a bot check or block page.", "shield-alert", "warn"},
 	store.FailureCauseLoginWall: {"Behind a login", "The site answered with a sign-in page, " +
-		"a redirect onto one, or too little text to be the article.", "lock", "danger"},
+		"a redirect onto one, or too little text to be the article.", "lock", "neutral"},
 	store.FailureCauseJinaRefused: {"Refused by Jina Reader", "The site served a page curio can't use, " +
-		"and Jina Reader refused to fetch it: the site opted out of Jina, or Jina rejected the request.", "ban", "danger"},
+		"and Jina Reader refused to fetch it: the site opted out of Jina, or Jina rejected the request.", "ban", "neutral"},
 	store.FailureCauseTLS: {"Certificate problem", "The site's certificate failed verification: " +
-		"expired, for another name, or from an unknown issuer.", "shield-x", "danger"},
+		"expired, for another name, or from an unknown issuer.", "shield-x", "neutral"},
 	store.FailureCauseUnreachable: {"Host unreachable", "The host's name doesn't resolve, " +
-		"or it refuses connections. Often a site that no longer exists.", "wifi-off", "danger"},
+		"or it refuses connections. Often a site that no longer exists.", "wifi-off", "warn"},
 	store.FailureCauseTimeout: {"Timed out", "The site, or the tool fetching it, took too long to answer. " +
 		"A refetch later often works.", "hourglass", "warn"},
 	store.FailureCauseNetwork: {"Connection problem", "The connection failed: a reset, a TLS alert, " +
@@ -35,13 +38,13 @@ var causes = map[store.FailureCause]causeText{
 	store.FailureCauseRateLimited: {"Rate limited", "The site, GitHub, YouTube or Jina Reader asked curio to slow down. " +
 		"A refetch later usually works.", "gauge", "warn"},
 	store.FailureCauseHTTPError: {"HTTP error", "The site answered with an error status curio doesn't retry, " +
-		"like 400 or 401.", "server", "danger"},
+		"like 400 or 401.", "server", "neutral"},
 	store.FailureCauseUnsupported: {"Can't read this kind of page", "curio can't read this URL or its content: " +
 		"a channel page, a GitHub profile, a file that isn't HTML, or a PDF it can't extract.", "file-x", "neutral"},
 	store.FailureCauseTooLarge: {"Too large", "The answer was over the 32 MiB curio reads of a page.",
 		"weight", "neutral"},
 	store.FailureCauseIndex: {"Index failed", "The page was fetched, but indexing it gave up, " +
-		"so search leaves it out.", "database", "danger"},
+		"so search leaves it out.", "database", "warn"},
 	store.FailureCauseOther: {"Other", "Something else went wrong; the full error says what.",
 		"alert-circle", "neutral"},
 }

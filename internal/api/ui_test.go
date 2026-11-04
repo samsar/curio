@@ -220,9 +220,9 @@ func TestUI_Status(t *testing.T) {
 	}
 	// The state bar's proportions are attributes: a third each of pending,
 	// fetched and failed.
-	assert.Contains(t, body, `<rect class="fill-warn" x="0.000" y="0" width="33.333" height="10"/>`+
+	assert.Contains(t, body, `<rect class="fill-accent" x="0.000" y="0" width="33.333" height="10"/>`+
 		`<rect class="fill-ok" x="33.333" y="0" width="33.334" height="10"/>`+
-		`<rect class="fill-danger" x="66.667" y="0" width="33.333" height="10"/>`)
+		`<rect class="fill-warn" x="66.667" y="0" width="33.333" height="10"/>`)
 	assert.NotContains(t, body, "style=")
 	assert.Contains(t, body, `<span class="badge queue-open">open</span>`)
 	assert.Contains(t, body, `<th scope="col" class="num">Done in the last 10 min</th>`)
@@ -464,7 +464,7 @@ func TestUI_StatusFailures(t *testing.T) {
 	assert.Contains(t, body, `<a class="more" href="/ui/failures">All failures →</a>`)
 	blocked := `<li><a class="label" href="/ui/failures#cause-anti_bot" title="Blocked by bot protection">Blocked by bot protection</a>` +
 		`<svg class="stackbar" viewBox="0 0 100 10" preserveAspectRatio="none" aria-hidden="true"><rect class="fill-track" x="0" y="0" width="100" height="10"/>` +
-		`<rect class="fill-danger" x="0.000" y="0" width="100.000" height="10"/></svg><span class="n">3</span></li>`
+		`<rect class="fill-warn" x="0.000" y="0" width="100.000" height="10"/></svg><span class="n">3</span></li>`
 	dead := `<li><a class="label" href="/ui/failures#cause-dead_link" title="Dead link">Dead link</a>` +
 		`<svg class="stackbar" viewBox="0 0 100 10" preserveAspectRatio="none" aria-hidden="true"><rect class="fill-track" x="0" y="0" width="100" height="10"/>` +
 		`<rect class="fill-neutral" x="0.000" y="0" width="33.333" height="10"/></svg><span class="n">1</span></li>`
@@ -480,8 +480,8 @@ func TestUI_StatusFailures(t *testing.T) {
 	}
 	body = getPage(t, srv, "/ui/status", http.StatusOK)
 	assert.Equal(t, 5, strings.Count(body, `<a class="label" href="/ui/failures#cause-`), "five causes")
-	assert.Contains(t, body, `<rect class="fill-danger" x="0.000" y="0" width="100.000" height="10"/></svg><span class="n">6</span>`,
-		"scaled to the most")
+	assert.Contains(t, body, `<rect class="fill-neutral" x="0.000" y="0" width="100.000" height="10"/></svg><span class="n">6</span>`,
+		"scaled to the most: a login, neutral, a verdict")
 	assert.NotContains(t, body, "cause-dead_link", "the sixth isn't drawn")
 }
 
@@ -815,6 +815,18 @@ func (c countingStates) CountByState(ctx context.Context, tenantID string) (map[
 	return c.DocumentStore.CountByState(ctx, tenantID)
 }
 
+// countingSaves counts the reads of a list of saves, which the search home
+// makes.
+type countingSaves struct {
+	store.BookmarkStore
+	calls *atomic.Int32
+}
+
+func (c countingSaves) List(ctx context.Context, tenantID string, opts store.ListBookmarksOpts) ([]store.BookmarkWithDocument, error) {
+	c.calls.Add(1)
+	return c.BookmarkStore.List(ctx, tenantID, opts)
+}
+
 // countingRuns counts the reads of the latest rebuild, which the interests
 // read makes, and of any interest's members.
 type countingRuns struct {
@@ -845,11 +857,12 @@ func (failingRuns) LatestRun(context.Context, string, store.InterestRunStatus) (
 // home's reads, the counts and the interests, run once each without one,
 // and neither runs for a type the page refuses.
 func TestUI_SearchHomeReadsOnlyWithoutAQuery(t *testing.T) {
-	states, runs, members := new(atomic.Int32), new(atomic.Int32), new(atomic.Int32)
+	states, runs, members, saves := new(atomic.Int32), new(atomic.Int32), new(atomic.Int32), new(atomic.Int32)
 	planner := apitest.NewPlanner(understand.Outcome{Status: understand.StatusCold})
 	srv := apitest.Start(t, func(d *api.Deps) {
 		d.Documents = countingStates{d.Documents, states}
 		d.Insights = countingRuns{d.Insights, runs, members}
+		d.Bookmarks = countingSaves{d.Bookmarks, saves}
 	}, apitest.WithPlanner(planner))
 	srv.AddInterest(t, "Kafka", srv.AddDocument(t, "https://example.com/kafka", store.DocStateFetched))
 	for _, tc := range []struct {
@@ -869,10 +882,12 @@ func TestUI_SearchHomeReadsOnlyWithoutAQuery(t *testing.T) {
 	} {
 		states.Store(0)
 		runs.Store(0)
+		saves.Store(0)
 		p := getWith(t, srv, tc.path, tc.header)
 		require.Equal(t, tc.status, p.status, tc.path)
 		assert.Equal(t, tc.reads, states.Load(), "%s: the documents by state", tc.path)
 		assert.Equal(t, tc.reads, runs.Load(), "%s: the latest run", tc.path)
+		assert.Equal(t, tc.reads, saves.Load(), "%s: the newest saves", tc.path)
 		assert.Zero(t, members.Load(), "%s: the landing names interests, never reads their members", tc.path)
 	}
 	assert.Empty(t, planner.Questions(), "a keystroke never asks the planner, nor the home")
@@ -937,11 +952,14 @@ func TestUI_SearchHomeDegrades(t *testing.T) {
 	for name, fail := range map[string]func(*api.Deps){
 		"interests": func(d *api.Deps) { d.Insights = failingRuns{d.Insights} },
 		"counts":    func(d *api.Deps) { d.Bookmarks = failingCount{d.Bookmarks} },
+		"saves":     func(d *api.Deps) { d.Bookmarks = failingSaves{d.Bookmarks} },
+		"new":       func(d *api.Deps) { d.Insights = failingPlacements{d.Insights} },
 	} {
 		t.Run(name, func(t *testing.T) {
 			var rec logRecorder
 			srv := apitest.Start(t, fail, func(d *api.Deps) { d.Log = slog.New(&rec) })
 			titled(t, srv, "https://example.com/a", "A", store.DocStateFetched)
+			save(t, srv, store.Bookmark{URL: "https://example.com/a", Source: store.SourceManual})
 			srv.AddInterest(t, "Kafka")
 
 			p := get(t, srv, "/ui/")
@@ -949,13 +967,9 @@ func TestUI_SearchHomeDegrades(t *testing.T) {
 			uitest.AssertInert(t, p.body)
 			assert.Contains(t, p.body, `<div class="landing">`)
 			assert.NotContains(t, p.body, "panel-error")
-			if name == "interests" {
-				assert.NotContains(t, p.body, "explore-line")
-				assert.Contains(t, p.body, `placeholder="Search your 1 document"`)
-			} else {
-				assert.Contains(t, p.body, "explore-line")
-				assert.Contains(t, p.body, `placeholder="Search your library"`)
-			}
+			assert.Equal(t, name != "interests", strings.Contains(p.body, "explore-line"), "the interests")
+			assert.Equal(t, name != "counts", strings.Contains(p.body, `placeholder="Search your 1 document"`), "the counts")
+			assert.Equal(t, name != "saves", strings.Contains(p.body, "Lately saved"), "the saves")
 			errs := rec.errors()
 			require.Len(t, errs, 1)
 			assert.Equal(t, "request failed", errs[0]["msg"])
@@ -963,6 +977,53 @@ func TestUI_SearchHomeDegrades(t *testing.T) {
 			assert.ErrorIs(t, errs[0]["err"].(error), errInjected)
 		})
 	}
+}
+
+// failingPlacements fails the counts of documents placed since the
+// rebuild, which the search home reads apart from the interests.
+type failingPlacements struct{ store.InsightStore }
+
+func (failingPlacements) PlacementCounts(context.Context, string) (map[string]int, error) {
+	return nil, fmt.Errorf("placement counts: %w", errInjected)
+}
+
+// failingSaves fails the list of saves, which the search home reads.
+type failingSaves struct{ store.BookmarkStore }
+
+func (failingSaves) List(context.Context, string, store.ListBookmarksOpts) ([]store.BookmarkWithDocument, error) {
+	return nil, fmt.Errorf("list bookmarks: %w", errInjected)
+}
+
+// TestUI_SearchHomeLately: the home lists the newest saves, newest first,
+// eight of them, each by the lists' row partial, and says how many
+// documents were placed since the latest rebuild, leading to where they
+// went.
+func TestUI_SearchHomeLately(t *testing.T) {
+	srv := apitest.Start(t)
+	body := getPage(t, srv, "/ui/", http.StatusOK)
+	assert.NotContains(t, body, "Lately saved", "nothing saved")
+	assert.NotContains(t, body, "home-new")
+
+	start := time.Date(2026, 5, 1, 9, 0, 0, 0, time.UTC)
+	docs := make([]*store.Document, 0, 10)
+	for i := range 10 {
+		doc := titled(t, srv, fmt.Sprintf("https://site%d.example/page", i), fmt.Sprintf("Page <%d>", i),
+			store.DocStateFetched)
+		docs = append(docs, doc)
+		save(t, srv, store.Bookmark{URL: doc.URL, Source: store.SourceManual, SavedAt: start.Add(time.Duration(i) * time.Hour)})
+	}
+	body = getPage(t, srv, "/ui/", http.StatusOK)
+	uitest.AssertInert(t, body)
+	assert.Contains(t, body, `<h2 id="lately">Lately saved</h2><a class="more" href="/ui/library?order=saved">All saves →</a>`)
+	assert.Equal(t, ui.HomeLately, strings.Count(body, `<a class="doc-title" href="/ui/documents/`), "eight saves")
+	assert.Less(t, strings.Index(body, "Page &lt;9&gt;"), strings.Index(body, "Page &lt;2&gt;"), "newest first")
+	assert.NotContains(t, body, "Page &lt;1&gt;", "the ninth newest isn't listed")
+
+	run := srv.AddInterest(t, "Kafka", docs[0])
+	srv.Place(t, run, run.Interests[0], docs[1])
+	srv.Place(t, run, "", docs[2])
+	assert.Contains(t, getPage(t, srv, "/ui/", http.StatusOK),
+		`<p class="home-new"><a href="/ui/interests">2 documents new since the interests were rebuilt →</a></p>`)
 }
 
 // TestUI_SearchType: a type limits the search, and the page keeps it: the
@@ -1044,11 +1105,11 @@ func TestUI_Library(t *testing.T) {
 	for _, doc := range []*store.Document{paper, failedDoc, other} {
 		assert.Contains(t, all, `href="/ui/documents/`+doc.ID+`"`)
 	}
-	assert.Contains(t, all, `<span class="doc-error" title="HTTP 503 from the origin"><span class="err-cause">Other</span> `+
+	assert.Contains(t, all, `<span class="doc-error neutral" title="HTTP 503 from the origin"><span class="err-cause">Other</span> `+
 		`<span class="msg">HTTP 503 from the origin</span></span>`)
 	assert.Contains(t, all, `<a class="doc-title untitled" href="/ui/documents/`+failedDoc.ID+
 		`" title="A failed &lt;paper&gt;">A failed &lt;paper&gt;</a>`+"\n"+
-		`<span class="doc-sub"><span class="host" title="https://arxiv.example/failed">arxiv.example/failed</span>`,
+		`<span class="doc-sub"><span class="badge state-failed">failed</span><span class="host" title="https://arxiv.example/failed">arxiv.example/failed</span>`,
 		"an untitled document by its bookmark's title, its short URL under it")
 	assert.Contains(t, all, `<a class="doc-title untitled" href="/ui/documents/`+other.ID+
 		`" title="https://other.example/x">other.example/x</a>`+"\n"+
@@ -1170,7 +1231,7 @@ func TestUI_LibrarySaved(t *testing.T) {
 		`<span class="msg">origin blocked the request (likely anti-bot)</span>`)
 	assert.Contains(t, body, `<span class="doc-title untitled" title="No &lt;document&gt;">No &lt;document&gt;</span>`+
 		"\n"+`<span class="doc-sub"><span class="host" title="https://gone.example/x">gone.example/x</span>`)
-	assert.Contains(t, body, `<td class="state-cell"></td>`+"\n"+`<td class="c-type"></td>`, "a save without a document")
+	assert.Contains(t, body, `<td class="c-type"></td>`, "a save without a document")
 	assert.Contains(t, body, `<a class="doc-title untitled" href="/ui/documents/`+bare.ID+`" title="https://bare.example/x">`+
 		`bare.example/x</a>`+"\n"+`<span class="doc-sub"><span class="host" title="https://bare.example/x">bare.example</span>`)
 	assert.Equal(t, 1, strings.Count(body, `<p class="table-note">Newest saves first, one row per bookmark: a page saved `+
@@ -1227,8 +1288,9 @@ func TestUI_LibrarySaved(t *testing.T) {
 }
 
 // assertLibraryTable checks a Library page's table: widths from the
-// colgroup, and rows rows of the four cells its columns name, Type and
-// Updated last, which a phone folds away.
+// colgroup, and rows rows of the three cells its columns name, Type and
+// Updated after the document, which a phone folds away. There is no State
+// column: a row's state, when it isn't fetched, is under its name.
 func assertLibraryTable(t *testing.T, page string, rows int) {
 	t.Helper()
 	doc, err := xhtml.Parse(strings.NewReader(page))
@@ -1248,9 +1310,9 @@ func assertLibraryTable(t *testing.T, page string, rows int) {
 			}
 		}
 	}
-	require.Len(t, cols, 4)
-	assert.Equal(t, []string{"", "c-state", "c-type"}, cols[:3])
-	assert.Contains(t, []string{"c-when", "c-when c-saved"}, cols[3], "the time column, a save's wider")
+	require.Len(t, cols, 3)
+	assert.Equal(t, []string{"", "c-type"}, cols[:2])
+	assert.Contains(t, []string{"c-when", "c-when c-saved"}, cols[2], "the time column, a save's wider")
 	require.Len(t, trs, rows)
 	for _, tr := range trs {
 		var cells []string
@@ -1260,7 +1322,7 @@ func assertLibraryTable(t *testing.T, page string, rows int) {
 				cells = append(cells, attr(td, "class"))
 			}
 		}
-		assert.Equal(t, []string{"", "state-cell", "c-type", "c-when when"}, cells)
+		assert.Equal(t, []string{"", "c-type", "c-when when"}, cells)
 	}
 }
 
@@ -1346,10 +1408,10 @@ func TestUI_LibraryFailures(t *testing.T) {
 
 	body := getPage(t, srv, "/ui/library", http.StatusOK)
 	assert.NotContains(t, body, "an old failure")
-	assert.Contains(t, body, `<span class="doc-error" title="`+blockedErr+`"><span class="err-cause">Blocked by bot protection</span> `+
+	assert.Contains(t, body, `<span class="doc-error warn" title="`+blockedErr+`"><span class="err-cause">Blocked by bot protection</span> `+
 		`<span class="msg">origin blocked the request (likely anti-bot)</span></span>`)
-	assert.Contains(t, body, `<span class="doc-error"><span class="err-cause">Dead link</span> </span>`)
-	assert.Equal(t, 2, strings.Count(body, `<span class="doc-error"`))
+	assert.Contains(t, body, `<span class="doc-error neutral"><span class="err-cause">Dead link</span> </span>`)
+	assert.Equal(t, 2, strings.Count(body, `<span class="doc-error `))
 }
 
 // moreHxRE finds the Library's "load more" request, htmx's.
@@ -1842,7 +1904,7 @@ func TestUI_Interests(t *testing.T) {
 	list := getPage(t, srv, "/ui/interests", http.StatusOK)
 	assert.Contains(t, list, `<a href="/ui/interests/`+interest+`">Stream &lt;processing&gt;</a>`)
 	assert.Contains(t, list, "<b>4</b> documents")
-	assert.Contains(t, list, `<meter class="meter" min="0" max="1" value="0.70">0.70</meter>0.70</span>`, "cohesion")
+	assert.Contains(t, list, `<b>0.70</b> alike</span>`, "cohesion, a number")
 	assert.Contains(t, list, `<a href="/ui/documents/`+a.ID+`" title="Kafka partitions">Kafka partitions</a>`)
 	assert.Contains(t, list, "1 interest curio found in your library, largest first.</p>", "the run's count, all shown")
 	assert.Contains(t, list, `title="https://example.com/c">example.com/c</a>`, "a card lists 3 members")
@@ -1857,7 +1919,7 @@ func TestUI_Interests(t *testing.T) {
 	assert.Contains(t, one, `<a class="doc-title untitled" href="/ui/documents/`+b.ID+
 		`" title="https://example.com/b">example.com/b</a>`)
 	assert.Contains(t, one, `<td class="num muted">2</td>`, "ranked")
-	assert.Contains(t, one, `</meter>0.85</span></td>`)
+	assert.Contains(t, one, `<span class="sim">0.85</span></td>`)
 	assert.NotContains(t, one, `class="pager"`, "one page")
 	assert.Contains(t, one, `<nav class="crumbs" aria-label="Breadcrumb"><a href="/ui/interests">Interests</a>`+
 		`<span class="sep">›</span><span class="truncate" aria-current="page" title="Stream &lt;processing&gt;">`+

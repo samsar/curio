@@ -1,7 +1,9 @@
 {{/*
 Status: what needs attention first, as callouts drawn from the health
-read, then a 2:1 board of stacked columns: the library, the queue and why
-documents failed on the left; health, progress and the jobs on the right.
+read, then a 3:2 board of stacked columns: the library, the queue and the
+jobs on the left; health, progress and why documents failed on the right.
+On a phone the columns become one, health right after the library, before
+the queue's controls (the board's order classes).
 
 Two pollers (Status.Pollers) keep the live regions current: every 2
 seconds, and after every change, what changes by the second; every 15
@@ -20,7 +22,7 @@ only when their setting does.
 {{with .Health}}<div class="attention" id="attention">{{if not .Err}}{{template "attention" .}}{{end}}</div>{{end}}
 <div class="board">
 <div>
-{{with .Counts}}<section class="card" aria-labelledby="counts">
+{{with .Counts}}<section class="card board-library" aria-labelledby="counts">
 <div class="card-head"><h2 id="counts">{{template "icon" "library"}}Library</h2><a class="more" href="{{navHref "library"}}">Open the library →</a></div>
 <div class="card-body" id="library-live">
 {{with .Err}}{{template "panel-error" .}}{{else}}
@@ -37,20 +39,21 @@ only when their setting does.
 </section>
 {{end}}
 {{with .Queue}}{{template "queue-card" .}}{{end}}
-{{with .Failures}}{{if or .Err .Total}}
-<section class="card" aria-labelledby="failures">
-<div class="card-head"><h2 id="failures">{{template "icon" "alert-circle"}}Why documents failed</h2><a class="more" href="{{failuresHref}}">All failures →</a></div>
-<div class="card-body">
-{{with .Err}}{{template "panel-error" .}}{{else}}<ul class="bars">
-{{range .Causes}}<li><a class="label" href="{{failureCauseHref .Name}}" title="{{causeLabel .Name}}">{{causeLabel .Name}}</a>{{template "stackbar" (causeBar .Name .Count $.Failures.Most)}}<span class="n">{{num .Count}}</span></li>
-{{end}}</ul>{{end}}
+{{with .Counts}}<section class="card board-jobs" aria-labelledby="jobs">
+<div class="card-head"><h2 id="jobs">{{template "icon" "server"}}Jobs</h2></div>
+<div class="card-body" id="jobs-live">
+{{with .Err}}{{template "panel-error" .}}{{else}}{{with .Jobs}}
+<ul class="rows">
+{{range .}}<li><span class="label">{{.Name}}</span><span class="value">{{num .Count}}</span></li>
+{{end}}</ul>
+{{else}}<p class="empty-inline">No jobs yet.</p>{{end}}{{end}}
 </div>
 </section>
-{{end}}{{end}}
+{{end}}
 </div>
 
 <div>
-{{with .Health}}<section class="card" aria-labelledby="health">
+{{with .Health}}<section class="card board-health" aria-labelledby="health">
 <div class="card-head"><h2 id="health">{{template "icon" "cpu"}}Health</h2></div>
 <div class="card-body" id="health-live">
 {{with .Err}}{{template "panel-error" .}}{{else}}
@@ -67,24 +70,23 @@ only when their setting does.
 </div>
 </section>
 {{end}}
-{{with .Progress}}<section class="card" aria-labelledby="progress">
+{{with .Progress}}<section class="card board-progress" aria-labelledby="progress">
 <div class="card-head"><h2 id="progress">{{template "icon" "clock"}}Progress</h2><span class="badge badge-accent badge-live js-only">live</span></div>
 <div class="card-body" id="progress-live">
 {{with .Err}}{{template "panel-error" .}}{{else}}{{template "progress" .}}{{end}}
 </div>
 </section>
 {{end}}
-{{with .Counts}}<section class="card" aria-labelledby="jobs">
-<div class="card-head"><h2 id="jobs">{{template "icon" "server"}}Jobs</h2></div>
-<div class="card-body" id="jobs-live">
-{{with .Err}}{{template "panel-error" .}}{{else}}{{with .Jobs}}
-<ul class="rows">
-{{range .}}<li><span class="label">{{.Name}}</span><span class="value">{{num .Count}}</span></li>
-{{end}}</ul>
-{{else}}<p class="empty-inline">No jobs yet.</p>{{end}}{{end}}
+{{with .Failures}}{{if or .Err .Total}}
+<section class="card board-failures" aria-labelledby="failures">
+<div class="card-head"><h2 id="failures">{{template "icon" "alert-circle"}}Why documents failed</h2><a class="more" href="{{failuresHref}}">All failures →</a></div>
+<div class="card-body">
+{{with .Err}}{{template "panel-error" .}}{{else}}<ul class="bars">
+{{range .Causes}}<li><a class="label" href="{{failureCauseHref .Name}}" title="{{causeLabel .Name}}">{{causeLabel .Name}}</a>{{template "stackbar" (causeBar .Name .Count $.Failures.Most)}}<span class="n">{{num .Count}}</span></li>
+{{end}}</ul>{{end}}
 </div>
 </section>
-{{end}}
+{{end}}{{end}}
 </div>
 </div>
 {{range .Pollers}}{{template "poller" .}}
@@ -138,7 +140,7 @@ replaces a time being typed. Without JavaScript the settings and their
 commands show instead.
 */}}
 {{define "queue-card" -}}
-<section class="card" aria-labelledby="queue">
+<section class="card board-queue" aria-labelledby="queue">
 <div class="card-head"><h2 id="queue">{{template "icon" "layers"}}Queue</h2></div>
 <div class="card-body">
 <div class="queue-top">
