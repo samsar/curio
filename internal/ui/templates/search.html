@@ -32,6 +32,16 @@ plan's address to push, so reload, back and forward never ask the model
 again. Without JavaScript the address keeps understand=1, and a reload
 plans again.
 
+A search whose ranking matched nothing by the query's words (no passage,
+title, folder or site: POST /v1/search's bm25_hits, fields_hits and
+title_hits all 0), which the vector search answers with whatever is
+nearest, says so in a quiet note on every page, heads its results
+"Nearest by meaning", drops the capped note, and on its first page shows
+the nearest three, the rest of the page a click away (a <details>, so the
+pager and its pages stay as they are). A result's badge shows only the
+unusual case (its words or its meaning alone, or what it was saved as),
+and no page found by meaning alone badges every hit.
+
 A result that matched on what it was saved as alone, its bookmark's
 title or folder, its site or its card, has no passage: in its place, one
 line, cut to fit, says what it was saved as. A failed or dead document's
@@ -92,19 +102,18 @@ text/template keeps a block's default over an empty define.
 <p class="callout-title">Keyword results only</p>
 <div class="callout-body">{{range .Warnings}}<p>{{.}}</p>{{end}}</div>
 </div>{{end}}
-{{if .Total}}<div class="results-head"><span><strong>{{.Count}}</strong> {{.Verb}}{{if .Capped}} · showing the best {{num .Total}}{{end}} · {{.TookMS}} ms</span>
+{{if .Wordless}}<div class="callout mb-4" role="note">{{template "icon" "search-x"}}
+<p class="callout-title">Nothing in your library uses these words</p>
+<div class="callout-body"><p>No page's text, title, folder or site has them. These are the pages nearest in meaning, which may have nothing to do with it. Try other words, or fewer.</p></div>
+</div>{{end}}
+{{if .Total}}<div class="results-head"><span>{{if .Wordless}}<strong>Nearest by meaning</strong>{{else}}<strong>{{.Count}}</strong> {{.Verb}}{{if .Capped}} · showing the best {{num .Total}}{{end}}{{if .ByMeaning}} · these by meaning alone{{end}}{{end}} · {{.TookMS}} ms</span>
 {{- if .Hits}}<label class="toggle"><input type="checkbox" id="show-scores" hx-preserve="true"> Show scores</label>{{else}}<div class="scores-kept"><input type="checkbox" id="show-scores" hx-preserve="true" tabindex="-1" aria-hidden="true"></div>{{end}}</div>
-{{with .Hits}}<ol class="results">
-{{range $hit := .}}<li class="result">
-<div class="result-where"><span class="fav">{{template "icon" (typeIcon .ContentType)}}</span><span class="path" title="{{.URL}}">{{with host .URL}}<b>{{.}}</b>{{with urlTrail $hit.URL}} › {{.}}{{end}}{{else}}{{.URL}}{{end}}</span></div>
-{{with .Ref}}<h2 class="result-title"><a href="{{documentHref .ID}}" title="{{.Hover}}"{{with .Class}} class="{{.}}"{{end}}>{{.Name}}</a></h2>{{end}}
-{{range .ShownMatches}}{{template "match" .}}{{end}}
-{{- if not .Matches}}{{with .Saved}}<p class="saved-as" title="{{.}}">{{.}}</p>{{end}}{{end}}
-{{- with .Unavailable}}<p class="saved-gone">Saved — {{.}}{{with outbound $hit.URL}} · <a href="{{.}}" rel="noopener noreferrer" target="_blank">the original address</a>{{end}}</p>{{end}}
-<div class="result-foot">{{with .ContentType}}<span class="tag">{{.}}</span>{{end}}{{with .MatchKind}}<span class="badge badge-accent plain">{{.}}</span>{{end}}<span class="score">score {{printf "%.4f" .Score}}</span>
-{{- with .MoreMatches}}<details><summary>{{count (len .) "more passage" "more passages"}}</summary>{{range .}}{{template "match" .}}{{end}}</details>{{end}}</div>
-</li>
+{{if .Hits}}<ol class="results">
+{{range $.LeadHits}}{{template "result" .}}
 {{end}}</ol>
+{{with $.RestHits}}<details class="more-results"><summary>Show {{num (len .)}} more nearest in meaning</summary><ol class="results" start="{{$.RestStart}}">
+{{range .}}{{template "result" .}}
+{{end}}</ol></details>{{end}}
 {{else}}{{with $.OutOfRange}}{{template "out-of-range" .}}{{end}}{{end}}
 {{if $.CappedNote}}<p class="results-note">curio ranks the best {{num .Total}} matches; refine the query to see others.</p>{{end}}
 {{with $.Pager}}<div hx-boost="true" hx-target="#results" hx-select="#results > *" hx-swap="innerHTML show:#results:top" hx-sync="closest .search-page:drop">{{template "pager" .}}</div>{{end}}
@@ -139,6 +148,22 @@ there.
 {{- with .Understood.LookedFor}}<p class="understood-also" title="{{.}}">{{.}}</p>{{end}}
 </div>
 {{- else}}{{with .Understood}}{{with .Note}}<p class="understood-note">{{.}}</p>{{end}}{{end}}{{end}}
+{{- end}}
+
+{{/*
+One result, a ShownHit: where it lives, its title, its passages, or what
+it was saved as, and its type, its badge when it has one, and its score.
+*/}}
+{{define "result" -}}
+{{$hit := .}}<li class="result">
+<div class="result-where"><span class="fav">{{template "icon" (typeIcon .ContentType)}}</span><span class="path" title="{{.URL}}">{{with host .URL}}<b>{{.}}</b>{{with urlTrail $hit.URL}} › {{.}}{{end}}{{else}}{{.URL}}{{end}}</span></div>
+{{with .Ref}}<h2 class="result-title"><a href="{{documentHref .ID}}" title="{{.Hover}}"{{with .Class}} class="{{.}}"{{end}}>{{.Name}}</a></h2>{{end}}
+{{range .ShownMatches}}{{template "match" .}}{{end}}
+{{- if not .Matches}}{{with .Saved}}<p class="saved-as" title="{{.}}">{{.}}</p>{{end}}{{end}}
+{{- with .Unavailable}}<p class="saved-gone">Saved — {{.}}{{with outbound $hit.URL}} · <a href="{{.}}" rel="noopener noreferrer" target="_blank">the original address</a>{{end}}</p>{{end}}
+<div class="result-foot">{{with .ContentType}}<span class="tag">{{.}}</span>{{end}}{{with .Badge}}<span class="badge badge-accent plain">{{.}}</span>{{end}}<span class="score">score {{printf "%.4f" .Score}}</span>
+{{- with .MoreMatches}}<details><summary>{{count (len .) "more passage" "more passages"}}</summary>{{range .}}{{template "match" .}}{{end}}</details>{{end}}</div>
+</li>
 {{- end}}
 
 {{/*

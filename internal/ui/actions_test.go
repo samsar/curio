@@ -144,6 +144,12 @@ func TestActionsScript(t *testing.T) {
 	assert.Contains(t, code, "AbortSignal.timeout(timeoutMs)", "every change has a deadline")
 	assert.Contains(t, code, "const timeoutMs = 15000;")
 	assert.Contains(t, code, "textContent", "it writes text")
+	// / focuses the search box, but in a field, with a modifier, or once a
+	// page took it (the map's own), which the window hears after the page.
+	assert.Contains(t, code, "window.addEventListener('keydown'")
+	assert.Contains(t, code, "event.key !== '/' || event.defaultPrevented")
+	assert.Contains(t, code, "closest('input, textarea, select, [contenteditable]')")
+	assert.Contains(t, code, "document.querySelector(':popover-open')", "never over an open confirm")
 
 	for bad, what := range map[string]string{
 		"x.innerHTML = y;": "innerHTML",

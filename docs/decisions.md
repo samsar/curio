@@ -8125,6 +8125,13 @@ successor. The Recently saved list is gone from the table of hostile
 content by place, with the Overview. See "Dashboard: search is home, the
 Overview becomes Status".
 
+**Revised (2026-11-03):** a list's document title takes two lines,
+cut, not one; an untitled document is named in italics in the title's
+font wherever it is, by its bookmark's title or its short address, never
+in monospace; and focus is a 2px outline in `--focus`, never the ring
+alone. See "Dashboard: honest search, visible focus, confirms and plain
+words".
+
 ---
 
 ## Dashboard: search is home, the Overview becomes Status
@@ -15660,6 +15667,123 @@ they are until then (each refetch asks the origin, then Jina, at Jina's
 pace: 20 a minute without a key, 6 a minute per site), which re-indexes
 them; their interests follow at the next rebuild. A reindex doesn't help:
 it reads the stored markdown.
+
+---
+
+## Dashboard: honest search, visible focus, confirms and plain words
+
+**Decision:** a pass over the dashboard's mechanics, after a design
+critique, keeping its colours, type and layouts (a later change restyles
+them):
+
+**Focus is an outline, never a ring alone.** Buttons, the switch and the
+fields replaced the 2px outline with `box-shadow: var(--ring)`, a 3 px
+halo at 28% opacity, about 1.5:1 against white: under WCAG 1.4.11's 3:1
+for a focus indicator. Every focus is now the global 2px outline in a
+`--focus` token (`#4b4ac2` light, `#a8a9ff` dark, the accent's text
+colour, 3:1 or more on the page and every surface in both themes); the
+ring stays on fields as decoration. No rule sets `outline: none`
+(`TestStylesheet_Focus`).
+
+**A row's main text takes two lines.** A list's document title was one
+line, cut, its whole only in `title=`, which no phone and no keyboard
+shows: at 390 px a Library title showed about 22 characters, Unsorted's
+16, and a map panel's area name was cut too. `.doc-title` and the map
+panel's row names are now `line-clamp: 2`, still cut and whole on hover.
+Everything else a line names (hosts, errors, an interest a sentence
+names, a card's members) stays on one line, where a second line would
+break the row's rhythm and say little.
+
+**One way to name an untitled document.** An untitled document was named
+in monospace by its address in some rows and in italics by its bookmark
+in others, and 17 of the author's untitled documents' bookmarks were
+titled with a full URL, so they showed an italic `https://…`. Now
+`DocRef` treats a bookmark title that is an address (a scheme's `://` or
+`www.` first) as no name, and every untitled name, a bookmark's title or
+the short address, takes one class, `untitled`: italic, in the title's
+own font, secondary. The document's own heading is named the same way.
+
+**The reading measure.** `.prose` was 42 rem at 16 px, about 90
+characters a line, and a search passage about 110: now 70ch and 75ch.
+Headings balance their lines and running text avoids a one-word last
+line (`text-wrap`). Monospace inside small text (`dd.mono` at 13 px ×
+0.92) fell under 12 px; it is floored there.
+
+**A document doesn't say its title twice.** Most fetched texts open with
+the page's own title as an H1, under the page's H1 of the same words.
+`Renderer.RenderDocument` drops the text's first block when it is a level
+1 or 2 heading whose words, case, punctuation and spacing aside, are the
+page's title, and something follows it (a text of the heading alone
+would show an empty article); it reads the heading's text no further than four times the
+title's length, so a heading of any size costs no more than the title.
+
+**Search says when it found nothing by its words.** The vector search
+ranks every chunk by distance, so a query of nonsense filled the page
+with "100+ documents match", each badged "meaning only", and the empty
+state was unreachable. Whether the words matched is the ranking's, not a
+page's: BM25 over the chunks, and the fields and title lists over what a
+document was saved as, are word matches; the cards and the chunk vectors
+aren't. `bm25_hits` counted only the first, so the engine now reports
+the other two, additively: `Result.FieldsHits` and `TitleHits`, the
+distinct documents each list returned over every query of the search
+(each list read `documentListDepth`, 200, deep, so they count what the
+ranking was built from, not the whole library), on POST /v1/search as
+`fields_hits` and `title_hits`. A search all three are 0 for (and that
+isn't degraded, and ranked something) is wordless on every page: a quiet
+note says nothing in the library uses the words, the results are headed
+"Nearest by meaning", no hit has a badge, the capped note ("curio ranks
+the best 100 matches") goes, and the first page shows the nearest three
+with the rest of that page a `<details>` away. The first version judged
+from the page's hits and `bm25_hits` alone: a query matching only titles
+or folders claimed no match, and page 1 could read normally while page 2
+showed the note. The alternative to the fold, a GET link to see them
+all, needed a parameter every page link would carry and a page 1 that
+changes with it; the fold keeps the pager, the pages and the address as
+they are, and keystrokes still never plan. Apart from that, a page whose
+every hit was found by meaning alone drops its badges and says "these by
+meaning alone"; badges show only the unusual kinds, never "keyword +
+meaning", most hits'.
+
+**Passages lose HTML and shortcodes.** `ui.Passage` dropped whole tags of
+known elements but kept one the snippet cut (`<strong…`, `<img src="…`)
+and GitHub's `:fire:`. Now, in a snippet FTS5 cut at its end (its last
+rune its ellipsis), a tag cut there (within 512 runes of it), and in one
+it cut at its start, a tag it starts inside (a run to the first `>`
+holding an attribute's `="`); a text not cut keeps "a <b y" as written,
+comments, and shortcodes (lower case, a letter or a leading sign, not
+between letters or digits, so `10:30:45` and `std::vector` stay) go, and
+character references read as characters (`&gt;&gt;` showed as typed).
+Each rule is one pass that never rescans, and a comment's scan stops at
+the text's last `-->`, so the cleaning stays linear
+(`TestPassage_Adversarial`).
+
+**A bulk change asks first.** A Failures group's refetch of more than
+`ui.ConfirmOver` (50) documents, like the dead links', and Rebuild open
+the declarative popover the dead links used, with copy built in Go:
+what it does, that pages a site blocks or keeps behind a login go
+through Jina Reader, which reads a few pages a minute (the page names no
+number: the rate and key live in the fetcher, which no page handler
+reads), and that Status shows progress; Rebuild's says known interests
+keep their names. Its confirm sits outside the polled regions.
+
+**/ focuses search.** actions.js listens on `window`, which hears a key
+after the document, so the map's own `/` (it calls `preventDefault`)
+wins there; it ignores a key typed in a field, with a modifier, or while
+a popover (a confirm) is open.
+
+**Plain words.** "warm"/"fresh" became "updated in place"/"regrouped
+from scratch", "next at 267" "rebuilds after N more changes" (the counts
+on hover), cohesion "how alike", the Changes page's trigger a sentence,
+Status's pools "grouping" and "metadata embeddings" (with what each does
+on hover) under "Done in the last 10 min", and the writing model's grey
+dot says Status doesn't check it. The error page leads with a sentence
+for people ("There's nothing here.") and puts the status and the API's
+title after it; a map address that isn't one says "This map view
+doesn't exist." and leads to the map. The daemon's build stamp is a line
+of its own, so it never breaks inside the timestamp.
+
+**How to revisit:** a page test pins each sentence; the screenshots at
+1440 and 390, both themes, are the check for layout.
 
 ---
 

@@ -270,7 +270,7 @@ func (h pageHandlers) home(r *http.Request) *ui.SearchHome {
 
 func searchResults(resp SearchResponse) *ui.SearchResults {
 	res := &ui.SearchResults{Degraded: resp.Degraded, Warnings: resp.Warnings, TookMS: resp.TookMS,
-		Total: resp.Total, Capped: resp.Capped}
+		Total: resp.Total, Capped: resp.Capped, WordHits: resp.BM25Hits + resp.FieldsHits + resp.TitleHits}
 	for _, item := range resp.Items {
 		hit := ui.SearchHit{DocumentID: item.Document.ID, Title: deref(item.Document.Title),
 			BookmarkTitle: strings.TrimSpace(item.BookmarkTitle), URL: item.Document.URL,

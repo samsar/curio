@@ -77,7 +77,7 @@ func (h pageHandlers) document(w http.ResponseWriter, r *http.Request) {
 	vm.Meta = documentMeta(resp)
 	vm.Meta.BookmarkTitle = bookmarkTitle
 	vm.Extraction = extractionView(resp.CurrentExtraction)
-	vm.Text = h.documentText(r, resp, images)
+	vm.Text = h.documentText(r, resp, vm.Meta.Ref().Name(), images)
 	vm.Related = h.relatedPanel(r, id)
 	vm.Bookmarks = h.bookmarksPanel(r, id)
 	vm.Place = h.documentPlace(r, id)
@@ -180,8 +180,8 @@ func currentMarkdownPath(d DocumentResponse) string {
 
 // documentText renders the document's markdown, the first
 // ui.MaxRenderedMarkdown bytes of it, from the file GET
-// /v1/documents/{id}/content streams.
-func (h pageHandlers) documentText(r *http.Request, doc DocumentResponse, images bool) ui.TextPanel {
+// /v1/documents/{id}/content streams, under title, the page's heading.
+func (h pageHandlers) documentText(r *http.Request, doc DocumentResponse, title string, images bool) ui.TextPanel {
 	content, err := openMarkdown(doc.ID, currentMarkdownPath(doc))
 	if unavailable, ok := errors.AsType[*contentUnavailable](err); ok {
 		if unavailable.missing {
@@ -198,7 +198,7 @@ func (h pageHandlers) documentText(r *http.Request, doc DocumentResponse, images
 		return ui.TextPanel{Err: h.panelError(r, fmt.Errorf("document %s: read its markdown: %w", doc.ID, err))}
 	}
 	src, truncated := ui.CutMarkdown(src)
-	text, err := h.pages.render.RenderMarkdown(src, cmp.Or(deref(doc.URLCanonical), doc.URL), images)
+	text, err := h.pages.render.RenderDocument(src, cmp.Or(deref(doc.URLCanonical), doc.URL), title, images)
 	if err != nil {
 		return ui.TextPanel{Err: h.panelError(r, fmt.Errorf("document %s: %w", doc.ID, err))}
 	}

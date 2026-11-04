@@ -127,7 +127,7 @@ func TestMarkdown_OverBudget(t *testing.T) {
 				assert.Less(t, alloc, limit)
 				assertStored(t, text, tc.src, tc.want)
 			}
-			_, _, err := r.markdown.format(tc.src, docURL, false)
+			_, _, err := r.markdown.format(tc.src, docURL, "", false)
 			assert.ErrorIs(t, err, tc.want)
 		})
 	}

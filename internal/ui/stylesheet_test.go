@@ -164,25 +164,33 @@ func TestStylesheet(t *testing.T) {
 	assert.Equal(t, "none", declarations(ruleFor(t, rules, "", ".doc-saved").body)["display"])
 	assert.Equal(t, "block", declarations(ruleFor(t, rules, phone, ".doc-saved").body)["display"],
 		"a save's time takes the folded time column's place on a phone, on a line of its own")
-	fallback := declarations(ruleFor(t, rules, "", ".doc-title.from-bookmark").body)
-	assert.Equal(t, "italic", fallback["font-style"], "a bookmark's title stands in for the document's")
-	assert.NotContains(t, fallback, "font-family", "in the title's own font, unlike an address")
-	assert.Equal(t, "italic", declarations(ruleFor(t, rules, "", ".doc-head h1.from-bookmark").body)["font-style"])
-	// An interest card's untitled members, as the Library names documents.
-	assert.Equal(t, "italic",
-		declarations(ruleFor(t, rules, "", ".interest .members a.from-bookmark").body)["font-style"])
-	assert.Equal(t, "var(--mono)",
-		declarations(ruleFor(t, rules, "", ".interest .members a.untitled").body)["font-family"])
-	// A search result or a related document is named the same way.
-	for _, selector := range []string{".result-title a.from-bookmark", ".related a.from-bookmark"} {
-		fallback := declarations(ruleFor(t, rules, "", selector).body)
-		assert.Equal(t, "italic", fallback["font-style"], selector)
-		assert.NotContains(t, fallback, "font-family", "%s: in the title's own font", selector)
+	// An untitled document is named one way wherever it is: in italics, in
+	// the title's own font, by its bookmark's title or its address alike.
+	for _, selector := range []string{".doc-title.untitled", ".doc-head h1.untitled", ".interest .members a.untitled",
+		".result-title a.untitled", ".related a.untitled"} {
+		untitled := declarations(ruleFor(t, rules, "", selector).body)
+		assert.Equal(t, "italic", untitled["font-style"], selector)
+		assert.NotContains(t, untitled, "font-family", "%s: in the title's own font", selector)
 	}
-	for _, selector := range []string{".result-title a.untitled", ".related a.untitled"} {
-		assert.Equal(t, "var(--mono)", declarations(ruleFor(t, rules, "", selector).body)["font-family"],
-			"%s: an address in monospace", selector)
+	assert.NotContains(t, css, "from-bookmark", "one class for every untitled document")
+	// A row's main text, a document's title in a list, takes two lines at
+	// most, cut, whole on hover.
+	for _, selector := range []string{".doc-title", ".map-row-name > span:first-child"} {
+		clamp := declarations(ruleFor(t, rules, "", selector).body)
+		assert.Equal(t, "2", clamp["line-clamp"], selector)
+		assert.Equal(t, "2", clamp["-webkit-line-clamp"], selector)
+		assert.Equal(t, "hidden", clamp["overflow"], selector)
+		assert.NotEqual(t, "nowrap", clamp["white-space"], selector)
 	}
+	// The reading measure: a document's text and a result's passages run
+	// to about 70 characters a line.
+	assert.Equal(t, "70ch", declarations(ruleFor(t, rules, "", ".prose").body)["max-width"])
+	assert.Equal(t, "75ch", declarations(ruleFor(t, rules, "", ".snippet").body)["max-width"])
+	assert.Equal(t, "balance", declared(rules, "h1", "text-wrap"))
+	assert.Equal(t, "pretty", declared(rules, "p", "text-wrap"))
+	// Monospace is never under 12px.
+	assert.Equal(t, "max(0.92em, var(--fs-xs))", declarations(ruleFor(t, rules, "", "code").body)["font-size"])
+	assert.Equal(t, "max(0.9em, var(--fs-xs))", declarations(ruleFor(t, rules, "", "dl.facts dd code").body)["font-size"])
 	// Show scores is a checkbox the stylesheet alone reads: scores are
 	// hidden until it is checked.
 	assert.Equal(t, "none", declarations(ruleFor(t, rules, "", ".score").body)["display"])
@@ -275,6 +283,50 @@ func TestStylesheet(t *testing.T) {
 	assert.NotContains(t, css, "@font-face")
 	for _, m := range regexp.MustCompile(`url\(\s*["']?([^"')]*)`).FindAllStringSubmatch(css, -1) {
 		assert.True(t, strings.HasPrefix(m[1], "data:"), "url(%s", m[1])
+	}
+}
+
+// declared is the value the first rule outside any at-rule naming
+// selector gives prop, "" when none does.
+func declared(rules []cssRule, selector, prop string) string {
+	for _, r := range rules {
+		if r.at == "" && slices.Contains(r.selectors, selector) {
+			if v, ok := declarations(r.body)[prop]; ok {
+				return v
+			}
+		}
+	}
+	return ""
+}
+
+// TestStylesheet_Focus: focus is always a 2px outline in the focus colour,
+// 3:1 or more against the page and the surface in both themes (WCAG
+// 1.4.11), and no rule takes the outline away: a control's soft ring
+// (--ring, about 1.5:1) is decoration beside it, never in its place.
+func TestStylesheet_Focus(t *testing.T) {
+	css := stylesheet(t)
+	rules := cssRules(t, css)
+	focus := declarations(ruleFor(t, rules, "", ":focus-visible").body)
+	assert.Equal(t, "2px solid var(--focus)", focus["outline"])
+	for _, r := range rules {
+		d := declarations(r.body)
+		for _, prop := range []string{"outline", "outline-style", "outline-width"} {
+			assert.NotContains(t, []string{"none", "0", "0px"}, d[prop], "%v: %s", r.selectors, prop)
+		}
+		if outline, ok := d["outline"]; ok {
+			assert.Equal(t, "2px solid var(--focus)", outline, "%v", r.selectors)
+		}
+	}
+	for _, selector := range []string{".input:focus-visible", ".switch input:focus-visible",
+		`.searchbox input[type="search"]:focus-visible`} {
+		assert.Equal(t, "2px solid var(--focus)", declarations(ruleFor(t, rules, "", selector).body)["outline"], selector)
+	}
+	light := declarations(ruleFor(t, rules, "", ":root").body)
+	dark := declarations(ruleFor(t, rules, "@media (prefers-color-scheme: dark)", `:root:not([data-theme="light"])`).body)
+	for name, theme := range map[string]map[string]string{"light": light, "dark": dark} {
+		for _, against := range []string{"--bg", "--surface", "--surface-2"} {
+			assert.GreaterOrEqual(t, contrast(t, theme["--focus"], theme[against]), 3.0, "%s focus on %s", name, against)
+		}
 	}
 }
 

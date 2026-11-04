@@ -31,7 +31,7 @@ only when their setting does.
 </div>
 <div class="mt-6">{{template "stackbar" (stateBar .ByState)}}</div>
 {{$total := .Documents}}<div class="legend">{{range $i, $c := .ByState}}<a id="legend-{{$i}}" href="{{stateHref $c.Name}}"><span class="swatch swatch-{{stateTone $c.Name}}"></span>{{$c.Name}} <span class="n">{{num $c.Count}}</span> <span class="pct">{{pct $c.Count $total}}</span></a>{{end}}</div>
-{{$fetched := .State "fetched"}}{{with .Reembed}}<p class="muted mt-4">{{count .Chunks "chunk" "chunks"}} in {{num .Documents}} of {{num $fetched}} fetched documents to re-embed for the new chunk context{{if .ETA}}, about {{duration .ETA}} left at {{.Rate}} chunks a second{{end}}</p>{{end}}
+{{$fetched := .State "fetched"}}{{with .Reembed}}<p class="muted mt-4">{{count .Chunks "passage" "passages"}} in {{num .Documents}} of {{num $fetched}} fetched documents to embed again with their titles and headings{{if .ETA}}, about {{duration .ETA}} left at {{.Rate}} passages a second{{end}}</p>{{end}}
 {{end}}
 </div>
 </section>
@@ -55,10 +55,10 @@ only when their setting does.
 <div class="card-body" id="health-live">
 {{with .Err}}{{template "panel-error" .}}{{else}}
 <ul class="rows">
-<li><span class="label"><span class="dot dot-ok"></span>Daemon</span><span class="value">{{.Version}}</span></li>
+<li><span class="label"><span class="dot dot-ok"></span>Daemon</span><span class="value"><span class="nowrap">{{.VersionName}}</span>{{with .VersionBuild}}<span class="sub nowrap">{{.}}</span>{{end}}</span></li>
 <li><span class="label"><span class="dot {{if .OllamaReachable}}dot-ok{{else}}dot-danger{{end}}"></span>Ollama</span><span class="value">{{if .OllamaReachable}}reachable{{else}}not reachable<span class="sub">{{.OllamaDetail}}</span>{{end}}</span></li>
 <li><span class="label"><span class="dot {{if .Drift}}dot-warn{{else}}dot-ok{{end}}"></span>Embeddings</span><span class="value">{{.EmbeddingModel}}<span class="sub">{{.EmbeddingDim}} dimensions{{with .Drift}}, {{if .Verified}}drifted{{else}}may have drifted{{end}}{{end}}</span></span></li>
-<li><span class="label"><span class="dot"></span>Writing model</span><span class="value">{{with .WritingModel}}{{.}}{{else}}none in use{{end}}</span></li>
+<li><span class="label"><span class="dot" title="Not checked here: curio doctor checks it"></span>Writing model</span><span class="value">{{if .WritingModel}}{{.WritingModel}}<span class="sub">{{with .WritingUse}}{{.}}; {{end}}not checked here: <code>curio doctor</code> checks it</span>{{else}}none in use<span class="sub">no setting in config.yaml uses one</span>{{end}}</span></li>
 <li><span class="label"><span class="dot dot-{{.Interests.Tone}}"></span>Interests</span><span class="value">{{template "interests-state" .Interests}}</span></li>
 {{range .Upstreams}}<li><span class="label"><span class="dot dot-{{.Tone}}"></span>{{.Label}}</span><span class="value">{{if .Enabled}}{{.State}}<span class="sub">last answer {{template "reltime" .LastSuccess}}{{if not .LastFailure.IsZero}} · last failure {{.LastFailureClass}}, {{template "reltime" .LastFailure}}{{end}}{{if not .CooldownUntil.IsZero}} · resumes {{template "reltime" .CooldownUntil}}{{end}}</span>{{else}}off{{end}}</span></li>
 {{end}}<li><span class="label"><span class="dot{{if .YouTubeFetcher}} dot-ok{{end}}"></span>YouTube</span><span class="value">{{with .YouTubeFetcher}}yt-dlp<span class="sub">{{.}}</span>{{else}}yt-dlp not found<span class="sub">videos are fetched as pages</span>{{end}}</span></li>
@@ -159,9 +159,9 @@ commands show instead.
 </div>
 <div id="queue-pools">{{if not .Err}}
 <table class="pools">
-<thead><tr><th scope="col">Pool</th><th scope="col" class="num">Running</th><th scope="col" class="num">Pending</th>{{with .FinishedIn}}<th scope="col" class="num">Finished, {{duration .}}</th>{{end}}</tr></thead>
+<thead><tr><th scope="col">Work</th><th scope="col" class="num">Running</th><th scope="col" class="num">Waiting</th>{{if .FinishedIn}}<th scope="col" class="num">{{.FinishedLabel}}</th>{{end}}</tr></thead>
 <tbody>
-{{range .Kinds}}<tr><td>{{.Kind}}</td><td class="num">{{.Running}} of {{.Limit}}</td><td class="num">{{num .Pending}}</td>{{if $.FinishedIn}}<td class="num">{{num .Finished}}</td>{{end}}</tr>
+{{range .Kinds}}<tr><td title="{{poolHint .Kind}}">{{poolLabel .Kind}}</td><td class="num">{{.Running}} of {{.Limit}}</td><td class="num">{{num .Pending}}</td>{{if $.FinishedIn}}<td class="num">{{num .Finished}}</td>{{end}}</tr>
 {{end}}</tbody>
 </table>
 {{end}}</div>

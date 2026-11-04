@@ -721,7 +721,7 @@ func TestUI_DocumentReads(t *testing.T) {
 	for _, query := range []string{"?poll=live", "?poll=jobs", "?poll=jobs&updated=yesterday",
 		"?poll=jobs&updated=2026-09-29"} {
 		body := getPage(t, srv, "/ui/documents/"+doc.ID+query, http.StatusBadRequest)
-		assert.Contains(t, body, `<div class="big-code">400</div>`, query)
+		assert.Contains(t, body, `<p class="error-code">Error 400 · `, query)
 		assert.Empty(t, r.take(), query)
 	}
 }
@@ -864,8 +864,9 @@ func TestUI_InterestsRebuild(t *testing.T) {
 	body := getPage(t, srv, "/ui/interests", http.StatusOK)
 	rebuild := elementByID(pageDoc(t, body), "rebuild")
 	require.NotNil(t, rebuild)
-	assert.Equal(t, "/v1/interests/rebuild", attr(rebuild, "data-path"))
+	assert.Equal(t, "confirm-rebuild", attr(rebuild, "popovertarget"))
 	assert.False(t, hasAttribute(rebuild, "aria-disabled"))
+	assert.Equal(t, "/v1/interests/rebuild", attr(elementByID(pageDoc(t, body), "rebuild-confirm"), "data-path"))
 	assert.Equal(t, "every 30s, curio:changed from:body", pollerTrigger(t, body, "rebuild-poll"),
 		"a rebuild the scheduler queues reaches an open page")
 	href := pollerHref(t, body, "rebuild-state")
@@ -898,7 +899,7 @@ func TestUI_InterestsRebuild(t *testing.T) {
 	body = getPage(t, srv, "/ui/interests", http.StatusOK)
 	assert.Contains(t, body, "Kafka streams", "the latest done run's interests")
 	assert.NotContains(t, body, "failed", "a run a shutdown failed is no failure the scheduler counts")
-	assert.Regexp(t, `<p class="interests-state tone-ok">rebuilt <time[^>]*>just now</time> · 0 documents changed, next at 20</p>`,
+	assert.Regexp(t, `<p class="interests-state tone-ok">rebuilt <time[^>]*>just now</time> · <span title="0 documents changed since; 20 make the next rebuild due">rebuilds after 20 more changes</span></p>`,
 		body)
 }
 
@@ -933,17 +934,17 @@ func TestUI_InterestsStates(t *testing.T) {
 		{"the first due", insight.Snapshot{State: insight.StateDue, Changed: 25, RebuildAt: 20},
 			`>the first grouping is due \(25 documents indexed\): waiting for the library to settle</p>`},
 		{"due after a reindex", insight.Snapshot{State: insight.StateDue, LastRebuildAt: now,
-			FreshOwed: string(store.FreshReindex)}, `>a fresh rebuild is due: waiting for the re-embedding to finish</p>`},
+			FreshOwed: string(store.FreshReindex)}, `>a rebuild from scratch is due: waiting for the re-embedding to finish</p>`},
 		{"due, asked for", insight.Snapshot{State: insight.StateDue, LastRebuildAt: now,
-			FreshOwed: string(store.FreshManual)}, `>a fresh rebuild is due \(asked for\): waiting for the library to settle</p>`},
+			FreshOwed: string(store.FreshManual)}, `>a rebuild from scratch is due \(you asked for one\): waiting for the library to settle</p>`},
 		{"due, the params changed", insight.Snapshot{State: insight.StateDue, LastRebuildAt: now,
 			FreshOwed: insight.FreshParams},
-			`>a fresh rebuild is due \(the grouping&#39;s parameters changed\): waiting for the library to settle</p>`},
+			`>a rebuild from scratch is due \(the grouping&#39;s parameters changed\): waiting for the library to settle</p>`},
 		{"due", insight.Snapshot{State: insight.StateDue, LastRebuildAt: now, Changed: 300, RebuildAt: 263},
-			`>a rebuild is due \(300 changed, threshold 263\): waiting for the library to settle</p>`},
+			`>a rebuild is due \(300 documents changed\): waiting for the library to settle</p>`},
 		{"current", insight.Snapshot{State: insight.StateCurrent, LastRebuildAt: now.Add(-2 * time.Hour),
 			LastKind: store.RunKindWarm, Changed: 37, RebuildAt: 263},
-			`<p class="interests-state tone-ok">rebuilt <time[^>]*>2 h ago</time> \(warm\) · 37 documents changed, next at 263</p>`},
+			`<p class="interests-state tone-ok">rebuilt <time[^>]*>2 h ago</time>, updated in place · <span title="37 documents changed since; 263 make the next rebuild due">rebuilds after 226 more changes</span></p>`},
 		{"none", insight.Snapshot{State: insight.StateNone, Changed: 7, RebuildAt: 20},
 			`>waiting for 20 indexed documents \(7 so far\)</p>`},
 		{"unknown", insight.Snapshot{State: insight.StateUnknown}, `<div class="rebuild-state" id="rebuild-state"></div>`},
@@ -1005,7 +1006,7 @@ func TestUI_InterestsClickRace(t *testing.T) {
 	srv.Scheduler.Set(current)
 	srv.AddInterest(t, "Kafka", srv.AddDocument(t, "https://example.com/a", store.DocStateFetched))
 	body := getPage(t, srv, "/ui/interests", http.StatusOK)
-	status, _ := postChange(t, srv, elementByID(pageDoc(t, body), "rebuild"))
+	status, _ := postChange(t, srv, elementByID(pageDoc(t, body), "rebuild-confirm"))
 	require.Equal(t, http.StatusAccepted, status)
 	require.Equal(t, current, srv.Scheduler.Snapshot(), "the scheduler hasn't checked since")
 	assert.Equal(t, 1, srv.Scheduler.Kicks())

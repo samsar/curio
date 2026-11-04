@@ -225,10 +225,11 @@ func TestUI_Status(t *testing.T) {
 		`<rect class="fill-danger" x="66.667" y="0" width="33.333" height="10"/>`)
 	assert.NotContains(t, body, "style=")
 	assert.Contains(t, body, `<span class="badge queue-open">open</span>`)
-	assert.Contains(t, body, `<th scope="col" class="num">Finished, 10m</th>`)
-	assert.Contains(t, body, `<td>fetch</td><td class="num">0 of 16</td><td class="num">1</td><td class="num">0</td>`,
-		"the new page's fetch job")
-	assert.Contains(t, body, `<td>cards</td><td class="num">0 of 1</td><td class="num">1</td><td class="num">0</td>`,
+	assert.Contains(t, body, `<th scope="col" class="num">Done in the last 10 min</th>`)
+	assert.Contains(t, body, `<td title="Fetches saved pages and reads their text">fetch</td><td class="num">0 of 16</td>`+
+		`<td class="num">1</td><td class="num">0</td>`, "the new page's fetch job")
+	assert.Contains(t, body, `<td title="Embeds each document&#39;s title, site and folder, so search finds it by them">`+
+		`metadata embeddings</td><td class="num">0 of 1</td><td class="num">1</td><td class="num">0</td>`,
 		"the cards job the writes queued")
 	assert.Contains(t, body, `<span class="why">Working: 2 jobs waiting</span>`)
 	assert.Contains(t, body, `id="queue-pause" data-kind="pause"`)
@@ -241,8 +242,8 @@ func TestUI_Status(t *testing.T) {
 	assert.NotContains(t, body, "to re-embed", "nothing to re-embed, no line")
 	reembedding(t, srv, fetched)
 	body = getPage(t, srv, "/ui/status", http.StatusOK)
-	assert.Contains(t, body, `<p class="muted mt-4">1 chunk in 1 of 1 fetched documents to re-embed for the new chunk `+
-		`context</p>`, "no time left without a re-embed running")
+	assert.Contains(t, body, `<p class="muted mt-4">1 passage in 1 of 1 fetched documents to embed again with their `+
+		`titles and headings</p>`, "no time left without a re-embed running")
 
 	// Paused: the queue and the progress say why nothing starts, and the
 	// button resumes.
@@ -273,14 +274,18 @@ func TestUI_StatusWritingModel(t *testing.T) {
 		roles map[string]string
 		want  string
 	}{
-		{nil, "none in use"},
-		{map[string]string{}, "none in use"},
-		{map[string]string{"labels": "gemma4:26b"}, "gemma4:26b"},
-		{map[string]string{"labels": "qwen3:4b-instruct"}, "qwen3:4b-instruct"},
+		{nil, `none in use<span class="sub">no setting in config.yaml uses one</span>`},
+		{map[string]string{}, `none in use<span class="sub">no setting in config.yaml uses one</span>`},
+		{map[string]string{"labels": "gemma4:26b"}, `gemma4:26b<span class="sub">names your interests; not checked ` +
+			`here: <code>curio doctor</code> checks it</span>`},
+		{map[string]string{"labels": "qwen3:4b-instruct", "planner": "qwen3:4b-instruct"}, `qwen3:4b-instruct` +
+			`<span class="sub">names your interests and understands search questions; not checked here: ` +
+			`<code>curio doctor</code> checks it</span>`},
 	} {
 		srv := apitest.Start(t, func(d *api.Deps) { d.GenerationModel, d.GenerationRoles = "gemma4:26b", tc.roles })
 		body := getPage(t, srv, "/ui/status", http.StatusOK)
-		assert.Contains(t, body, `<span class="dot"></span>Writing model</span><span class="value">`+tc.want+`</span>`)
+		assert.Contains(t, body, `<span class="dot" title="Not checked here: curio doctor checks it"></span>`+
+			`Writing model</span><span class="value">`+tc.want+`</span>`)
 	}
 }
 
@@ -526,9 +531,8 @@ func TestUI_Search(t *testing.T) {
 	assert.Contains(t, body, `<span class="path" title="https://example.com/kafka"><b>example.com</b> › kafka</span>`)
 	assert.NotContains(t, body, `rel="noopener noreferrer"`, "results link to their document's page, not out")
 	assert.Contains(t, body, "<mark>kafka</mark>")
-	assert.Contains(t, body, `<div class="result-foot"><span class="tag">article</span>`+
-		`<span class="badge badge-accent plain">keyword &#43; meaning</span><span class="score">score 0.`,
-		"the hit's type, how it matched, and its score for Show scores")
+	assert.Contains(t, body, `<div class="result-foot"><span class="tag">article</span><span class="score">score 0.`,
+		"the hit's type and its score for Show scores; no badge for a hit both found")
 	assert.Contains(t, body, "<strong>1 document</strong> matches · ")
 	assert.Contains(t, body, ` ms</span><label class="toggle"><input type="checkbox" id="show-scores" hx-preserve="true">`+
 		` Show scores</label></div>`)
@@ -694,7 +698,7 @@ func TestUI_SearchPages(t *testing.T) {
 	mu.Unlock()
 	for _, page := range []string{"0", "11", "-1", "abc", "1.5", "99999999999999999999", "%202"} {
 		body := getPage(t, srv, "/ui/?q=kafka&page="+page, http.StatusBadRequest)
-		assert.Contains(t, body, `<div class="big-code">400</div>`, page)
+		assert.Contains(t, body, `<p class="error-code">Error 400 · `, page)
 		assert.Contains(t, body, `must be a whole number from 1 to 10`, page)
 		assert.Contains(t, body, `<a class="btn btn-primary" href="/ui/">Start over</a>`, page)
 	}
@@ -739,7 +743,7 @@ func TestUI_SearchNamedByBookmark(t *testing.T) {
 	srv.AddContent(t, titledDoc, "kafka partitions, titled")
 
 	body := getPage(t, srv, "/ui/?q=kafka", http.StatusOK)
-	assert.Contains(t, body, `<a href="/ui/documents/`+named.ID+`" title="A &lt;kafka&gt; page" class="from-bookmark">`+
+	assert.Contains(t, body, `<a href="/ui/documents/`+named.ID+`" title="A &lt;kafka&gt; page" class="untitled">`+
 		`A &lt;kafka&gt; page</a>`)
 	assert.Contains(t, body, `<span class="path" title="https://named.example/a/b"><b>named.example</b> › a › b</span>`,
 		"its address above it")
@@ -748,7 +752,7 @@ func TestUI_SearchNamedByBookmark(t *testing.T) {
 	assert.Contains(t, body, `<a href="/ui/documents/`+titledDoc.ID+`" title="Kafka &lt;partitions&gt;">Kafka &lt;partitions&gt;</a>`)
 
 	page := getPage(t, srv, "/ui/documents/"+titledDoc.ID, http.StatusOK)
-	assert.Contains(t, page, `<li><a href="/ui/documents/`+named.ID+`" title="A &lt;kafka&gt; page" class="from-bookmark">`+
+	assert.Contains(t, page, `<li><a href="/ui/documents/`+named.ID+`" title="A &lt;kafka&gt; page" class="untitled">`+
 		`A &lt;kafka&gt; page</a>`)
 	assert.Contains(t, page, `<li><a href="/ui/documents/`+bare.ID+`" title="https://bare.example/x/y" class="untitled">`+
 		`bare.example/x/y</a>`)
@@ -1007,7 +1011,7 @@ func TestUI_SearchType(t *testing.T) {
 	require.Positive(t, searched, "the searches above embed their query")
 	for _, path := range []string{"/ui/?q=kafka&content_type=bogus", "/ui/?content_type=bogus"} {
 		body := getPage(t, srv, path, http.StatusBadRequest)
-		assert.Contains(t, body, `<div class="big-code">400</div>`+"\n<h1>bad request</h1>", path)
+		assert.Contains(t, body, `<p class="error-code">Error 400 · bad request</p>`, path)
 		assert.Contains(t, body, `must be one of: article, repo, video, pdf, thread, unknown`, path)
 		assert.Contains(t, body, `<a class="btn btn-primary" href="/ui/">Start over</a>`, path)
 	}
@@ -1020,7 +1024,7 @@ func TestUI_SearchType(t *testing.T) {
 var moreRE = regexp.MustCompile(`<div class="load-more" id="more"><a class="btn" href="([^"]+)"`)
 
 // docLinkRE finds the documents a list links to, by their names.
-var docLinkRE = regexp.MustCompile(`<a class="doc-title(?: untitled| from-bookmark)?" href="/ui/documents/([^"]+)"`)
+var docLinkRE = regexp.MustCompile(`<a class="doc-title(?: untitled)?" href="/ui/documents/([^"]+)"`)
 
 // assetRE finds the first asset a page loads.
 var assetRE = regexp.MustCompile(`(?:href|src)="(/ui/static/[^"]+)"`)
@@ -1042,7 +1046,7 @@ func TestUI_Library(t *testing.T) {
 	}
 	assert.Contains(t, all, `<span class="doc-error" title="HTTP 503 from the origin"><span class="err-cause">Other</span> `+
 		`<span class="msg">HTTP 503 from the origin</span></span>`)
-	assert.Contains(t, all, `<a class="doc-title from-bookmark" href="/ui/documents/`+failedDoc.ID+
+	assert.Contains(t, all, `<a class="doc-title untitled" href="/ui/documents/`+failedDoc.ID+
 		`" title="A failed &lt;paper&gt;">A failed &lt;paper&gt;</a>`+"\n"+
 		`<span class="doc-sub"><span class="host" title="https://arxiv.example/failed">arxiv.example/failed</span>`,
 		"an untitled document by its bookmark's title, its short URL under it")
@@ -1104,7 +1108,7 @@ func TestUI_Library(t *testing.T) {
 	for _, query := range []string{"state=bogus", "content_type=bogus", "cursor=not-a-cursor", "order=bogus",
 		"order=saved&state=bogus", "order=SAVED"} {
 		body := getPage(t, srv, "/ui/library?"+query, http.StatusBadRequest)
-		assert.Contains(t, body, `<div class="big-code">400</div>`+"\n<h1>bad request</h1>", query)
+		assert.Contains(t, body, `<p class="error-code">Error 400 · bad request</p>`, query)
 		assert.Contains(t, body, `<a class="btn btn-primary" href="/ui/library">Start over</a>`, query)
 	}
 	for _, query := range []string{"order=updated", "order=", "order=updated&content_type=&host=&folder=", "source=bogus"} {
@@ -1160,11 +1164,11 @@ func TestUI_LibrarySaved(t *testing.T) {
 		`<span class="doc-sub"><span class="host" title="https://arxiv.example/paper">arxiv.example/paper</span>`+
 		`<span class="sep wide">·</span><span class="wide">safari</span>`, "a titled document by its title, whatever the save's")
 	assert.Contains(t, body, `<span class="sep wide">·</span><span class="wide" title="/Research/ML">chrome</span>`)
-	assert.Contains(t, body, `<a class="doc-title from-bookmark" href="/ui/documents/`+blocked.ID+
+	assert.Contains(t, body, `<a class="doc-title untitled" href="/ui/documents/`+blocked.ID+
 		`" title="Blocked page">Blocked page</a>`)
 	assert.Contains(t, body, `<span class="err-cause">Blocked by bot protection</span> `+
 		`<span class="msg">origin blocked the request (likely anti-bot)</span>`)
-	assert.Contains(t, body, `<span class="doc-title from-bookmark" title="No &lt;document&gt;">No &lt;document&gt;</span>`+
+	assert.Contains(t, body, `<span class="doc-title untitled" title="No &lt;document&gt;">No &lt;document&gt;</span>`+
 		"\n"+`<span class="doc-sub"><span class="host" title="https://gone.example/x">gone.example/x</span>`)
 	assert.Contains(t, body, `<td class="state-cell"></td>`+"\n"+`<td class="c-type"></td>`, "a save without a document")
 	assert.Contains(t, body, `<a class="doc-title untitled" href="/ui/documents/`+bare.ID+`" title="https://bare.example/x">`+
@@ -1429,7 +1433,7 @@ func TestUI_LibraryPages(t *testing.T) {
 	form := getPage(t, srv, "/ui/library?cause=anti_bot", http.StatusOK)
 	assert.Contains(t, form, `<input type="hidden" name="cause" value="anti_bot">`, "filtering again keeps the cause")
 	body := getPage(t, srv, "/ui/library?cause=bogus", http.StatusBadRequest)
-	assert.Contains(t, body, `<div class="big-code">400</div>`+"\n<h1>bad request</h1>")
+	assert.Contains(t, body, `<p class="error-code">Error 400 · bad request</p>`)
 }
 
 // TestUI_LibraryShown: shown counts the rows a page appends to, in either
@@ -1670,7 +1674,7 @@ func TestUI_DocumentNamedByBookmark(t *testing.T) {
 	save(t, srv, store.Bookmark{URL: blocked.URL, Title: new("  A <blocked> page "), Source: store.SourceChrome})
 	body := getPage(t, srv, "/ui/documents/"+blocked.ID, http.StatusOK)
 	assert.Contains(t, body, `<title>A &lt;blocked&gt; page · curio</title>`)
-	assert.Contains(t, body, `<h1 class="from-bookmark">A &lt;blocked&gt; page</h1>`+"\n"+`<p class="doc-url">`)
+	assert.Contains(t, body, `<h1 class="untitled">A &lt;blocked&gt; page</h1>`+"\n"+`<p class="doc-url">`)
 	assert.Contains(t, body, `<a href="https://blocked.example/a/b/" rel="noopener noreferrer" target="_blank">`+
 		`https://blocked.example/a/b/</a>`)
 
@@ -1678,7 +1682,7 @@ func TestUI_DocumentNamedByBookmark(t *testing.T) {
 	save(t, srv, store.Bookmark{URL: bare.URL, Title: new(" "), Source: store.SourceChrome})
 	body = getPage(t, srv, "/ui/documents/"+bare.ID, http.StatusOK)
 	assert.Contains(t, body, `<title>https://bare.example/x · curio</title>`)
-	assert.Contains(t, body, "<h1>bare.example/x</h1>", "a blank bookmark title names nothing")
+	assert.Contains(t, body, `<h1 class="untitled">bare.example/x</h1>`, "a blank bookmark title names nothing")
 }
 
 // TestUI_DocumentRemoteImagesOn: with ui.load_remote_images, every
@@ -1848,7 +1852,7 @@ func TestUI_Interests(t *testing.T) {
 	one := getPage(t, srv, "/ui/interests/"+interest, http.StatusOK)
 	assert.Contains(t, one, "<h1>Stream &lt;processing&gt;</h1>")
 	assert.Contains(t, one, `<span class="badge badge-accent plain">4 documents</span>`)
-	assert.Regexp(t, `<span class="sep">·</span><span class="text">run of \d{4}-\d\d-\d\d \d\d:\d\d</span>`+
+	assert.Regexp(t, `<span class="sep">·</span><span class="text">rebuilt \d{4}-\d\d-\d\d \d\d:\d\d</span>`+
 		`<a class="map-link" href="/ui/interests/map\?select=interest%3A`+interest+`">`, one)
 	assert.Contains(t, one, `<a class="doc-title untitled" href="/ui/documents/`+b.ID+
 		`" title="https://example.com/b">example.com/b</a>`)
@@ -1909,13 +1913,13 @@ func TestUI_InterestsAreas(t *testing.T) {
 
 	page := getPage(t, srv, "/ui/interests/"+area, http.StatusOK)
 	assert.Regexp(t, `<h1><svg class="icon"[^>]*>.*?</svg>Streams &lt;and&gt; logs</h1>`, page)
-	assert.Contains(t, page, `<span class="badge plain">7 interests</span><span class="badge plain">1 loose fit</span>`)
+	assert.Contains(t, page, `<span class="badge plain">7 interests</span><span class="badge plain" title="Loose fits are close to this interest without being grouped in it, and never name it">1 loose fit</span>`)
 	assert.Contains(t, page, `<span class="sep">›</span><span class="truncate" aria-current="page" `+
 		`title="Streams &lt;and&gt; logs">Streams &lt;and&gt; logs</span></nav>`)
 	assert.Equal(t, 7, strings.Count(page, `<li class="card interest">`), "every interest of the area, on one page")
 	assert.Contains(t, page, `<a href="/ui/documents/`+a.ID+`" title="Kafka partitions">Kafka partitions</a>`,
 		"each with its members")
-	assert.Contains(t, page, `<span><b>2</b> documents</span><span><b>1</b> loose fit</span>`, "and its loose fits")
+	assert.Contains(t, page, `<span><b>2</b> documents</span><span title="Loose fits are close to this interest without being grouped in it, and never name it"><b>1</b> loose fit</span>`, "and its loose fits")
 	assert.NotContains(t, page, `class="pager"`)
 	past := getPage(t, srv, "/ui/interests/"+area+"?page=2", http.StatusNotFound)
 	assert.Contains(t, past, "<h2>No page 2</h2>", "an area's interests are paged")
@@ -1926,7 +1930,7 @@ func TestUI_InterestsAreas(t *testing.T) {
 		`<span class="sep">›</span><a class="truncate" href="/ui/interests/`+area+`" title="Streams &lt;and&gt; logs">`+
 		`Streams &lt;and&gt; logs</a><span class="sep">›</span><span class="truncate" aria-current="page" title="Kafka">`+
 		`Kafka</span></nav>`)
-	assert.Contains(t, one, `<span class="badge plain">1 loose fit</span>`)
+	assert.Contains(t, one, `<span class="badge plain" title="Loose fits are close to this interest without being grouped in it, and never name it">1 loose fit</span>`)
 	head := strings.Index(one, `<h2 id="loose-fits">Loose fits</h2>`)
 	require.Positive(t, head, "the loose fits under their own heading")
 	assert.Contains(t, one[head:], `<td class="num muted">3</td>`, "ranked after the members")
@@ -1979,7 +1983,7 @@ func TestUI_InterestsPages(t *testing.T) {
 	srv := apitest.Start(t)
 	lens := srv.AddDocument(t, "https://d1.awsstatic.com/whitepapers/AWS-Serverless-Applications-Lens.pdf",
 		store.DocStateFetched)
-	save(t, srv, store.Bookmark{URL: lens.URL, Title: new("AWS Serverless Application Lens"), Source: store.SourceChrome})
+	save(t, srv, store.Bookmark{URL: lens.URL, Title: new("Field Guide to Queue Design"), Source: store.SourceChrome})
 	bare := srv.AddDocument(t, "https://example.com/bare", store.DocStateFetched)
 	interests := make([]apitest.Interest, 0, 30)
 	for i := range 30 {
@@ -1995,8 +1999,8 @@ func TestUI_InterestsPages(t *testing.T) {
 	assert.NotContains(t, first, "Topic 24")
 	assert.Contains(t, first, `<span class="pager-summary">Interests 1–24 of 30</span>`)
 	assert.Contains(t, first, `<a class="step" id="pager-next" href="/ui/interests?page=2&amp;run=`+run+`" rel="next">`)
-	assert.Contains(t, first, `<li><a class="from-bookmark" href="/ui/documents/`+lens.ID+
-		`" title="AWS Serverless Application Lens">AWS Serverless Application Lens</a></li>`)
+	assert.Contains(t, first, `<li><a class="untitled" href="/ui/documents/`+lens.ID+
+		`" title="Field Guide to Queue Design">Field Guide to Queue Design</a></li>`)
 	assert.Contains(t, first, `<li><a class="untitled" href="/ui/documents/`+bare.ID+
 		`" title="https://example.com/bare">example.com/bare</a></li>`)
 
@@ -2072,7 +2076,7 @@ func TestUI_InterestPages(t *testing.T) {
 	assert.Contains(t, second, `<td class="num muted">51</td>`)
 	assert.Contains(t, second, `<td class="num muted">60</td>`)
 	assert.Contains(t, second, `<span class="pager-summary">Documents 51–60 of 60, most similar first</span>`)
-	assert.Contains(t, second, `<a class="doc-title from-bookmark" href="/ui/documents/`+docs[55].ID+
+	assert.Contains(t, second, `<a class="doc-title untitled" href="/ui/documents/`+docs[55].ID+
 		`" title="Saved &lt;as&gt; this">Saved &lt;as&gt; this</a>`+"\n"+
 		`<span class="doc-sub"><span class="host" title="`+docs[55].URL+`">example.com/55</span>`)
 
@@ -2105,7 +2109,7 @@ func TestUI_InterestRunDegrades(t *testing.T) {
 			p := get(t, srv, "/ui/interests/"+interest.Interests[0])
 			require.Equal(t, http.StatusOK, p.status, p.body)
 			assert.Contains(t, p.body, "<h1>Kafka</h1>")
-			assert.NotContains(t, p.body, "run of")
+			assert.NotContains(t, p.body, `<span class="text">rebuilt `)
 			assert.NotContains(t, p.body, "panel-error")
 			errs := rec.errors()
 			require.Len(t, errs, tc.logged)
@@ -2191,8 +2195,8 @@ func TestUI_InterestsCoverage(t *testing.T) {
 		`<span class="item"><span class="swatch swatch-accent-border"></span><span class="n">1</span> loose fit <span class="pct">13%</span></span>`+
 		`<span class="item"><span class="swatch swatch-neutral"></span><span class="n">2</span> new since the rebuild <span class="pct">25%</span></span>`+
 		`<span class="item"><span class="swatch swatch-track"></span><span class="n">2</span> unsorted <span class="pct">25%</span></span>`)
-	assert.Regexp(t, `<span class="item run">Run of [^<]+ · fresh · 6 documents</span>`, page)
-	assert.Contains(t, page, `<span><b>3</b> documents</span><span><b>1</b> loose fit</span><span class="new"><b>1</b> new</span>`)
+	assert.Regexp(t, `<span class="item run">Rebuilt [^<]+, regrouped from scratch · 6 documents</span>`, page)
+	assert.Contains(t, page, `<span><b>3</b> documents</span><span title="Loose fits are close to this interest without being grouped in it, and never name it"><b>1</b> loose fit</span><span class="new"><b>1</b> new</span>`)
 	assert.Contains(t, page, `<li class="card interest unsorted"><h2>`)
 	assert.Contains(t, page, `<a href="/ui/interests/unsorted?run=`+run.ID+`">Unsorted</a></h2>`+"\n"+
 		`<div class="stats"><span><b>2</b> documents</span><span class="new"><b>1</b> new</span></div>`)
@@ -2430,7 +2434,7 @@ func TestUI_ChangesPage(t *testing.T) {
 	assert.Contains(t, resp.body, "<h2 id=\"events-0\">Dissolved</h2>")
 	assert.Contains(t, resp.body, `<a class="ref" href="/ui/interests/`+moved.Interests[3]+`" title="Bonds">Bonds</a> `+
 		`<span class="tag">retired</span> dissolved`)
-	assert.Regexp(t, `<p class="lede">The rebuild of <time datetime="[^"]+" title="[^"]+">[^<]+</time>: asked for, warm\.</p>`,
+	assert.Regexp(t, `<p class="lede">The rebuild of <time datetime="[^"]+" title="[^"]+">[^<]+</time>: you asked for it, updated in place\.</p>`,
 		resp.body)
 }
 
@@ -2497,7 +2501,7 @@ func TestUI_DocumentPlace(t *testing.T) {
 	}
 	assert.Contains(t, getPage(t, srv, "/ui/documents/"+d[0].ID, http.StatusOK), `In `+area+` › `+kafka+
 		`<a class="map-link" href="/ui/interests/map?select=document%3A`+d[0].ID+`">`)
-	assert.Contains(t, getPage(t, srv, "/ui/documents/"+d[1].ID, http.StatusOK), `Loose fit of `+area+` › `+kafka)
+	assert.Contains(t, getPage(t, srv, "/ui/documents/"+d[1].ID, http.StatusOK), `<span title="Loose fits are close to this interest without being grouped in it, and never name it">Loose fit of</span> `+area+` › `+kafka)
 	assert.Contains(t, getPage(t, srv, "/ui/documents/"+d[2].ID, http.StatusOK),
 		`In <a href="/ui/interests/unsorted">Unsorted</a> · nearest `+kafka)
 	assert.Contains(t, getPage(t, srv, "/ui/documents/"+d[3].ID, http.StatusOK), `New since the last rebuild: in `+area+` › `+kafka)
@@ -2681,4 +2685,35 @@ func TestUI_GETNeverWrites(t *testing.T) {
 		assert.Less(t, p.status, http.StatusInternalServerError, path)
 	}
 	assert.Equal(t, before, fingerprint(t, srv))
+}
+
+// TestUI_SearchWordless: a search whose words only a bookmark's folder
+// holds is no wordless search, though no passage uses them; one whose
+// words nothing holds is; and POST /v1/search reports the documents the
+// fields and title lists matched.
+func TestUI_SearchWordless(t *testing.T) {
+	srv := apitest.Start(t, apitest.DocumentLists)
+	doc := titled(t, srv, "https://example.com/plains", "Herds", store.DocStateFetched)
+	srv.AddContent(t, doc, "herds crossing the plains each season")
+	srv.AddBookmark(t, doc.URL, store.SourceChrome, "Herds", "/Zebra Migration")
+
+	got := searchAPI(t, srv, `{"query":"zebra migration"}`)
+	assert.Zero(t, got.BM25Hits, "no passage uses the words")
+	assert.Equal(t, 1, got.FieldsHits, "the folder does")
+	assert.Zero(t, got.TitleHits)
+
+	page := getPage(t, srv, "/ui/?q=zebra+migration", http.StatusOK)
+	assert.Contains(t, page, `<li class="result">`)
+	assert.NotContains(t, page, "Nothing in your library uses these words", "the folder holds them")
+	assert.NotContains(t, page, "Nearest by meaning")
+
+	got = searchAPI(t, srv, `{"query":"qqxzzv wwkkq"}`)
+	assert.Zero(t, got.BM25Hits+got.FieldsHits+got.TitleHits)
+	nothing := getPage(t, srv, "/ui/?q=qqxzzv+wwkkq", http.StatusOK)
+	if got.Total > 0 {
+		assert.Contains(t, nothing, "Nothing in your library uses these words")
+		assert.Contains(t, nothing, "<strong>Nearest by meaning</strong>")
+	} else {
+		assert.Contains(t, nothing, "Nothing in your library matches")
+	}
 }

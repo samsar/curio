@@ -226,6 +226,13 @@ type Result struct {
 	Query      string
 	BM25Hits   int
 	VectorHits int
+	// FieldsHits and TitleHits are how many distinct documents the fields
+	// list and the title list matched by the words, over every query of
+	// the search, each list read at most documentListDepth deep: with
+	// BM25Hits, whether the words matched anything at all. Related sets
+	// neither.
+	FieldsHits int
+	TitleHits  int
 	Items      []Hit
 	// Total is how many documents Search ranked, at most store.MaxSearchK,
 	// and Capped is set when more matched than it ranks. Related sets
@@ -359,6 +366,7 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 	timings.Hydrate = time.Since(hydrateStart)
 	res.BM25Hits = len(bm25ByID)
 	res.VectorHits = len(vecByID)
+	res.FieldsHits, res.TitleHits = wordDocuments(read.queries)
 	res.Items = items
 	timings.Total = time.Since(began)
 	res.Timings = timings
@@ -446,6 +454,22 @@ func chunkHits(hits []queryHits, degraded bool) (bm25ByID, vecByID map[string]st
 		}
 	}
 	return bm25ByID, vecByID
+}
+
+// wordDocuments counts the distinct documents the fields lists and the
+// title lists of hits returned, each over every query.
+func wordDocuments(hits []queryHits) (fields, titles int) {
+	count := func(list func(queryHits) []store.DocumentHit) int {
+		seen := map[string]bool{}
+		for _, h := range hits {
+			for _, d := range list(h) {
+				seen[d.DocumentID] = true
+			}
+		}
+		return len(seen)
+	}
+	return count(func(h queryHits) []store.DocumentHit { return h.fields }),
+		count(func(h queryHits) []store.DocumentHit { return h.titles })
 }
 
 // snippetQuery is what the window's snippets mark: the OR of every chunk

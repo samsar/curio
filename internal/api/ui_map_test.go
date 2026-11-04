@@ -142,7 +142,7 @@ func TestInterestMapPage_ReadsOneRun(t *testing.T) {
 
 	for _, query := range []string{"?view=map", "?select=nope", "?select=area:", "?select=planet:x"} {
 		resp := mapPage(t, s, query, http.StatusBadRequest)
-		assert.Contains(t, resp.body, "want", query)
+		assert.Contains(t, resp.body, `<a class="btn btn-primary" href="/ui/interests/map">Show the map</a>`, query)
 	}
 	assert.Zero(t, reads.total(), "a refused query reads nothing")
 

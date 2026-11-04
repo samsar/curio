@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/microcosm-cc/bluemonday"
@@ -105,12 +106,13 @@ func newMarkdown() *markdown {
 	}
 }
 
-// render renders src, a document's stored markdown whose URL is base. With
+// render renders src, a document's stored markdown whose URL is base,
+// leaving out its first heading when it says title (the page's own). With
 // images, https images are shown; otherwise, and for any other image, the
 // image is its alt text, linking to it when it is an http or https URL. A
 // text over a formatting budget or limit comes back Unformatted.
-func (m *markdown) render(src []byte, base string, images bool) (Text, error) {
-	html, remote, err := m.format(src, base, images)
+func (m *markdown) render(src []byte, base, title string, images bool) (Text, error) {
+	html, remote, err := m.format(src, base, title, images)
 	if over, ok := errors.AsType[*budgetError](err); ok {
 		return Text{Unformatted: over.reason, Source: string(src)}, nil
 	}
@@ -126,7 +128,7 @@ func (m *markdown) render(src []byte, base string, images bool) (Text, error) {
 // before they are resolved, and the limits all along. A check of the
 // limits that fails panics with its *budgetError to unwind goldmark, and
 // is recovered here; any other panic goes on.
-func (m *markdown) format(src []byte, base string, images bool) (sanitized template.HTML, remote int, err error) {
+func (m *markdown) format(src []byte, base, title string, images bool) (sanitized template.HTML, remote int, err error) {
 	if err := checkShape(src); err != nil {
 		return "", 0, err
 	}
@@ -141,7 +143,7 @@ func (m *markdown) format(src []byte, base string, images bool) (sanitized templ
 			sanitized, remote, err = "", 0, over
 		}
 	}()
-	st := &linkState{images: images, limits: limits}
+	st := &linkState{images: images, limits: limits, title: title}
 	if u, err := url.Parse(base); err == nil && u.IsAbs() {
 		st.base = u
 	}
@@ -220,9 +222,10 @@ type linkState struct {
 	base      *url.URL // the document's URL; nil leaves nothing to resolve against
 	images    bool     // show https images
 	limits    *formatLimits
-	remote    int   // http and https images seen
-	linkBytes int   // the links' and images' destinations and titles, as stored
-	over      error // errLinkBytes once linkBytes passes maxLinkBytes
+	remote    int    // http and https images seen
+	linkBytes int    // the links' and images' destinations and titles, as stored
+	over      error  // errLinkBytes once linkBytes passes maxLinkBytes
+	title     string // the page's heading: a first heading saying it goes
 }
 
 // resolve resolves dest against the document's URL. It reports false for
@@ -278,8 +281,12 @@ func (linkTransformer) Transform(doc *ast.Document, reader text.Reader, pc parse
 	if !ok {
 		return // a parse without format's context: nothing to resolve against
 	}
-	links, autoLinks, images := collectLinks(doc)
 	source := reader.Source()
+	// A text of the heading alone keeps it: the page would show nothing.
+	if first := doc.FirstChild(); first != nil && first.NextSibling() != nil && sameHeading(first, source, st.title) {
+		doc.RemoveChild(doc, first)
+	}
+	links, autoLinks, images := collectLinks(doc)
 	for _, l := range links {
 		if !st.charge(l.Destination, l.Title) {
 			return
@@ -304,6 +311,47 @@ func (linkTransformer) Transform(doc *ast.Document, reader text.Reader, pc parse
 		st.replaceImage(img, source)
 	}
 }
+
+// sameHeading reports whether n is a level 1 or 2 heading that says what
+// title says, as normalized (sameWords): the page's own heading, which a
+// stored text often opens with. Its text is read as far as a title's
+// length allows, so a long heading costs no more than the title.
+func sameHeading(n ast.Node, source []byte, title string) bool {
+	h, ok := n.(*ast.Heading)
+	if !ok || h.Level > 2 || strings.TrimSpace(title) == "" {
+		return false
+	}
+	limit := 4*len(title) + 64
+	var b strings.Builder
+	over := false
+	walk(h, func(c ast.Node) {
+		if over {
+			return
+		}
+		switch t := c.(type) {
+		case *ast.Text:
+			b.Write(t.Segment.Value(source))
+			if t.SoftLineBreak() || t.HardLineBreak() {
+				b.WriteByte(' ')
+			}
+		case *ast.String:
+			b.Write(t.Value)
+		}
+		over = b.Len() > limit
+	})
+	return !over && sameWords(b.String(), title)
+}
+
+// sameWords reports whether a and b are the same words, ignoring case,
+// punctuation and spacing: "Kafka: The Guide" is "kafka the guide".
+func sameWords(a, b string) bool {
+	norm := func(s string) string { return strings.Join(strings.FieldsFunc(strings.ToLower(s), notWord), " ") }
+	na := norm(a)
+	return na != "" && na == norm(b)
+}
+
+// notWord reports whether r separates words: neither a letter nor a digit.
+func notWord(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }
 
 // collectLinks returns the links, autolinks and images under doc, except
 // those inside an image: all an image holds is written as its text, its
