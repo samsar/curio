@@ -31,6 +31,7 @@ import (
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
 	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
+	"github.com/samsar/curio/internal/summarize"
 	"github.com/samsar/curio/internal/understand"
 	"github.com/samsar/curio/internal/version"
 )
@@ -262,6 +263,11 @@ func start(ctx context.Context, cfg config.Config, home *curiohome.Home, meta cu
 	if d.reembedding, err = startReembed(ctx, d.reembed, fields); err != nil {
 		return nil, err
 	}
+	// After the orphans too: a summarize job a crash left running is
+	// pending again, and isn't queued twice.
+	if err := startSummaries(ctx, d.summaries); err != nil {
+		return nil, err
+	}
 	// One check of the interests before the full API is up, so its first
 	// healthz has the scheduler's state. A rebuild that is due (a library
 	// whose interests an upgrade dropped) is queued once the drift monitor
@@ -302,20 +308,36 @@ func startReembed(ctx context.Context, r *jobs.Reembed, fields api.DocumentField
 	return began, nil
 }
 
+// startSummaries begins the summary pass (jobs.Summaries.Start): it counts
+// what is left to write and queues the first pages. Like startReembed it
+// never fails the start but for a shutdown during it: a daemon that can't
+// begin the pass serves everything else, and its feed tries again at its
+// first check.
+func startSummaries(ctx context.Context, s *jobs.Summaries) error {
+	err := s.Start(ctx)
+	switch {
+	case err != nil && ctx.Err() != nil:
+		return err
+	case err != nil:
+		slog.Error("summaries: couldn't begin the summary pass; its feed tries again at its next check", "err", err)
+	}
+	return nil
+}
+
 // ensureDocumentFields makes the documents' search fields right before any
-// search reads them (sqlite.EnsureDocumentFields): it repairs their index
-// when it disagrees with them, and derives the fields a new home, an
-// upgrade or a change of the derivation's rules left missing. It never
-// fails the start but for a shutdown during it: a daemon that can't do
-// this still serves everything but a complete search, where failing would
-// leave launchd restarting it every 10 s for as long as the fault lasts,
-// serving nothing. What it found is reported on healthz, for status and
-// doctor, and the next start tries again.
+// search reads them (sqlite.EnsureDocumentFields): it repairs their index,
+// or the summaries', when it disagrees with its rows, and derives the
+// fields a new home, an upgrade or a change of the derivation's rules left
+// missing. It never fails the start but for a shutdown during it: a daemon
+// that can't do this still serves everything but a complete search, where
+// failing would leave launchd restarting it every 10 s for as long as the
+// fault lasts, serving nothing. What it found is reported on healthz, for
+// status and doctor, and the next start tries again.
 func ensureDocumentFields(ctx context.Context, db *sqlitestore.DB) (api.DocumentFields, error) {
 	done, err := sqlitestore.EnsureDocumentFields(ctx, db)
 	fields := api.DocumentFields{CheckedAt: time.Now(), Rebuilt: done.Rebuilt}
-	if done.Rebuilt {
-		slog.Warn("document fields: their search index didn't match them; rebuilt it from them")
+	for _, index := range done.RebuiltIndexes {
+		slog.Warn("document fields: a search index didn't match its rows; rebuilt it from them", "index", index)
 	}
 	switch {
 	case err != nil && ctx.Err() != nil:
@@ -463,6 +485,15 @@ type daemon struct {
 	// while reembedding: start began one.
 	reembed     *jobs.Reembed
 	reembedding bool
+	// summaries feeds the summary pass, which serve runs.
+	summaries *jobs.Summaries
+}
+
+// passTiming is the summary pass's timing: the window after the person's
+// last use of a model before a call, how often the feed checks, and its
+// brake's pauses; each zero is the design's (summaryTiming).
+type passTiming struct {
+	quiet, check, brakeMin, brakeMax time.Duration
 }
 
 // started is what the start did to the derived rows, which healthz
@@ -521,14 +552,30 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 		Log:            slog.Default(),
 	})
 	engine := search.New(chunks, docs, index, emb, search.ConfigFrom(cfg))
+	timing, err := summaryTiming()
+	if err != nil {
+		return nil, err
+	}
+	// The person's use of the models, which the summary pass yields to:
+	// searches, the planner's calls and a rebuild's labels.
+	foreground := jobs.NewForeground(timing.quiet)
 	// Built only while its role is in use: with search.understand off, a
 	// search that asks to be understood is told it is off.
 	var planner *planner
 	if slices.Contains(cfg.RolesInUse(), config.RolePlanner) {
-		if planner, err = newPlanner(ctx, cfg); err != nil {
+		if planner, err = newPlanner(ctx, cfg, foreground.Begin); err != nil {
 			return nil, err
 		}
 	}
+	// Built whether or not summaries are on: off, it writes nothing, and
+	// the summarize jobs left from before drain without a call.
+	summaries := sqlitestore.NewSummaries(db)
+	writer, err := newSummaryWriter(cfg)
+	if err != nil {
+		return nil, err
+	}
+	feed := jobs.NewSummaries(jobs.SummariesOptions{Store: summaries, Writer: writer, TenantID: store.LocalTenantID,
+		CheckEvery: timing.check, BrakeMin: timing.brakeMin, BrakeMax: timing.brakeMax, Log: slog.Default()})
 
 	// A change of build is verified by re-embedding a sample through the
 	// indexer, so the requests are the ones that made the stored vectors,
@@ -563,6 +610,11 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 		DocumentIndex: index,
 		Hold:          hold,
 		Reembed:       reembed,
+		Summaries:     summaries,
+		Writer:        writer,
+		SummaryFeed:   feed,
+		Foreground:    foreground,
+		Pace:          gate,
 		Log:           slog.Default(),
 	}
 	// With insight off nothing is rebuilt or placed on its own: there is
@@ -576,7 +628,7 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 			MapOff: !cfg.Insight.Map, Log: slog.Default()})
 		jobDeps.Placer = placer
 	}
-	insightEngine, err := newInsightEngine(cfg, docs, chunks, insights, queue, placer, drifted)
+	insightEngine, err := newInsightEngine(cfg, docs, chunks, insights, queue, placer, drifted, foreground.Begin)
 	if err != nil {
 		return nil, err
 	}
@@ -589,7 +641,8 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 		jobDeps.KickInterests = scheduler.Kick
 	}
 
-	pools := jobs.NewPools(jobDeps, sizes, jobs.WorkerOptions{Gate: jobs.All(gate, hold), Log: slog.Default()})
+	pools := jobs.NewPools(jobDeps, sizes, jobs.WorkerOptions{Gate: jobs.All(gate, hold, foreground),
+		Log: slog.Default()})
 	// The Jina fallback is the one upstream whose health is tracked.
 	upstreams := func() []fetcher.UpstreamHealth { return []fetcher.UpstreamHealth{native.JinaHealth()} }
 	keeper := newKeeper(gate, queue, pools)
@@ -621,6 +674,10 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 		SavedDates:      savedDates,
 		Reembed:         reembed,
 		Hold:            hold,
+		Summaries:       summaries,
+		SummaryWriter:   writer,
+		SummaryFeed:     feed,
+		Foreground:      foreground,
 		Log:             slog.Default(),
 	}
 	if scheduler != nil {
@@ -630,7 +687,19 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 		apiDeps.Planner = planner
 	}
 	return &daemon{apiDeps: apiDeps, pools: pools, drift: driftMonitor, keeper: keeper, scheduler: scheduler,
-		savedDates: savedDates, planner: planner, hold: hold, reembed: reembed}, nil
+		savedDates: savedDates, planner: planner, hold: hold, reembed: reembed, summaries: feed}, nil
+}
+
+// newSummaryWriter builds the summaries' writer, writing with the
+// summaries role's model. With summaries off it writes nothing; a provider
+// without structured output gets a writer that writes nothing, logged
+// once.
+func newSummaryWriter(cfg config.Config) (*summarize.Writer, error) {
+	gen, err := generator.New(cfg.Generation.Role(config.RoleSummaries))
+	if err != nil {
+		return nil, err
+	}
+	return summarize.New(gen, summarize.OptionsFrom(cfg)), nil
 }
 
 // planner is search's planner, and the end of its background work's
@@ -641,18 +710,21 @@ type planner struct {
 }
 
 // newPlanner builds search's planner, writing with the planner role's
-// model. Its background work, loading and checking that model, runs on a
+// model, telling using of each call it makes of it (the summary pass yields
+// to them). Its background work, loading and checking that model, runs on a
 // context of ctx, the daemon's lifetime, never a request's: a request
 // cancelled during a cold load would abort the load itself. A provider
 // without structured output gets a planner that answers every question
 // off, logged once.
-func newPlanner(ctx context.Context, cfg config.Config) (*planner, error) {
+func newPlanner(ctx context.Context, cfg config.Config, using func() func()) (*planner, error) {
 	gen, err := generator.New(cfg.Generation.Role(config.RolePlanner))
 	if err != nil {
 		return nil, err
 	}
+	opts := understand.OptionsFrom(cfg)
+	opts.Using = using
 	lifetime, stop := context.WithCancel(ctx)
-	return &planner{Planner: understand.New(lifetime, gen, understand.OptionsFrom(cfg)), stop: stop}, nil
+	return &planner{Planner: understand.New(lifetime, gen, opts), stop: stop}, nil
 }
 
 // driftHold says how the embeddings drifted, as the monitor last reported
@@ -869,10 +941,10 @@ type pullTarget struct {
 // with embedding.auto_pull, then, with generation.auto_pull, the writing
 // model of each role in use that pulls alone (config.Role.PullsAlone),
 // each pulled once however many uses share it on one server. A role that
-// doesn't pull alone, the planner, joins a target another use pulls
-// already, and pulls nothing of its own: curio up pulls its model, with
-// consent. A role not in use pulls nothing: its multi-gigabyte model
-// would serve no one.
+// doesn't pull alone, the planner or the summaries, joins a target another
+// use pulls already, and pulls nothing of its own: curio up pulls its
+// model, with consent. A role not in use pulls nothing: its
+// multi-gigabyte model would serve no one.
 func pullTargets(cfg config.Config) []pullTarget {
 	var out []pullTarget
 	find := func(baseURL, model string) int {
@@ -945,7 +1017,8 @@ func generationRoles(cfg config.Config) map[string]string {
 // newInsightEngine builds the insight layer: group documents into labeled
 // areas and interests with the Louvain grouper, placing the documents
 // indexed during a rebuild with placer (nil places none) once it commits,
-// and asking queue whether a re-embedding still drains.
+// asking queue whether a re-embedding still drains, and telling using of a
+// rebuild's LLM labels, which the summary pass yields to.
 // While the labels role is in use the LLM labeler is always wired: whether
 // Ollama and the model are up is decided at each rebuild, where the engine
 // falls back to term labels for any run that can't reach them. A startup
@@ -953,6 +1026,7 @@ func generationRoles(cfg config.Config) map[string]string {
 // often auto-starts the daemon before the Ollama app is running.
 func newInsightEngine(cfg config.Config, docs store.DocumentStore, chunks store.ChunkStore,
 	insights store.InsightStore, queue store.JobStore, placer *insight.Placer, drifted func() string,
+	using func() func(),
 ) (*insight.Engine, error) {
 	var llmLabeler insight.Labeler
 	if slices.Contains(cfg.RolesInUse(), config.RoleLabels) {
@@ -970,6 +1044,7 @@ func newInsightEngine(cfg config.Config, docs store.DocumentStore, chunks store.
 		Drift:           drifted,
 		Indexing:        indexing(queue),
 		MapOff:          !cfg.Insight.Map,
+		Using:           using,
 	}, slog.Default()), nil
 }
 
@@ -987,10 +1062,11 @@ func indexing(queue store.JobStore) func(context.Context) (bool, error) {
 
 // serve runs the worker pools, the embedding drift monitor, the interest
 // scheduler, the keep-awake keeper, the retries of the saved-date
-// classifications owed, the embedder hold's probes and the re-embed's feed
-// alongside the API until ctx is cancelled or the API fails, then shuts
-// them down within the documented budget: the keeper releases its hold as
-// its context ends, and the planner's background work stops with its own.
+// classifications owed, the embedder hold's probes, the re-embed's feed and
+// the summary pass's alongside the API until ctx is cancelled or the API
+// fails, then shuts them down within the documented budget: the keeper
+// releases its hold as its context ends, and the planner's background work
+// stops with its own.
 func (d *daemon) serve(ctx context.Context, served *servingAPI) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -1006,6 +1082,7 @@ func (d *daemon) serve(ctx context.Context, served *servingAPI) error {
 	if d.reembedding {
 		workers.Go(func() { d.reembed.Run(ctx) })
 	}
+	workers.Go(func() { d.summaries.Run(ctx) })
 	for _, p := range d.pools {
 		for range p.Size {
 			workers.Go(func() {

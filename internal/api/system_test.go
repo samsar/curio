@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/samsar/curio/internal/jobs"
 	"github.com/samsar/curio/internal/ollama"
 	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/summarize"
 	"github.com/samsar/curio/internal/understand"
 )
 
@@ -270,6 +272,30 @@ func (failingReembedCount) CountToReembed(context.Context, string, int) (store.R
 type reembedAt struct{ progress jobs.ReembedProgress }
 
 func (r reembedAt) Progress() jobs.ReembedProgress { return r.progress }
+
+// writerAt is a summaries' writer in a state a test sets.
+type writerAt struct{ state summarize.State }
+
+func (w *writerAt) State() summarize.State { return w.state }
+func (w *writerAt) Identity() store.SummaryWriter {
+	return store.SummaryWriter{Model: w.state.Model, PromptVersion: w.state.PromptVersion}
+}
+
+// summaryFeedAt is a summary pass at a fixed rate and brake, which counts
+// its kicks.
+type summaryFeedAt struct {
+	progress jobs.SummaryProgress
+	counts   store.SummaryCounts
+	kicks    atomic.Int32
+}
+
+func (f *summaryFeedAt) Progress() jobs.SummaryProgress { return f.progress }
+func (f *summaryFeedAt) Kick()                          { f.kicks.Add(1) }
+func (f *summaryFeedAt) kicked() int                    { return int(f.kicks.Load()) }
+
+func (f *summaryFeedAt) Counts(context.Context) (store.SummaryCounts, time.Time, error) {
+	return f.counts, time.Now(), nil
+}
 
 // holdAt is an embedder hold in a fixed state.
 type holdAt struct{ state jobs.HoldState }

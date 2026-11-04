@@ -32,6 +32,21 @@ type Options struct {
 	// KeepAlive is how long the provider keeps the model loaded after the
 	// call. Zero uses the provider default (Ollama's is 5 minutes).
 	KeepAlive time.Duration
+	// Usage, when set, receives what the call cost as the provider reports
+	// it, for any reply it gave, one it can't use included.
+	Usage *Usage
+}
+
+// Usage is what a call cost, as its provider reports it: the tokens of
+// the prompt and of the reply, and how long loading the model, reading
+// the prompt and writing the reply took. A provider that reports none of
+// it leaves it zero.
+type Usage struct {
+	PromptTokens int
+	OutputTokens int
+	Load         time.Duration
+	PromptEval   time.Duration
+	Eval         time.Duration
 }
 
 // Errors of a structured reply the model gave but that can't be used.

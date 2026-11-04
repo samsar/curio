@@ -773,7 +773,7 @@ func (e *fieldsEnv) breakFieldsIndex(id, title string) {
 }
 
 // TestEnsureDocumentFields_RebuildsAnInconsistentIndex: an index that
-// disagrees with the fields fails its check as ErrFieldsIndexInconsistent,
+// disagrees with the fields fails its check as ErrSearchIndexInconsistent,
 // and a write over the row it disagrees on fails; EnsureDocumentFields
 // rebuilds it, after which it passes the check, searches the fields as
 // they are and takes writes. A consistent index isn't rebuilt.
@@ -793,7 +793,7 @@ func TestEnsureDocumentFields_RebuildsAnInconsistentIndex(t *testing.T) {
 		return hits
 	}
 	e.breakFieldsIndex(id, "Zookeeper quorum")
-	require.ErrorIs(t, checkFieldsIndex(e.ctx, e.db), ErrFieldsIndexInconsistent)
+	require.ErrorIs(t, checkIndex(e.ctx, e.db, "document_fields_fts"), ErrSearchIndexInconsistent)
 	assert.Empty(t, zookeeper(), "the index doesn't hold the title")
 	_, err = e.bms.Ingest(e.ctx, e.bookmark("https://example.com/a", store.SourceSafari, "Another title", ""))
 	require.ErrorContains(t, err, "malformed", "a write over the row fails")
@@ -801,6 +801,7 @@ func TestEnsureDocumentFields_RebuildsAnInconsistentIndex(t *testing.T) {
 	done, err = EnsureDocumentFields(e.ctx, e.db)
 	require.NoError(t, err)
 	assert.True(t, done.Rebuilt)
+	assert.Equal(t, []string{"document_fields_fts"}, done.RebuiltIndexes)
 	e.integrityCheck()
 	assert.Len(t, zookeeper(), 1, "the rebuilt index searches the title as stored")
 	e.ingest("https://example.com/a", store.SourceSafari, "Another title", "")

@@ -55,7 +55,22 @@ type Deps struct {
 	// Reembed is the re-embed for a new chunk context, topped up once each
 	// index job's outcome is recorded; nil when there is none.
 	Reembed *Reembed
-	Log     *slog.Logger
+	// Summaries are the documents' summaries the summarize jobs write.
+	Summaries store.SummaryStore
+	// Writer writes them; the summarize pool needs one, which may write
+	// nothing (summaries off), so the jobs left drain.
+	Writer SummaryWriter
+	// SummaryFeed is the summary pass, topped up once each summarize or
+	// index job's outcome is recorded, and told of each summary's
+	// outcome; nil feeds none.
+	SummaryFeed *Summaries
+	// Foreground is the person's use of the models, which the summary
+	// pass yields to; nil yields to none.
+	Foreground *Foreground
+	// Pace rests the summary pass after each job under the gentle
+	// throttle; nil rests none.
+	Pace Pacer
+	Log  *slog.Logger
 }
 
 // Placer places a document just indexed into the current interests (the

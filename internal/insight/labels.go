@@ -64,6 +64,10 @@ func (e *Engine) label(ctx context.Context, gr *grouped) ([]groupLabel, labelSta
 	if e.cfg.Labeling == LabelingLLM {
 		l.llm = e.llmLabeler
 	}
+	if l.llm != nil && e.cfg.Using != nil {
+		end := e.cfg.Using()
+		defer end()
+	}
 	// Every term label counts as a fallback when LLM labels were wanted,
 	// including the groups never offered to the model once it was switched
 	// off, so the warning reports how many lack an LLM name.

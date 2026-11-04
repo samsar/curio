@@ -2749,6 +2749,31 @@ func TestUI_GETNeverWrites(t *testing.T) {
 	assert.Equal(t, before, fingerprint(t, srv))
 }
 
+// TestUI_SearchWordsOnlyASummaryHolds: a search whose word only a page's
+// summary holds is no wordless search, though no passage, title, folder or
+// site uses it, and POST /v1/search counts the document the summary list
+// matched.
+func TestUI_SearchWordsOnlyASummaryHolds(t *testing.T) {
+	srv := apitest.Start(t, apitest.DocumentLists)
+	doc := titled(t, srv, "https://example.com/kettles", "Kettles", store.DocStateFetched)
+	ext := srv.AddContent(t, doc, "a kettle of copper on the stove")
+	require.NoError(t, srv.Deps.Summaries.PutSummary(context.Background(), apitest.TenantID, store.Summary{
+		DocumentID: doc.ID, ExtractionID: ext.ID, Kind: store.SummaryKindProduct,
+		About: "Brewcraft, a made-up kettle maker's copper kettle.", InputHash: "h",
+		SummaryWriter: store.SummaryWriter{Model: "a-model", PromptVersion: "p"}}))
+
+	got := searchAPI(t, srv, `{"query":"brewcraft"}`)
+	assert.Zero(t, got.BM25Hits+got.FieldsHits+got.TitleHits, "no passage, title, folder or site uses it")
+	assert.Equal(t, 1, got.SummaryHits, "the summary does")
+	require.NotEmpty(t, got.Items)
+	assert.Equal(t, doc.ID, got.Items[0].Document.ID)
+
+	page := getPage(t, srv, "/ui/?q=brewcraft", http.StatusOK)
+	assert.Contains(t, page, `<li class="result">`)
+	assert.NotContains(t, page, "Nothing in your library uses these words", "the summary holds it")
+	assert.NotContains(t, page, "Nearest by meaning")
+}
+
 // TestUI_SearchWordless: a search whose words only a bookmark's folder
 // holds is no wordless search, though no passage uses them; one whose
 // words nothing holds is; and POST /v1/search reports the documents the
@@ -2770,7 +2795,7 @@ func TestUI_SearchWordless(t *testing.T) {
 	assert.NotContains(t, page, "Nearest by meaning")
 
 	got = searchAPI(t, srv, `{"query":"qqxzzv wwkkq"}`)
-	assert.Zero(t, got.BM25Hits+got.FieldsHits+got.TitleHits)
+	assert.Zero(t, got.BM25Hits+got.FieldsHits+got.TitleHits+got.SummaryHits)
 	nothing := getPage(t, srv, "/ui/?q=qqxzzv+wwkkq", http.StatusOK)
 	if got.Total > 0 {
 		assert.Contains(t, nothing, "Nothing in your library uses these words")

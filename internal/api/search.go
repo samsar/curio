@@ -167,6 +167,7 @@ type SearchResponse struct {
 	VectorHits    int                 `json:"vector_hits"`
 	FieldsHits    int                 `json:"fields_hits"`
 	TitleHits     int                 `json:"title_hits"`
+	SummaryHits   int                 `json:"summary_hits"`
 	Total         int                 `json:"total"`
 	Capped        bool                `json:"capped"`
 	Degraded      bool                `json:"degraded,omitempty"`
@@ -222,6 +223,10 @@ func (d Deps) search(ctx context.Context, req SearchRequest) (SearchResponse, er
 		return SearchResponse{}, &requestError{err: err}
 	}
 
+	// The whole search, its plan, embed, reads and hydration, is the
+	// person's use of the models, which the summary pass yields to.
+	end := d.Foreground.Begin()
+	defer end()
 	start := time.Now()
 	plan, understanding, err := d.understand(ctx, req)
 	if err != nil {
@@ -257,6 +262,7 @@ func (d Deps) search(ctx context.Context, req SearchRequest) (SearchResponse, er
 		VectorHits:    res.VectorHits,
 		FieldsHits:    res.FieldsHits,
 		TitleHits:     res.TitleHits,
+		SummaryHits:   res.SummaryHits,
 		Total:         res.Total,
 		Capped:        res.Capped,
 		Degraded:      res.Degraded,

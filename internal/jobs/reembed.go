@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"slices"
 	"sync"
 	"time"
 
@@ -135,35 +134,10 @@ type Reembed struct {
 	brake    brake
 }
 
-// brake is the re-embed's brake: the documents whose re-embeds failed
-// since the daemon started, those of them that failed for the first time
-// since the last document re-embedded, in turn, and while it is on, until
-// when.
-type brake struct {
-	failed  map[string]struct{}
-	streak  []string
-	lastErr string        // the last of the streak's errors
-	until   time.Time     // zero while it is off
-	next    time.Duration // how long it stops the feed the next time it goes on
-}
-
-// reembedBrakeNamed is how many of the documents whose failures put the
-// brake on it names.
-const reembedBrakeNamed = 5
-
-// ReembedBrake is the re-embed's brake while it is on: until when it stops
-// the feed, how many documents' re-embeds failed in a row, the first
-// reembedBrakeNamed of them, and the last one's error. The zero value is a
-// brake that is off.
-type ReembedBrake struct {
-	Until     time.Time
-	Failures  int
-	Documents []string
-	Err       string
-}
-
-// On reports whether the brake is on.
-func (b ReembedBrake) On() bool { return !b.Until.IsZero() }
+// ReembedBrake is the re-embed's brake while it is on (Brake): until when
+// it stops the feed, how many documents' re-embeds failed in a row, the
+// first of them, and the last one's error.
+type ReembedBrake = Brake
 
 // reembedSample is how many chunks were left to re-embed at a check.
 type reembedSample struct {
@@ -215,7 +189,7 @@ func NewReembed(opts ReembedOptions) *Reembed {
 		opts.Log = slog.New(slog.DiscardHandler)
 	}
 	return &Reembed{opts: opts, kick: make(chan struct{}, 1),
-		brake: brake{failed: map[string]struct{}{}, next: opts.BrakeMin}}
+		brake: newBrake(opts.BrakeAfter, opts.BrakeMin, opts.BrakeMax)}
 }
 
 // limits are what the feed queues within.
@@ -277,12 +251,9 @@ func (r *Reembed) Progress() ReembedProgress {
 		return ReembedProgress{}
 	}
 	r.mu.Lock()
-	lifted := r.lift(time.Now())
+	lifted := r.brake.lift(time.Now())
 	p := r.progress
-	if b := r.brake; !b.until.IsZero() {
-		p.Brake = ReembedBrake{Until: b.until, Failures: len(b.streak),
-			Documents: slices.Clone(b.streak[:min(len(b.streak), reembedBrakeNamed)]), Err: b.lastErr}
-	}
+	p.Brake = r.brake.state()
 	r.mu.Unlock()
 	r.logLift(lifted)
 	return p
@@ -297,8 +268,7 @@ func (r *Reembed) Reembedded() {
 		return
 	}
 	r.mu.Lock()
-	on := !r.brake.until.IsZero()
-	r.brake.streak, r.brake.lastErr, r.brake.until, r.brake.next = nil, "", time.Time{}, r.opts.BrakeMin
+	on := r.brake.succeed()
 	r.mu.Unlock()
 	if on {
 		r.opts.Log.Info("chunk context: a document was re-embedded; the re-embed resumes")
@@ -333,51 +303,29 @@ func (r *Reembed) Failed(documentID string, err error) {
 	r.feed.Lock()
 	defer r.feed.Unlock()
 	r.mu.Lock()
-	b := &r.brake
-	lifted := r.lift(time.Now())
-	if _, before := b.failed[documentID]; before {
-		r.mu.Unlock()
-		r.logLift(lifted)
-		return
-	}
-	b.failed[documentID] = struct{}{}
-	b.streak = append(b.streak, documentID)
-	b.lastErr = err.Error()
-	if len(b.streak) < r.opts.BrakeAfter || !b.until.IsZero() {
-		r.mu.Unlock()
-		r.logLift(lifted)
-		return
-	}
-	pause := b.next
-	b.until, b.next = time.Now().Add(pause), min(2*pause, r.opts.BrakeMax)
-	until, failures := b.until, len(b.streak)
-	documents := slices.Clone(b.streak[:min(len(b.streak), reembedBrakeNamed)])
+	now := time.Now()
+	lifted := r.brake.lift(now)
+	on, pause := r.brake.fail(documentID, err, now)
+	state := r.brake.state()
 	r.mu.Unlock()
 	r.logLift(lifted)
+	if !on {
+		return
+	}
 	r.opts.Log.Warn("chunk context: documents' re-embeds keep failing; the re-embed stops queueing them for a "+
-		"while, and they keep their earlier vectors", "failures", failures, "document_ids", documents, "until", until,
-		"pause", pause.String(), "err", err)
+		"while, and they keep their earlier vectors", "failures", state.Failures, "document_ids", state.Documents,
+		"until", state.Until, "pause", pause.String(), "err", err)
 }
 
 // braked reports whether the brake stops the feed at now, and turns it off,
 // with one INFO, once its time has passed.
 func (r *Reembed) braked(now time.Time) bool {
 	r.mu.Lock()
-	lifted := r.lift(now)
-	on := !r.brake.until.IsZero()
+	lifted := r.brake.lift(now)
+	on := r.brake.holds()
 	r.mu.Unlock()
 	r.logLift(lifted)
 	return on
-}
-
-// lift turns the brake off when its time has passed at now, and reports
-// whether it did. r.mu must be held.
-func (r *Reembed) lift(now time.Time) bool {
-	if r.brake.until.IsZero() || now.Before(r.brake.until) {
-		return false
-	}
-	r.brake.until = time.Time{}
-	return true
 }
 
 // logLift logs the INFO of a brake lift turned off, when it did.

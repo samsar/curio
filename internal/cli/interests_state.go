@@ -118,26 +118,42 @@ func currentText(s client.InterestsState, now time.Time) string {
 	return b.String()
 }
 
-// dueText is a rebuild that is due, and what it waits for.
+// dueText is a rebuild that is due, and what it waits for. A fresh
+// rebuild after a re-embedding waits for the re-embedding while the
+// daemon says so (and from a daemon that says nothing of what it waits
+// for), and for the library to settle once it is done.
 func dueText(s client.InterestsState) string {
+	wait := waitingText(s.WaitingFor)
 	switch {
 	case s.LastRebuildAt.IsZero():
-		return fmt.Sprintf("the first grouping is due (%s indexed): waiting for the library to settle",
-			plural(s.ChangedDocuments, "document"))
-	case s.FreshOwed == client.FreshReindex:
-		return "a fresh rebuild is due: waiting for the re-embedding to finish"
+		return fmt.Sprintf("the first grouping is due (%s indexed): %s", plural(s.ChangedDocuments, "document"), wait)
+	case s.FreshOwed == client.FreshReindex && (s.WaitingFor == "" || s.WaitingFor == client.WaitingReembedding):
+		return "a fresh rebuild is due: " + waitingText(client.WaitingReembedding)
 	case s.FreshOwed != "":
-		return "a fresh rebuild is due (" + freshReason(s.FreshOwed) + "): waiting for the library to settle"
+		return "a fresh rebuild is due (" + freshReason(s.FreshOwed) + "): " + wait
 	case mapOwed(s):
-		return "a rebuild is due to draw the map: waiting for the library to settle"
+		return "a rebuild is due to draw the map: " + wait
 	}
-	return fmt.Sprintf("a rebuild is due (%d changed, threshold %d): waiting for the library to settle",
-		s.ChangedDocuments, s.RebuildAt)
+	return fmt.Sprintf("a rebuild is due (%d changed, threshold %d): %s", s.ChangedDocuments, s.RebuildAt, wait)
+}
+
+// waitingText says what a due rebuild waits for: the library to settle,
+// unless the daemon says otherwise.
+func waitingText(waitingFor string) string {
+	switch waitingFor {
+	case client.WaitingReembedding:
+		return "waiting for the re-embedding to finish"
+	case client.WaitingEmbeddingCheck:
+		return "waiting for the first embedding check since the daemon started"
+	}
+	return "waiting for the library to settle"
 }
 
 // freshReason says why a fresh rebuild is owed.
 func freshReason(owed string) string {
 	switch owed {
+	case client.FreshReindex:
+		return "after a re-embedding"
 	case client.FreshManual:
 		return "asked for"
 	case client.FreshParams:

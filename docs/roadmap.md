@@ -11,8 +11,10 @@ deferred. Design reasoning lives in `docs/decisions.md`.
 **Where things stand:** M0–M4 are shipped. M6 is under way ahead of M5: its
 first PR, the search evaluation and model roles, is merged; metadata
 search, real saved dates with search filters, and chunks embedded with
-their context are done; and understanding the question is done. **Next:
-the rest of M6's 2.7 search work.**
+their context are done; understanding the question is done; and
+summaries written by the LLM are done, stored and off by default. **Next:
+the rest of M6's search work, starting with the reranker, which measures
+the summaries as its input.**
 
 ## M0 — Walking skeleton
 
@@ -374,6 +376,30 @@ before it:
   (`make planner-check`, then searcheval's planned variant) (decisions.md
   "Understanding the question: a planner role, one structured call,
   grounded filters, a fitness check").
+- PR 4, done: summaries written by the LLM, stored, off by default. A
+  writing role, `summaries` (`generation.roles.summaries`), writes one
+  structured summary per fetched page (`internal/summarize`) while
+  `summaries.enabled` is true: its kind, site, author, what it is about,
+  the names it holds (grounded in the page), claims and descriptions,
+  after a fitness check. It is stored in `document_summaries` (migration
+  022), with a keyword list of its own (`document_summaries_fts`,
+  `search.summary_weight`, 0 by default), never the chunks and never the
+  card. A fed pass of `summarize` jobs on a pool of one writes it under
+  the queue's gate, most recently indexed first, resting under `gentle`,
+  and yields to searches, plans and labels, pre-empting its own call in
+  flight (`jobs.Foreground`). Surfaces: healthz and `/v1/stats`
+  `summaries`, the document's `summary`, `curio status`/`doctor`/`docs
+  show`, MCP's `get_document`, `curio summarize --outdated|--all`;
+  searcheval writes (`-summarize`, resumable, `-documents`), keeps
+  (`-summaries-out`) and replays (`-summaries`) them. On a 100-page sample
+  of the owner's library `gemma4:26b` wrote every summary, p50 3.6 s a
+  page; the owner's full pass is about 5 h. The grid over that pass, by
+  the rule written before it ran, found no fused ranking that gained: the
+  summary in the card lost the top 10, and the list held it level while
+  losing known-item close calls, though it found pages deeper (R@100 up).
+  So the defaults keep 2.7's ranking (decisions.md "Summaries: one
+  structured call per document, stored for the reranker"), and PR 5
+  measures the summaries as the reranker's input.
 
 ## M7 — Hosted mode
 

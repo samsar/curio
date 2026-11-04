@@ -88,6 +88,7 @@ func (o *Ollama) Generate(ctx context.Context, prompt string, opts Options) (str
 	if err != nil {
 		return "", err
 	}
+	resp.report(opts.Usage)
 	return strings.TrimSpace(resp.Response), nil
 }
 
@@ -105,6 +106,7 @@ func (o *Ollama) GenerateJSON(ctx context.Context, prompt string, schema json.Ra
 	if err != nil {
 		return nil, err
 	}
+	resp.report(opts.Usage)
 	reply := strings.TrimSpace(resp.Response)
 	// Checked first: a reply cut off mid-value is no JSON either, and the
 	// limit is what to say.
@@ -322,6 +324,21 @@ type generateResponse struct {
 	Response   string `json:"response"`
 	Done       bool   `json:"done"`
 	DoneReason string `json:"done_reason"`
+	// What the call cost: tokens, and durations in nanoseconds.
+	PromptEvalCount    int   `json:"prompt_eval_count"`
+	EvalCount          int   `json:"eval_count"`
+	LoadDuration       int64 `json:"load_duration"`
+	PromptEvalDuration int64 `json:"prompt_eval_duration"`
+	EvalDuration       int64 `json:"eval_duration"`
+}
+
+// report writes what the call cost into u, when u is set.
+func (r generateResponse) report(u *Usage) {
+	if u == nil {
+		return
+	}
+	*u = Usage{PromptTokens: r.PromptEvalCount, OutputTokens: r.EvalCount, Load: time.Duration(r.LoadDuration),
+		PromptEval: time.Duration(r.PromptEvalDuration), Eval: time.Duration(r.EvalDuration)}
 }
 
 // Ollama's done_reason values the generator reads: the reply stopped at

@@ -1233,6 +1233,35 @@ func TestRebuild_LLMFailureFallsBackForTheWholeRun(t *testing.T) {
 	assert.Contains(t, warn, "connection refused")
 }
 
+// TestRebuild_LabelsInsideAUse: with LLM labels, every call of the
+// labeler runs inside the use the Using hook was told of, which ends with
+// the phase; term labels tell it nothing.
+func TestRebuild_LabelsInsideAUse(t *testing.T) {
+	f := newEngineFixture(t, 3, 4, 5)
+	open, uses := 0, 0
+	using := func() func() {
+		open++
+		uses++
+		return func() { open-- }
+	}
+	var during []int
+	llm := labelFunc(func(_ context.Context, info ClusterInfo) (Label, error) {
+		during = append(during, open)
+		return Label{Name: fmt.Sprintf("LLM %d", info.Size)}, nil
+	})
+	f.rebuild(t, f.engine(nil, llm, Config{Labeling: LabelingLLM, Using: using}))
+	require.NotEmpty(t, during)
+	for _, n := range during {
+		assert.Equal(t, 1, n, "each label asked inside the phase's use")
+	}
+	assert.Zero(t, open, "the use ends with the phase")
+	assert.Equal(t, 1, uses, "one use for the phase")
+
+	uses = 0
+	f.rebuild(t, f.engine(nil, llm, Config{Labeling: LabelingTerms, Using: using}))
+	assert.Zero(t, uses, "term labels ask no model")
+}
+
 func TestRebuild_UnparseableReplyFallsBackForOneGroup(t *testing.T) {
 	f := newEngineFixture(t, 3, 4, 5, 6, 7)
 	calls := 0

@@ -166,6 +166,7 @@ when the entry was first committed.
 - 2026-10-14 — [Chunks embedded with their context](#chunks-embedded-with-their-context)
 - 2026-10-14 — [Understanding the question: a planner role, one structured call, grounded filters, a fitness check](#understanding-the-question-a-planner-role-one-structured-call-grounded-filters-a-fitness-check)
 - 2026-11-03 — [Jina answers are stored without the site's chrome](#jina-answers-are-stored-without-the-sites-chrome)
+- 2026-11-03 — [Summaries: one structured call per document, stored for the reranker](#summaries-one-structured-call-per-document-stored-for-the-reranker)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -13418,8 +13419,9 @@ the index with its content table, and without it the check passed an
 inconsistent index on the bundled SQLite 3.53.4, so every test's FTS
 check uses it too. SQLite reports an index that disagrees as corruption
 (`ErrCorrupt`), which the store wraps as
-`sqlite.ErrFieldsIndexInconsistent`; the step then rebuilds the index
-from the table (`'rebuild'`), checks it again, and logs one WARN.
+`sqlite.ErrSearchIndexInconsistent` (named `ErrFieldsIndexInconsistent`
+until the summaries' index shared the check); the step then rebuilds the
+index from the table (`'rebuild'`), checks it again, and logs one WARN.
 Inconsistency is no idle risk: a write over a row the index disagrees on
 fails with "database disk image is malformed" (`SQLITE_CORRUPT_VTAB`), a
 document's delete and the refresh's own FTS `'delete'` among them. On the
@@ -15885,6 +15887,625 @@ tones and the numbers (`TestSearch_HomeLately`, `TestUI_SearchHomeLately`,
 `TestLibrary_StateBadges`, `TestCauses_IconAndTone`, `TestSummaryText`,
 `TestInterest_Summaries`); layout is checked by screenshots at 1440 and
 390, both themes.
+
+---
+
+## Summaries: one structured call per document, stored for the reranker
+
+**Decision:** with `summaries.enabled: true` (off by default, for every
+model), once a page is fetched and indexed, a writing role, `summaries`
+(`generation.roles.summaries`, `generation.model` without it), writes
+its summary in one structured call: its kind, the site and author it
+names, a sentence of what it is about, the names it holds, up to 4
+claims and up to 4 descriptions someone might search it by months later.
+The summary is stored (`document_summaries`, migration 022), and a
+keyword list of its own over its own FTS5 index can search its words
+(`document_summaries_fts`, `search.summary_weight`, 0 by default, so
+off). No card holds it, and it never becomes chunks. The grid over the
+full pass found no fused ranking it improved (below): summaries are
+stored for the reranker (PR 5), Ask (PR 6) and the interests' labels,
+not fused. A fed pass of `summarize` jobs on a pool of one writes them
+under the queue's gate, and yields to the person: it pre-empts its own
+call in flight when a search, a plan or a rebuild's labels begin.
+
+**Why:** a page's own words often aren't the words it is remembered by.
+A profile names its person in an avatar's alt text, a repository's
+README never says "repository", a thread's point is in its replies, a
+home page is a menu: the card held only what the page was saved as, and
+the chunks only its text. A model reading the page once can say what it
+is, who made it and what it names, in plain words, which is what a
+person types months later. Fused into today's ranking, though, that text
+cost more than it found: in the card it lost the top 10, and as a list
+of its own it held the top 10 level while losing close calls, yet found
+pages deeper down (R@100 up). A reranker that reads each candidate's
+summary is where that depth can count.
+
+### The role, and what a provider receives
+
+`summaries` is a third `config.Role`, in use while summaries are written
+(`Config.SummariesOn`, below), whatever insight and understanding say.
+It never pulls alone
+(`PullsAlone` false): its model is `generation.model` by default, which
+the labels pull when they are on, and otherwise `curio up`'s offer.
+
+By default the summaries and the planner write with one model, so the
+planner's `Shared` (`config.SharesModel`) is true wherever summaries are
+on, labels off included, with its consequences. Every request names how
+long Ollama keeps the model after it, and the last one wins: a summary
+call that sent none would leave the model on Ollama's default of 5
+minutes in place of the planner's 30, and since every page newly saved
+gets a summary call, a search, a page summarized two minutes later and a
+search a quarter of an hour after the first would find the planner cold
+and search the words. So while the planner is in use and writes with
+the summaries' model (`config.SharesModelWith`), every summary call, each
+probe of the fitness check and the writer's load send the planner's
+`search.understand_keep_alive_minutes`; otherwise they send none (below).
+The planner still counts its model as kept only 5 minutes while shared,
+since the labels send no keep-alive, so an unload later than that isn't
+counted as an eviction to hold it for. A planner model found unfit isn't
+unloaded, since the writer still uses it. A
+provider receives exactly `summarize.Input`: the document's own title
+(never a bookmark's), its URL, its display site name (else its host), its
+content type, and its reduced markdown, cut to fit; nothing of the
+library (no folder, saved date, bookmark title or other document). Pages
+are the user's own library, so, as for the planner, they go off this
+machine, or to a provider other than Ollama, only when the summaries role
+names that server or provider itself (`config.Generation.Unnamed`, shared
+with the planner's withheld rule); otherwise no page is sent and healthz
+says why.
+
+The cut must guarantee fit, because Ollama doesn't refuse an over-long
+prompt: measured on Ollama 0.40.14 before the cut was built, about 12K
+tokens into a `num_ctx` of 8,192 answered 200 with `prompt_eval_count`
+4,098 and an answer that showed the instructions at the head had been
+dropped; the control at 3,561 tokens answered right. The runners run
+`-np 1` (one slot, one KV cache per model) at the shared `num_ctx` 8,192
+(another size reloads the model). So the page's text is cut by a
+per-byte token estimate at the densest rates measured on synthetic text
+(digits 1.0 byte a token, Hangul 1.1, hex 1.15, base64 1.34, letters 1.5
+to 1.7, code 2.6 to 3.1, prose about 6.4): a letter counts 0.75 of a
+token, every other byte 1, so the prompt (instructions about 480 tokens
+on gemma4, 444 on qwen3, counted as 700) plus the 1,024-token answer and
+a 128-token margin always fit, and an 8 KiB cap of reduced text holds
+the call's time. The markdown is read no further than 256 KiB, and
+reduced first (images, link targets and bare markup dropped), in time
+linear in its length, since a page is anyone's text (the GitHub fetcher
+stores a README as it is): links, images and the page's delimiters are
+found by one-pass scanners held to their regexps' `ReplaceAllString` by
+differential tests and a fuzz target, because a regexp searched again
+after each match can read to a hostile line's end each time (a 256 KiB
+line of `[x]([y][z]` took 2 min 50 s), and delimiters removed a pass at
+a time read a page once a level of nesting (43,690 levels, as its text,
+title and site, 3 min 31 s); read once, each takes milliseconds. The
+text is cut after its last whole line that fits while the lines that fit
+hold at least half of either limit, else on its last rune that fits, so
+a short heading over a paragraph with no break sends most of the
+paragraph, not the heading alone (8 of the owner's 5,329 pages, none of
+the sample). The cut is a constant inside `PromptVersion`: changing it
+marks summaries outdated rather than mixing inputs silently.
+
+An opening plus an outline (the headings after the cut, up to 1.5 KB,
+in place of the opening's last bytes) was compared with the opening
+alone on the sample's 21 pages longer than the cut with at least two
+headings after it (40 of the 100 are longer than the cut; 23 have any
+heading after it), both written by gemma4:26b in one session and read
+side by side against the opening and the headings: the outline's
+summary was the better on 2 (it named the subject of a section the
+opening never reached), the opening's on 3 (the outline's summary took
+credits or an ad as names, or dropped a claim), and they said the same
+on 16, since headings after the cut are mostly a page's chrome
+(subscribe, share, comments, related stories) or sections the summary
+had already covered. A page took p50 3.73 s, p95 4.23 s with the
+outline against 3.86 s and 4.68 s without. The outline isn't shipped.
+
+### What code trusts
+
+The call is `GenerateJSON` under the answer's schema, greedy, `think`
+false, at most 1,024 tokens, with the planner's keep-alive while it
+writes with the planner's model (above), and otherwise no `keep_alive`:
+Ollama's default, 5 minutes after the last request. The pass's pages
+come seconds apart, and its pauses for searches a minute, so the default
+keeps the model loaded while the pass writes and frees it 5 minutes
+after it stops (gemma4:26b's runner was measured at about 28 GiB
+resident during the pass), where a 30-minute keep-alive of its own would
+hold it half an hour after every pass on a home whose planner is off,
+and 0 would load it again for every page (about 5 s). On the planner's
+model the pass leaves it loaded for the planner's 30 minutes after its
+last page, as every search does.
+
+The answer's caps (site and author 160 characters, about 240, 12 names
+of 60, 4 claims of 160, 4 descriptions of 120) are below the starting
+caps of the design (200, 300, 80, 200, 160) so that an answer at every
+cap fits the 1,024-token answer with its JSON at 3 characters a token,
+below the sample's median of 3.4 and above its 5th percentile of 2.7 (at
+2.7, an answer at every cap is 997 tokens). The starting caps' 3,100
+characters would need about 1,140 tokens, taken from the page's budget,
+and the sample never needed them: gemma4's longest texts were 116
+characters for an author, 200 for an about and 57 for a name, and their
+claims met the 160 cap twice in about 860, cut mid-word by the grammar
+(qwen3:4b-instruct's 42 times in 332). The longest answer was 354 tokens
+(326 for gemma4:26b), so 1,024 is about three times it, against the 1.25
+the design asked for.
+
+The answer is decoded strictly (an unknown key, a wrong type, a kind
+outside `store.SummaryKind`, a field over its cap, a control character:
+`*summarize.InvalidAnswer` with its rule) and normalized (whitespace,
+repeats, empties); an entity the input doesn't hold is dropped and
+counted: the names list is what the keyword list matches exactly, so it
+must be the page's. It is compared folded (case, spacing and dashes
+aside), and where it begins or ends with a digit or a Latin, Greek or
+Cyrillic letter, as a whole word of the input, so "AI" isn't grounded by
+"said" nor "Go" by "good" (on the sample, 3 of about 850 kept names were
+grounded only inside another word); at a Chinese or Japanese edge,
+anywhere. A reply that isn't JSON is reported as `generator.ErrNotJSON`
+alone, never with the provider's quote of it: it holds the page's words,
+and would reach the job's `last_error`, the summary's failure and the
+log. A `not_the_page` answer (a sign-in wall, an error page, a CAPTCHA)
+keeps only its kind. Before its first summary the writer runs a
+three-probe fitness check with made-up pages (an article whose names
+must come back as written and none added, a sign-in wall that must be
+`not_the_page`, a bio whose author must be found): a model that fails is
+unfit for the process, writes nothing and is unloaded unless another
+role shares it. Prompt injection is bounded: the page sits between
+delimiters the instructions call the page, never instructions, and
+whatever a page makes the model say lands only in that page's own
+summary.
+
+### Storage
+
+`document_summaries` (data-model.md) is text a model wrote, not a
+derived row, and no field or card reads it: `PutSummary` writes only
+while the document is fetched at the extraction the summary read
+(`store.ErrSuperseded` otherwise) and upserts with an unchanged-row
+guard; a write changes no card and queues no cards job. A summary
+records its writer (model and
+`PromptVersion`) and `input_hash`, the SHA-256 of the prompt's version
+and the exact input. **Stale** is a summary of an earlier extraction,
+which the pass writes again; **outdated** is one by another model or
+prompt, which is kept and counted, and written again only when asked
+(`curio summarize --outdated|--all` marks them **owed**, a fetched
+page's alone, since the pass writes no other; `--all` also clears each
+failure for good, so those pages are tried again at once): a new model
+or an upgrade never starts hours of calls unasked. A refetch whose input
+hashes the same is pointed at its new extraction with no call.
+
+### Search: a list of its own, off by default
+
+The card is the first rules' (`docmeta.RulesVersion` 1), 2.7's byte for
+byte. A rules-2 card that appended the summary's site, author, about,
+descriptions and names (composition A, and B with the claims too) was
+built and measured by the grid, and lost (below); it was removed, so an
+upgrade re-derives no field and re-embeds no card.
+
+The keyword list is BM25 over `document_summaries_fts` (site, author,
+entities, about, descriptions, claims; claims weighed 0.5, the column
+weights unmeasured beyond the grid, which ran them so), a document list
+fused like the others, read last per query by the question and its
+rewrites, at `search.summary_weight`, 0 by default, which leaves it
+unread. It is not columns of `document_fields_fts`, for
+two FTS5 facts verified in SQLite: `bm25()` divides a match by the
+length of the whole row (an identical `{title}`-filtered match scored
+−2.885e-06 alone and −1.266e-06 once the row also held a long column
+weighted 0), so summary columns would reorder the fields and title lists
+for every query; and a weight `bm25()` isn't given is 1, so a 2.7 daemon's
+five weights would count new columns at full weight after a downgrade.
+Its own index keeps every ranking byte-identical at `summary_weight` 0,
+and with no summary written (the regression invariant below). A plan's
+names never read it: held to the summaries' site and author, they cost
+the plans' vague references about 0.04 in the grid, and the seam that
+measured them is gone. Summaries never become chunks: a chunk is the
+page's own text, which passages show and find-related compares.
+
+A match in the summary list is a match by the words, as the fields and
+title lists' are: the engine counts the distinct documents it matched
+over every query (`Result.SummaryHits`, POST /v1/search's
+`summary_hits`), and the dashboard adds it to the count that decides
+whether a search is wordless (`WordHits`). Without it, a name or a
+description only a summary holds, the case summaries exist for, ranked
+its page first and the dashboard still said nothing in the library uses
+the words, headed the results "Nearest by meaning" and folded all but
+the first three.
+
+### The pass
+
+`jobs.Summaries` feeds a pool of one worker, as the re-embed's feeder
+does: at most 1 job in flight and 2 waiting (`EnqueueSummarize`, the
+walk outside the write lock, the queue in one short transaction that
+counts again), for the documents most recently indexed first (one pinned
+walk of `idx_documents_tenant_indexed`, about 8 ms when nothing is left;
+pages saved or refetched since the pass began come first, and 40% of the
+owner's saves have no trustworthy saved date to order by). A document is
+next when it is fetched with a current extraction, has no summary of it
+or one owed, has no summarize job pending or running, and didn't fail for
+good under that extraction, model and prompt within `SummariesFailedWait`
+(7 days). The kind `summarize` was already allowed by the jobs CHECK and
+labelled by the dashboard, so no jobs-table rebuild. The feed is kicked
+when an index job or a summarize job ends, and checks every 5 minutes.
+
+Counting the summaries reads every fetched document (17 to 22 ms at the
+median on the owner's copy, 40 to 170 ms at worst beside the pass's
+work), the largest read of `/v1/stats`, which the dashboard's Status page
+asks for every 2 s. So `/v1/stats` counts them through the pass
+(`jobs.Summaries.Counts`), which serves the counts it read for 10 s
+(`summaryCountsFresh`) unless it hears of a change first (a kick, so an
+index or summarize job's end and a rewrite asked for; a summary written;
+a failure reported), and says when they were read (`counted_at`); a
+change it doesn't hear of, a document deleted, shows within the 10 s.
+
+The handler's outcomes: written, done; same input, model and prompt
+with only a new extraction, re-pointed, no call; superseded or gone,
+done (DEBUG); the job's context ended, interrupted; pre-empted, deferred
+until quiet, attempt refunded, `waiting for searches and plans to
+pause`, no brake failure; no answer (`ErrUnreachable`,
+`ErrUnauthorized`), deferred 1 to 5 min as the cards job does, one WARN
+an outage, the feed keeping one job (its probe) and no more, its
+deferrals logged at DEBUG since the writer logs the outage; a model the
+provider doesn't have (`ErrModelMissing`, by the call, the load or the
+check), done with one WARN for the outage, the feed keeping no job
+(`summarize.FeedNone`) and its 5-minute check asking the provider's
+model listing (`Writer.Probe`, a local `/api/tags`, 1 s at most) until
+the model is there, then feeding the pass again: only a pull ends it,
+maybe never (`curio up`'s pull declined, or `auto_pull: false` with the
+labels off), and the one job the feed kept for it was deferred for as
+long, held keep-awake on AC power and, its day of deferrals spent, failed
+and was queued again each day; a timeout
+while the model answers, or `ErrUnavailable`, a failed attempt, retried,
+and recorded as the page's once its attempts are spent (a model that
+keeps failing on one page parks it for the week, or until `curio
+summarize --all`);
+an invalid, truncated or non-JSON answer or `ErrBadRequest`, permanent,
+the hook recording the failure; no markdown, permanent; the writer off,
+withheld or unfit, done with nothing written, so leftovers drain and
+nothing pending holds keep-awake; a check that got no answer, deferred as
+an outage is. A check the model answers with an error, or too slowly
+while it answers a listing, reaches no verdict, and the next waits a
+minute, twice as long after each further one, at most 15 minutes
+(`checkRetryFirst`, `checkRetryLast`, as the planner retries its own),
+with one WARN an episode, which a verdict ends: without the wait, a
+model that loads but answers every generation with a 500 was probed by
+every job that came due, and the feed, seeing no outage, kept three
+cycling. The job whose check failed is deferred until the next check and
+is the feed's one job (`summarize.FeedOne`, as in an outage); any other
+that meets the wait is done with no call, its page queued again once the
+model passes. That one job can end before the wait does: its day of
+deferrals spent, so its next deferral fails an attempt and it is retried
+a minute later; left over a day old by a restart or a 2.7 interlude; or
+pre-empted by a search right after its probe failed. The job that then
+met the wait was done in milliseconds, and a feed that queued the next
+one due at once looped: through the real pools, 2,650 jobs queued and
+finished in a second, for about 14 minutes once a day with a check that
+never reaches a verdict. So the feed queues its one job for the wait's
+end (`Writer.CheckRetryAt` as `SummarizeLimits.NotBefore`, rounded up to
+the millisecond the jobs table keeps), whatever ended the one before,
+and `Ready` asks nothing within the wait either, so a job left from
+before it loads nothing: the jobs claimed inside a wait are those queued
+before it began, each done once. That rests on one clock: the wait's
+end, a job's `run_after` and every comparison of the two are wall time.
+Judged on the monotonic reading `time.Now` carries (on darwin
+`mach_absolute_time`, which stops while the Mac sleeps), a wait
+outlasted a sleep: the kept job, due by the wall clock, met a wait the
+writer still saw ahead, and the feed's next job, queued for an end
+already past on the wall clock, met it too, at the worker's poll, about
+two jobs a second until the rest of the wait passed awake, up to about
+1,800 after one sleep. So every end the pass sets or reports drops its
+monotonic reading (`Round(0)`): the check's wait, the eviction hold, the
+brake (the re-embed's too), the quiet window after a search, and the
+planner's timeout and eviction holds, each judged as healthz says it.
+The eviction counts' `keptUntil`, which stands for Ollama's own
+keep-alive timer (it stops while the Mac sleeps too), and the planner's
+60 s retries stay monotonic: nothing stores or reports them. A load of
+the unchecked model that fails, but not for want of an answer (a 500 for
+want of memory), is the check reaching no verdict too, since the check
+can't run without it: each page's job spent its attempts on such a load,
+tripped the brake and parked three pages for the week a cycle. healthz
+says when (`check_retry_at`) while that time is ahead (a pause can hold
+the job past it), and `curio status` and doctor warn with the check's
+error while the model is unchecked and the last failure is the check's.
+Each job's outcome reaches the feed while the job still runs, under the
+lock a top-up holds from its read of the writer to its commit (`Failed`,
+and `Settled` for a deferral or nothing to do): a top-up that read the
+writer just before a job recorded a model not pulled counted after that
+job was done, and queued a job the writer had ruled out (2 runs in 150
+of the test that shows it, under -race); now it counts the job in
+flight. A model Ollama keeps unloading for other models (the embedder,
+or another app's, on a Mac where they don't fit together) would
+otherwise be loaded again for every page, gigabytes of weights each
+time, for as long as the pass lasts, and nothing would show it.
+So, as the planner counts its own, the writer counts a model
+found unloaded within the keep-alive of its last call or load that got
+an answer (the shortest any request for the model may leave: Ollama's
+default 5 minutes, or the writer's own when shorter) as evicted, and the
+second within an hour holds the pass: 15 minutes, twice as long each
+time it holds again within an hour of the last hold's end, at most 4
+hours, with one WARN a hold. Meanwhile `Ready` asks nothing, the feed
+keeps no job (`summarize.FeedNone`), and a job that meets the hold is
+done with its page queued again after it, so no job waits it out holding
+keep-awake; healthz reports it (`eviction_hold_until`, the last failure
+`evicted`), with a `curio status` warning and doctor's summaries check.
+Three documents' first failures in a row stop the feed for 15 min,
+doubling to 4 h (the re-embed's brake, now shared, `jobs.Brake`). Under
+`gentle` the gate rests the pass after each page as long as the page
+took (`QueueGate.Rested`): about half the pace, and the GPU idle half
+the time.
+
+### Yielding to the person
+
+A slot per model means a summary in flight makes a plan wait, and the
+planner's timeout is 5 s; a rebuild's labels would wait too.
+`jobs.Foreground` marks uses: around the whole of a search request
+(`/v1/search` and the dashboard's, through `Deps.search`), around every
+planner call (plan, check probe, warm, unload: `understand.Options.Using`)
+and around a rebuild's labelling (`insight.Config.Using`). It is a gate
+that closes summarize alone while a use is in flight and for
+`foregroundQuiet` (1 min) after the last; the handler takes the begun
+channel before its last check and runs each call under a context a use's
+beginning cancels (its watcher joined before the call returns). Measured
+on gemma4:26b before pre-emption was built, by cancelling a call's HTTP
+request: a cancel mid prompt-evaluation freed the slot in 0.66 to 1.34 s
+(median 0.74; prompt eval is checked between 512-token batches),
+mid-generation in 0.10 to 0.12 s; a plan right after a card-sized call
+took median 1.03 s against 0.81 s after a plan (+0.2 s), under the +1 s
+bar, so the single-slot cache isn't a known limit and no
+`OLLAMA_NUM_PARALLEL` advice is needed.
+
+On a scratch daemon over a copy of the owner's library (its own home and
+port, `auto_pull` off, gemma4:26b as planner and writer, the embedder
+beside it, both loaded at `context_length` 8,192), warm understood
+searches through `POST /v1/search`, made-up questions. The models'
+memory is not what `/api/ps` says: it listed gemma4:26b, 25.2B Q4_K_M, at
+0.97 GB and qwen3-embedding:0.6b, Q8_0, at 1.74 GB on Ollama 0.40.14,
+while `ps` showed gemma4:26b's runner at about 28 GiB resident during the
+full pass. `/api/ps` under-reports a model whose weights are mapped from
+disk: plan memory by the runner's resident size.
+
+| condition | searches | request p50 / p95 | plan p50 / p95 | plan timeouts |
+|---|---|---|---|---|
+| pass paused | 40, 5 s apart | 1.07 / 1.23 s | 0.83 / 1.15 s | 0 |
+| pass running | 40, 5 s apart | 1.08 / 1.24 s | 0.83 / 1.16 s | 0 |
+| pass running | 10, 75 s apart | 1.23 / 2.28 s | 0.96 / 1.91 s | 0 |
+
+Searches 5 s apart keep the pass yielding, so they ran as on an idle
+Mac (+0.01 s, the bar +0.3 s); a search 75 s after the last meets a
+summary in flight, pre-empts it and pays the slot's release and the
+evicted planner prefix: +0.16 s at the median (the bar +1.0 s), with no
+timeout and no timeout hold. The pass wrote 41 summaries in the 12.5
+minutes searches came 75 s apart, against about 17 a minute unhindered:
+each search costs it the call in flight and a minute of quiet. The
+75 s condition ran 10 searches, not 40, to keep the machine's load
+short.
+
+A rebuild's labelling yields the same way. On another scratch home over
+a fresh copy, its interests cleared so that a fresh rebuild names every
+group (35 areas and 217 interests, 252 calls to gemma4:26b), the
+labelling took 134.3 s with summaries off and 138.5 s with the pass
+running (+3.1%, the bar +10%): the pass wrote four pages while the
+rebuild read and grouped, its fifth was pre-empted when the labels
+began, and it claimed no page until they were done. The first run's
+134.3 s includes loading the model (about 2 s), which the pass had
+already loaded for the second.
+
+### Measured
+
+On one 100-page sample of the owner's library, stratified across
+articles (25, topped up to 31 since only 2 non-English pages were found),
+home pages (12), profiles (10), posts on X (10), repositories (12),
+videos (10), thin pages (10), PDFs (3) and non-English pages (2), written
+with `cmd/searcheval -summarize` on copies (IDs, summaries and reports
+kept out of the repository), one call at a time at normal throttle, on a
+64 GB M4 Max with Ollama 0.40.14:
+
+| model | check | a page p50 / p95 | prompt tokens p50 / p95 | answer tokens p50 / p95 | unusable | names dropped | 5,000 pages |
+|---|---|---|---|---|---|---|---|
+| gemma4:26b | passed | 3.56 / 4.72 s | 1,672 / 2,502 | 251 / 310 | 0 | 16 | 4.9 h |
+| gemma4:26b-a4b-it-qat | passed | 3.61 / 4.93 s | 1,672 / 2,502 | 240 / 306 | 0 | 18 | 5.0 h |
+| gemma4:12b | passed | 5.95 / 8.29 s | 1,672 / 2,502 | 250 / 320 | 0 | 10 | 8.3 h |
+| qwen3:4b-instruct | passed | 3.97 / 5.37 s | 1,585 / 2,373 | 290 / 336 | 0 | 51 | 5.5 h |
+
+(gemma4:26b runs with a speculative draft model, which is why the full
+model is no slower than the mixture of experts here.)
+
+Faithfulness was read by hand, every statement (about, site, author,
+claims, descriptions) of the same 50 summaries for each gemma4 model,
+against exactly what the model was sent, the names being grounded by
+code. A summary counts as unfaithful when a statement says what its page
+doesn't: a
+relation garbled, a detail given to the wrong thing, a claim the page
+doesn't make, or a name the page never gives. A site described from
+general knowledge ("GitHub, a code hosting platform") is what the prompt
+asks for and isn't counted; a statement that keeps the page's sense but
+loses a hedge or a qualifier (a rumour stated as fact, "some teams"
+written as teams) is counted apart, as borderline.
+
+| model | statements | unfaithful summaries | borderline summaries |
+|---|---|---|---|
+| gemma4:26b | 407 | 0 of 50 | 4 |
+| gemma4:26b-a4b-it-qat | 385 | 1 of 50 (2%) | 5 |
+| gemma4:12b | 445 | 3 of 50 (6%) | 4 |
+
+The mixture of experts garbled one relation; gemma4:12b garbled one,
+gave a detail to the wrong thing and named an author its page never
+names. qwen3:4b-instruct's 30 summaries were read only where a word screen
+flagged a statement (fewer than 60% of its content words in the page),
+which already found an invented fact (1 of 30, more than the bar), and
+it called 70 of the 100 pages articles (gemma4:26b 33, with 13 threads,
+9 profiles and 6 home pages where the strata had them).
+
+These bars first set the default, on for a model that met them; since
+the grid (below) summaries are off for every model unless
+`summaries.enabled` is true, and the bars decide only what `curio
+doctor` says of the model they are turned on with: a failed check, more
+than 2% unfaithful summaries, or more than 24 h for 5,000 pages at normal
+throttle (`config.SummariesBelowBars` over the measured
+`config.SummaryCostOf`) flags the 8 GB and 16 GB tiers' models, while the
+32 GB tier's, at 2% exactly, the 64 GB tier's and a model not measured
+pass. `summaries.enabled` true turns them on; false, or left out, as a
+2.7 config.yaml and every config.yaml `curio up` writes leave it, keeps
+them off (`Config.SummariesOn`, which `RolesInUse` reads, so healthz's
+`generation_roles`, `curio up` and doctor agree: with the role out of
+use, `curio up` offers no model for it). healthz says so (`on` false,
+`off_by_default` true, `reason` with `summaries.enabled: true` and a
+restart to turn them on), as do `curio status`'s `summaries:` line and
+doctor's summaries check; nothing is logged. Two cuts came first: one
+had `curio up` write `summaries: enabled: false` into a new home and the
+daemon apply no bar, so a home upgraded from 2.7 started a pass of hours
+with any model; the next left the key out and applied the bars, on by
+default for a model meeting them, until the grid found no ranking that
+gained from them. On the owner's 5,329 fetched pages the full pass with
+gemma4:26b is about 5 h (the sample's 100 pages took 330 s with the
+check).
+
+On a fresh copy of the 2.7 database migration 022 took 5 ms, and with
+the card the first rules' the start's refresh derives nothing. With no
+summary written, hybrid and planned (plans replayed from the 2.7 report)
+rank all 50 graded queries exactly as 2.7 did, query by query, and
+hybrid's total p50 was 140 ms against 2.7's 152 ms on the same machine;
+with the full pass's summaries replayed at the defaults below, they rank
+all 50 exactly as 2.7 did too (searcheval's `rankings: 50 of 50`).
+
+### Choosing the ranking defaults
+
+The defaults could only be set on a library whose summaries were all
+written, a pass of hours, run once outside the change on a copy:
+
+    make search-eval DB=<fresh copy> CONTENT=<its content> CONFIG=<config.yaml>
+      SUMMARIZE=1 SUMMARIES_OUT=<private file> JSON=<private report>
+      QUERIES=<graded queries> BASELINE=<2.7 report> PLANS=<2.7 report>
+      TODAY=<the baseline's day> VARIANTS=hybrid,planned
+
+The grid then replayed those summaries (`SUMMARIES=`, no model asked)
+with plans replayed, each point running hybrid and planned. The pick
+rule, written before it ran: the best planned all-queries nDCG@10 among
+the points where, against 2.7's numbers for both hybrid and planned, all
+queries' nDCG@10 is up; the owner-tagged queries' nDCG@10 and R@10 are
+up; world_hop, site_person and vague_ref nDCG@10 are up; keyword R@10 is
+at least 0.84; known-item R@10 is 1.000; no kind's nDCG@10 falls more
+than 0.05; and hybrid's total p50 is at most 2.7's + 10 ms. Ties within
+0.005 go to the higher owner nDCG@10, then the lower total weight. A
+field that doesn't pay is left out of the card and the list by default.
+
+The grid ran 35 points (the list's weight, the plan's names on it or
+not, the card with the summary or without and with its claims or not,
+and the cards list's weight). No point passed the rule:
+
+- Every card holding the summary lost planned nDCG@10: composition A
+  (the summary's site, author, about, descriptions and names) −0.011,
+  vague_ref −0.073 over its two queries; B, A with the claims, −0.013
+  planned and −0.014 hybrid.
+- The summary list at 0.1 to 0.25 held the top 10 level (planned +0.002
+  and +0.003) but left the owner's R@10 and planned world_hop level
+  rather than up, cost hybrid vague_ref, and cost known-item S@1 (0.973
+  to 0.892 at 0.1, 0.788 at 0.25; R@10 stayed 1.000). All of that loss
+  is on failed and dead pages (dead 0.968 to 0.648), which can have no
+  summary: a list only fetched pages can enter tips close calls against
+  pages found by their titles.
+- At 0.35 and above a code query fell more than 0.05 and all-queries
+  nDCG@10 with it; at 1, keyword R@10 was 0.827.
+- Names on the list cost planned vague_ref about 0.04, and a cards
+  weight of 0.25 cost 0.02 to 0.03 everywhere.
+- The card and the list together counted one summary twice in RRF, so
+  pages just below the top 10 rose past judged ones; the cards list
+  brought two thirds of them.
+- At depth the list does find pages: planned R@100 0.853 to 0.869 at
+  0.25 (the owner's 0.516 to 0.584).
+- The list's stage takes about 4 ms; hybrid's total p50 stayed within 2
+  ms of 2.7's under the same load.
+
+So the defaults are the ranking 2.7 had: `search.summary_weight` 0, the
+list off but the key kept, so a user or the reranker's work can weigh it;
+a plan's names never on the list; the card the first rules'; and
+`summaries.enabled` off unless true, since a pass costs hours of a
+writing model for a ranking that doesn't use what it writes. Summaries
+are stored for what reads a candidate's summary as it ranks or answers:
+the reranker (PR 5), which measures them as its input, where the list's
+R@100 gain can count; Ask (PR 6); and the interests' labels. The prompt
+stays as the full pass used it, so no stored summary is outdated.
+
+### Going back
+
+2.7 runs on a database 2.8 migrated: nothing it reads changed shape,
+`document_summaries` is a table it never reads, and a document deleted
+takes its summary and FTS entry with it by the cascade and the delete
+trigger. Remove `summaries`, `search.summary_weight` and
+`generation.roles.summaries` from config.yaml first: 2.7's strict loader
+refuses each (checked with 2.7's `config.Load`: the first two are unknown
+fields, the role an unknown role). 2.8 derives the first rules, as 2.7
+does, so neither going back nor coming forward re-derives a field or
+re-embeds a card. Verified with a 2.7 build (053dfe9) on a copy of the
+owner's database that 2.8 migrated with 100 summaries written, on a
+scratch home and port: it started, searched literally and understood
+(once its planner had loaded), imported a bookmark, refetched a
+summarized page, and logged no ERROR. (That 2.8 build still derived a
+rules-2 card, so 2.7's start re-derived every document's fields then;
+with the card back to rules 1 there is nothing to re-derive.) 2.7 has no
+path that deletes a document; one deleted through 2.7's own driver took
+its summary row and FTS entry with it, and the index's integrity check
+passed. Back on 2.8 the pass counted to write only the summary of the
+page refetched under 2.7 besides those never written (95 written, 3 not
+the page, the deleted one gone).
+
+### Known limits
+
+- One slot per model: a summary in flight and a plan share a KV cache;
+  measured at +0.2 s a plan, pre-emption bounds the rest.
+- Prompt injection is bounded to a page's own summary, which its own
+  search reads.
+- `not_the_page` is recorded, not acted on: a signal for later work (a
+  refetch through Jina, a hint in the Library).
+- The model's digest isn't tracked: an `ollama pull` of the same tag
+  that changes the weights leaves summaries current.
+- The pass adds finished `summarize` job rows, pruned with the rest.
+- Each kick walks for the next pages, about 19 ms when nothing is left
+  to write, so a reindex-all of 5,329 pages spends about 100 s of reads
+  on walks that find nothing, spread over its hours of embedding.
+  Skipping the walk after an empty one until an index job brings an
+  extraction without a summary needs the index pool to say which
+  document it indexed, which its finish hook doesn't: left as is.
+- The answer's 1,024 tokens are sized for Latin text at 3 characters a
+  token. Names are kept as the page writes them, so a page in Chinese or
+  Japanese with 12 names at the 60-character cap spends about 720 tokens
+  on them alone; such an answer can be cut off, which fails the page for
+  good (none of the sample's answers came near).
+- While Ollama doesn't answer, the one job the feed keeps stays pending,
+  deferred, and keep-awake counts it, as it counts the index jobs an
+  Ollama outage holds: on AC power the Mac is kept awake until Ollama
+  answers or the pass is paused. A model Ollama doesn't have keeps no
+  job, so it holds nothing; nor does an eviction hold. A fitness check
+  that keeps reaching no verdict keeps its one job, deferred until the
+  next check, at most 15 minutes ahead: keep-awake counts it too.
+- A load that fails with a 5xx once the model has passed its check
+  (another app took the memory) is a failed attempt of the page's job,
+  as a page's call answered with a 500 is: the brake holds it to three
+  documents a cycle, whose pages are parked for the week once their
+  attempts are spent. The check's wait covers only an unchecked model's
+  load; one for a fit model would be a wait of its own, reported apart
+  from the check's on healthz, status and doctor: left as is.
+- The eviction count takes Ollama's default 5-minute keep-alive as the
+  shortest a request for the model may leave. With `OLLAMA_KEEP_ALIVE`
+  set shorter on the server, a model Ollama frees on time between two
+  pages counts as evicted, and two such within an hour hold the pass.
+
+### Open items
+
+- Site cards: one summary per site of at least N pages. On the owner's
+  copy 63 sites hold 10 pages or more (2,223 pages), 142 hold 5 or more
+  (2,720): 63 to 142 more calls.
+- Summaries in interest labels, which name interests from terms or the
+  model's reading of titles today.
+- An about line on search hits, deferred with the dashboard. So are the
+  dashboard's words: its wordless note names a page's text, title,
+  folder and site but not its summary, and its Health card's
+  writing-model line leaves the summaries role out.
+- Summaries in ranking: as the reranker's input for each candidate (PR
+  5), where the list's gain at depth can count; a vector of the summary
+  alone only if the reranker's measurement asks for one.
+
+**How to revisit:** a change of the prompt, the cut or the caps changes
+`PromptVersion` and the golden files: run the sample (`make search-eval
+SUMMARIZE=1 DOCUMENTS=<sample>`) for each tier's check, time, invalid
+share and a hand check of faithfulness before it is recorded. A use of
+summaries in ranking, the list's weight or the reranker's input, is
+measured on replayed summaries (`SUMMARIES=`) against the pick rule
+above.
 
 ---
 

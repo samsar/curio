@@ -262,7 +262,7 @@ func TestRun_TextReport(t *testing.T) {
 	for _, label := range []string{"all", "kind topic", "kind keyword", "tag owner", "tag recent"} {
 		assert.Contains(t, out, "\n"+label+" ", label)
 	}
-	assert.Contains(t, out, "fields_weight 0, cards_weight 0, title_weight 0, rrf_k 60")
+	assert.Contains(t, out, "fields_weight 0, cards_weight 0, title_weight 0, summary_weight 0, rrf_k 60")
 	for _, stage := range []string{"embed", "bm25", "fields", "titles", "vector", "cards", "undated", "fuse", "hydrate",
 		"total"} {
 		assert.Regexp(t, `\n`+stage+` +\d+\.\d +\d+\.\d\n`, out, stage)

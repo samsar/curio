@@ -48,6 +48,20 @@
 // reported, and the variants run whatever it is: the tool measures the
 // planner. -plans replays a previous report's plans instead, asking no
 // model, so a later change is measured without the planner's variance.
+//
+// -summarize writes the copy's summaries first, as the daemon's summary
+// pass would, with config.yaml's summaries role (whatever
+// summaries.enabled says) from the markdown under -content: one page at a
+// time, each stored as it is written, so a stopped run resumes where it
+// stopped; -documents holds it to a list of document IDs (a sample), and
+// -summaries-out appends each summary and what it cost to a file, which
+// -summaries replays into another copy, asking no model. The writer's
+// fitness check is reported, never a gate. No card reads a summary: the
+// summary list (search.summary_weight, 0 by default) alone searches them.
+//
+//	searcheval -db copy.db -queries my-queries.yaml -summarize -content ~/.curio/content \
+//		-documents sample.txt -summaries-out summaries.jsonl
+//	searcheval -db another-copy.db -queries my-queries.yaml -summaries summaries.jsonl
 package main
 
 import (
@@ -89,6 +103,14 @@ type options struct {
 	// before any query, from the markdown under content.
 	reindex bool
 	content string
+	// summarize writes the copy's summaries with config.yaml's summaries
+	// role before any query, those in documents alone when it is set,
+	// appending each to summariesOut when it is set; summaries replays
+	// such a file instead, asking no model.
+	summarize    bool
+	documents    string
+	summariesOut string
+	summaries    string
 }
 
 // Exit codes.
@@ -136,8 +158,10 @@ func complain(stderr io.Writer, msg string) { _, _ = io.WriteString(stderr, msg)
 
 const usageLine = "usage: searcheval -db <copy of curio.db> -queries <file> [-config <config.yaml>] [-json <file>] " +
 	"[-baseline <previous -json>] " +
-	"[-variants hybrid,bm25,vector,fields,cards,titles,planned,planned-filters,planned-rewrites,planned-names] " +
-	"[-today YYYY-MM-DD] [-plans <previous -json>] [-reindex -content <dir>]\n"
+	"[-variants hybrid,bm25,vector,fields,cards,titles,summaries,planned,planned-filters,planned-rewrites," +
+	"planned-names] " +
+	"[-today YYYY-MM-DD] [-plans <previous -json>] [-reindex] [-content <dir>] " +
+	"[-summarize [-documents <file>] [-summaries-out <file>] | -summaries <file>]\n"
 
 // parseFlags parses args, writing what is wrong and the usage to out on a
 // usage error, and the usage alone for -h.
@@ -160,7 +184,15 @@ func parseFlags(args []string, out *bytes.Buffer) (options, error) {
 		"asking no model")
 	fs.BoolVar(&opts.reindex, "reindex", false, "re-embed the copy's chunks that predate the chunk context first, "+
 		"from the markdown under -content")
-	fs.StringVar(&opts.content, "content", "", "the content directory of the home the copy is from (with -reindex)")
+	fs.StringVar(&opts.content, "content", "", "the content directory of the home the copy is from (with -reindex "+
+		"or -summarize)")
+	fs.BoolVar(&opts.summarize, "summarize", false, "write the copy's summaries first with config.yaml's summaries "+
+		"role, one page at a time, from the markdown under -content; a rerun writes only what is left")
+	fs.StringVar(&opts.documents, "documents", "", "with -summarize, write only the summaries of the documents "+
+		"this file lists, an ID a line")
+	fs.StringVar(&opts.summariesOut, "summaries-out", "", "with -summarize, append each summary, with what it cost, "+
+		"to this file, a JSON line each (it holds what pages say: keep it out of the repository)")
+	fs.StringVar(&opts.summaries, "summaries", "", "replay a -summaries-out file's summaries first, asking no model")
 	fs.Usage = func() {
 		out.WriteString(usageLine)
 		fs.PrintDefaults()
@@ -178,8 +210,14 @@ func parseFlags(args []string, out *bytes.Buffer) (options, error) {
 		problem = fmt.Sprintf("unexpected argument %q", fs.Arg(0))
 	case opts.reindex && opts.content == "":
 		problem = "-reindex needs -content, the content directory of the home the copy is from"
-	case opts.content != "" && !opts.reindex:
-		problem = "-content is read only with -reindex"
+	case opts.summarize && opts.content == "":
+		problem = "-summarize needs -content, the content directory of the home the copy is from"
+	case opts.content != "" && !opts.reindex && !opts.summarize:
+		problem = "-content is read only with -reindex or -summarize"
+	case opts.summarize && opts.summaries != "":
+		problem = "-summarize writes the summaries and -summaries replays them: pass one"
+	case !opts.summarize && (opts.documents != "" || opts.summariesOut != ""):
+		problem = "-documents and -summaries-out are read only with -summarize"
 	default:
 		opts.variants, problem = parseVariants(variants)
 	}

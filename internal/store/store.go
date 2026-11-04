@@ -1204,6 +1204,13 @@ type DocumentIndex interface {
 	// state are returned. A blank query, or a limit of 0 or less, reads
 	// nothing.
 	SearchTitles(ctx context.Context, tenantID, query string, limit int, f SearchFilters) ([]DocumentHit, error)
+	// SearchSummaries runs query, a MATCH expression as SearchFields takes
+	// it, against the tenant's documents' summaries (their site and author
+	// words, entities, about line, descriptions and claims), scoped by f,
+	// and returns at most limit documents, best first, equal scores in the
+	// order their summaries were first written. Documents of every state
+	// are returned: a summary describes the page it read.
+	SearchSummaries(ctx context.Context, tenantID, query string, limit int, f SearchFilters) ([]DocumentHit, error)
 	// SearchCards returns at most limit of the tenant's documents whose
 	// card vectors are nearest embedding, scoped by f, nearest first,
 	// equal distances by document ID. Documents of every state are
@@ -1258,6 +1265,186 @@ type DocumentSite struct {
 	Host string
 }
 
+// SummaryKind is what a page is, as its summary says
+// (document_summaries.kind). Like FailureCause it has no CHECK constraint:
+// the kinds grow with the prompts that write them, and the store checks
+// Valid on every write.
+type SummaryKind string
+
+// The summary kinds, in the order SummaryKinds lists them.
+const (
+	SummaryKindHome          SummaryKind = "home"
+	SummaryKindArticle       SummaryKind = "article"
+	SummaryKindProfile       SummaryKind = "profile"
+	SummaryKindRepository    SummaryKind = "repository"
+	SummaryKindCode          SummaryKind = "code"
+	SummaryKindVideo         SummaryKind = "video"
+	SummaryKindPaper         SummaryKind = "paper"
+	SummaryKindProduct       SummaryKind = "product"
+	SummaryKindThread        SummaryKind = "thread"
+	SummaryKindDocumentation SummaryKind = "documentation"
+	// SummaryKindNotThePage: what was fetched isn't the page saved (a
+	// sign-in wall, an error or CAPTCHA page, an empty page). Its summary
+	// holds no text.
+	SummaryKindNotThePage SummaryKind = "not_the_page"
+	SummaryKindOther      SummaryKind = "other"
+)
+
+var summaryKinds = []SummaryKind{
+	SummaryKindHome, SummaryKindArticle, SummaryKindProfile, SummaryKindRepository, SummaryKindCode,
+	SummaryKindVideo, SummaryKindPaper, SummaryKindProduct, SummaryKindThread, SummaryKindDocumentation,
+	SummaryKindNotThePage, SummaryKindOther,
+}
+
+// SummaryKinds returns every SummaryKind, in the order of their constants,
+// in a slice the caller may keep.
+func SummaryKinds() []SummaryKind { return slices.Clone(summaryKinds) }
+
+// Valid reports whether k is one of the SummaryKind constants.
+func (k SummaryKind) Valid() bool { return slices.Contains(summaryKinds, k) }
+
+// SummaryWriter is who writes summaries now: the summaries role's model
+// and the PromptVersion of its prompt. A summary written by another is
+// outdated, and kept until it is owed.
+type SummaryWriter struct {
+	Model         string
+	PromptVersion string
+}
+
+// Summary is a document's summary as the writer wrote it: what it read
+// (the extraction, and the hash of the exact input), who wrote it, and
+// the fields. Lists are in the writer's order.
+type Summary struct {
+	DocumentID   string
+	ExtractionID string
+	Kind         SummaryKind
+	Site         string
+	Author       string
+	About        string
+	Entities     []string
+	Claims       []string
+	Descriptions []string
+	SummaryWriter
+	InputHash string
+	WrittenAt time.Time
+}
+
+// SummaryFailure is a summary that failed for good: the extraction, model
+// and prompt it was tried under, when, and why.
+type SummaryFailure struct {
+	ExtractionID string
+	SummaryWriter
+	At    time.Time
+	Error string
+}
+
+// StoredSummary is what the store holds of a document's summary: the
+// summary written, if any (nil when none was), whether it is owed a
+// rewrite, and its last failure for good, if any (cleared by a write).
+type StoredSummary struct {
+	Summary *Summary
+	Owed    bool
+	Failure *SummaryFailure
+}
+
+// SummaryCounts sorts a tenant's fetched documents with a current
+// extraction by their summary under the writer now: their sum is those
+// documents. Written: a summary of the current extraction by the writer,
+// not owed, of a kind but not_the_page. NotThePage: the same, of kind
+// not_the_page. Outdated: a summary of the current extraction by another
+// model or prompt, not owed. Failed: none of those, and failed for good
+// under the current extraction, model and prompt. ToWrite: the rest (no
+// summary, one of an older extraction, or one owed).
+type SummaryCounts struct {
+	Written, ToWrite, Outdated, Failed, NotThePage int
+}
+
+// SummaryScope is which summaries OweSummaries marks owed.
+type SummaryScope string
+
+// The scopes.
+const (
+	// SummaryScopeOutdated: the summaries another model or prompt wrote.
+	SummaryScopeOutdated SummaryScope = "outdated"
+	// SummaryScopeAll: every summary, and every page whose summary
+	// failed for good.
+	SummaryScopeAll SummaryScope = "all"
+)
+
+// Valid reports whether s is one of the SummaryScope constants.
+func (s SummaryScope) Valid() bool { return s == SummaryScopeOutdated || s == SummaryScopeAll }
+
+// SummarizeLimits bound how many summarize jobs the feed queues at once
+// (SummaryStore.EnqueueSummarize), as ReembedLimits bound the re-embed's.
+type SummarizeLimits struct {
+	// InFlight is how many summarize jobs may run, or wait to and be due,
+	// at once.
+	InFlight int
+	// Waiting is how many more may wait out a retry or a deferral besides.
+	Waiting int
+	// FailedWait is how long after a document's summary failed for good,
+	// under its current extraction, the model and the prompt, it isn't
+	// queued again.
+	FailedWait time.Duration
+	// NotBefore, when ahead, is the earliest the jobs queued may run: the
+	// end of the summaries' fitness check's wait, which a job due sooner
+	// would only meet. Zero, or past, is now.
+	NotBefore time.Time
+}
+
+// SummaryStore keeps the documents' summaries: text of their own, read by
+// the summary list and the document's page, which no derived row (field,
+// card) reads. A document's row goes with it (ON DELETE CASCADE), and a
+// failed or dead document keeps its summary.
+type SummaryStore interface {
+	// PutSummary writes s, in one transaction, while its document is
+	// fetched and s.ExtractionID is its current extraction; otherwise it
+	// writes nothing and returns ErrSuperseded. It clears the owed mark
+	// and the last failure. A summary equal to the one stored writes
+	// nothing. s.Kind must be valid; s.WrittenAt zero is now.
+	PutSummary(ctx context.Context, tenantID string, s Summary) error
+	// RecordSummaryFailure records that documentID's summary failed for
+	// good as f says. The summary written before, if any, stays. A
+	// document that no longer exists records nothing, and is no error.
+	RecordSummaryFailure(ctx context.Context, tenantID, documentID string, f SummaryFailure) error
+	// GetSummary reads documentID's summary as stored. ErrNotFound when
+	// none was written or failed.
+	GetSummary(ctx context.Context, tenantID, documentID string) (*StoredSummary, error)
+	// CountSummaries sorts the tenant's fetched documents by their
+	// summary under w (SummaryCounts).
+	CountSummaries(ctx context.Context, tenantID string, w SummaryWriter) (SummaryCounts, error)
+	// OweSummaries marks owed the summaries in scope of the tenant's
+	// fetched documents (outdated: those another model or prompt than w's
+	// wrote; all: every one, and every failure for good, which it clears),
+	// so the feed writes them again, and returns how many it marked.
+	OweSummaries(ctx context.Context, tenantID string, scope SummaryScope, w SummaryWriter) (int, error)
+	// EnqueueSummarize tops up the tenant's summary pass under w within
+	// limits: while fewer than limits.InFlight summarize jobs run or wait
+	// and are due, and fewer than limits.InFlight + limits.Waiting run or
+	// wait at all, it queues one for each of the next documents to write,
+	// those indexed most recently first: fetched, with a current
+	// extraction, with no summary of it or one owed, not failed for good
+	// under it and w within limits.FailedWait, and with no summarize job
+	// pending or running, each to run no sooner than limits.NotBefore. It
+	// reads them outside the write lock, queues them in one transaction
+	// that counts the jobs again, wakes the summarize workers once it
+	// commits when the jobs are due, and returns how many it queued.
+	EnqueueSummarize(ctx context.Context, tenantID string, w SummaryWriter, limits SummarizeLimits) (int, error)
+	// ToSummarize lists the documents EnqueueSummarize would queue next
+	// under w, at most limit of them, in its order and by its rule
+	// (limits.FailedWait), queueing nothing: for the developer's tools,
+	// which write summaries without jobs.
+	ToSummarize(ctx context.Context, tenantID string, w SummaryWriter, failedWait time.Duration, limit int) (
+		[]SummaryTarget, error)
+}
+
+// SummaryTarget is a document the summary pass would write: its ID, and
+// the extraction its summary would read.
+type SummaryTarget struct {
+	DocumentID   string
+	ExtractionID string
+}
+
 // IndexGuard is what an index of a document was made from, which its
 // writes are held to (ChunkStore.ReplaceIndexed, DocumentStore.MarkIndexed),
 // so that one a refetch or a failure overtook writes nothing.
@@ -1272,9 +1459,13 @@ type IndexGuard struct {
 }
 
 // DocumentJobPayload is the payload of a job that works on one document
-// (fetch and index).
+// (fetch, index and summarize).
 type DocumentJobPayload struct {
 	DocumentID string `json:"document_id"`
+	// ExtractionID is the extraction a summarize job was queued to read
+	// (SummaryStore.EnqueueSummarize): what its permanent failure is
+	// recorded against. Empty for every other kind.
+	ExtractionID string `json:"extraction_id,omitempty"`
 	// Reembed marks an index job the daemon queued to re-embed a fetched
 	// document for a new chunk context (DocumentStore.EnqueueReembed), not
 	// one a fetch or a user queued: one that fails for good leaves the

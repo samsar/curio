@@ -447,14 +447,71 @@ highlights      (tenant_id, document_id, text, note, highlighted_at, source)
 Both follow the same pattern: their own table, FK to `documents`, own
 source-specific fields.
 
+### `document_summaries` and `document_summaries_fts` (migration 022)
+
+A fetched document's summary, written by the summaries role's model in
+one structured call (`internal/summarize`, decisions.md "Summaries: one
+structured call per document, stored for the reranker"), while
+`summaries.enabled` is true: its kind, the site and author it names, a
+line of what it is about, the names it holds, up to four claims and up
+to four descriptions. A summary is text a model wrote, not a derived
+row, and no field or card reads it: the store writes it (`PutSummary`)
+only while the document is fetched and the summary read its current
+extraction (otherwise `store.ErrSuperseded`), never with `INSERT OR
+REPLACE`, and the write queues no cards job. It carries no `updated_at`.
+
+```
+document_summaries
+  seq                   INTEGER PK              -- rowid of the row's document_summaries_fts entry
+  document_id           UUID NOT NULL UNIQUE FK -- ON DELETE CASCADE
+  extraction_id         UUID                    -- the extraction the summary read; NULL for a failure alone
+  kind                  TEXT                    -- store.SummaryKind, validated in Go; '' for none
+  site, author, about   TEXT
+  entities              TEXT                    -- one a line
+  claims                TEXT                    -- one a line
+  descriptions          TEXT                    -- one a line
+  model                 TEXT                    -- who wrote it, with prompt_version
+  prompt_version        TEXT
+  input_hash            TEXT                    -- SHA-256 of the prompt's version and the exact input
+  written_at            TIMESTAMP
+  owed                  INTEGER                 -- 1: write it again (curio summarize)
+  failed_extraction_id, failed_model, failed_prompt_version, failed_at, failure
+                                                -- the last failure for good; cleared by a write
+```
+
+- A summary is **current** while it read the document's current
+  extraction, and **outdated** while another model or prompt wrote it: an
+  outdated summary is kept, counted, and written again only when asked
+  (`curio summarize --outdated`, which marks them owed). A refetch whose
+  input hashes the same is pointed at its new extraction without a call.
+- `document_summaries_fts` is the summary list's own external-content
+  FTS5 index, read only while `search.summary_weight` weighs the list (0
+  by default) (`content_rowid = seq`; columns site, author, entities,
+  about, descriptions, claims; `porter unicode61 remove_diacritics 2`),
+  never columns of `document_fields_fts`: FTS5's `bm25()` divides a match
+  by the whole row's length, and a weight it isn't given is 1. Insert and
+  delete triggers keep it in step, a cascade delete of a document
+  included; the update trigger fires only when a searched value changed,
+  so pointing a summary at a new extraction, owing it or recording a
+  failure re-tokenizes nothing. The start's index check
+  (`sqlite.EnsureDocumentFields`) checks and rebuilds it beside
+  `document_fields_fts`.
+- The summary pass walks `idx_documents_tenant_indexed` (most recently
+  indexed first) for the next documents to write, pinned in
+  `plans_test.go` with every statement of the table and its triggers.
+- Going back to 2.7 leaves the table and its index in place, unread; a
+  document deleted under 2.7 takes its summary with it by the cascade and
+  the delete trigger.
+
 ### `jobs`
 
 ```
 jobs
   id            UUID PK
   tenant_id     TEXT NOT NULL
-  kind          TEXT NOT NULL                  -- 'fetch' | 'index' | 'cluster' | 'cards'; 'import' and
-                                               --   'summarize' are reserved: allowed by the CHECK, never enqueued
+  kind          TEXT NOT NULL                  -- 'fetch' | 'index' | 'cluster' | 'cards' | 'summarize' (the
+                                               --   summary pass, payload {document_id, extraction_id});
+                                               --   'import' is reserved: allowed by the CHECK, never enqueued
   payload       JSON NOT NULL
   document_id   UUID FK                        -- → documents(id), ON DELETE SET NULL
   status        TEXT NOT NULL                  -- 'pending' | 'running' | 'done' | 'failed'

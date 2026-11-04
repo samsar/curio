@@ -1723,6 +1723,73 @@ func assertSameHits(t *testing.T, want, got []bm25Hit, query string) {
 	}
 }
 
+// TestMigration022_DocumentSummaries: 022 adds the summaries and their
+// index, empty, keeping every row; its triggers keep the index in step
+// with the rows, a cascade delete included, an update writing the index
+// only for a searched value; and Down gives back 021's schema byte for
+// byte.
+func TestMigration022_DocumentSummaries(t *testing.T) {
+	ctx := context.Background()
+	db, p := migratedTo(t, 21)
+	_, err := db.Exec(`
+		INSERT INTO documents (id, tenant_id, url, state) VALUES ('d1', 'local', 'https://example.com/1', 'fetched'),
+			('d2', 'local', 'https://example.com/2', 'fetched');
+		INSERT INTO document_extractions (id, document_id, fetcher, status) VALUES ('e1', 'd1', 'native', 'ok');`)
+	require.NoError(t, err)
+	const docsQ = `SELECT id, tenant_id, url, state FROM documents ORDER BY id`
+	docsBefore := dumpRows(t, db, docsQ)
+	schemaBefore := schemaDump(t, db)
+	integrity := func() {
+		t.Helper()
+		_, err := db.Exec(`INSERT INTO document_summaries_fts (document_summaries_fts, rank) VALUES ('integrity-check', 1)`)
+		require.NoError(t, err)
+	}
+	match := func(q string) [][]any {
+		t.Helper()
+		return dumpRows(t, db, `SELECT s.document_id FROM document_summaries_fts
+			JOIN document_summaries s ON s.seq = document_summaries_fts.rowid
+			WHERE document_summaries_fts MATCH ? ORDER BY s.document_id`, q)
+	}
+
+	_, err = p.UpTo(ctx, 22)
+	require.NoError(t, err)
+	assert.Equal(t, docsBefore, dumpRows(t, db, docsQ), "every document kept")
+	assert.Zero(t, countRows(t, db, "document_summaries"), "nothing written")
+	integrity()
+
+	_, err = db.Exec(`INSERT INTO document_summaries (document_id, extraction_id, kind, site, entities, claims)
+		VALUES ('d1', 'e1', 'article', 'Example Times', 'Zephyrine' || char(10) || 'Kafka', 'queues back up'),
+		('d2', NULL, '', '', '', '')`)
+	require.NoError(t, err)
+	assert.Equal(t, [][]any{{"d1"}}, match(`"zephyrine"`))
+	_, err = db.Exec(`UPDATE document_summaries SET owed = 1, extraction_id = 'e2', failure = 'x' WHERE document_id = 'd1'`)
+	require.NoError(t, err)
+	integrity()
+	_, err = db.Exec(`UPDATE document_summaries SET entities = 'Quorum' WHERE document_id = 'd1'`)
+	require.NoError(t, err)
+	assert.Empty(t, match(`"zephyrine"`))
+	assert.Equal(t, [][]any{{"d1"}}, match(`"quorum"`))
+	integrity()
+	_, err = db.Exec(`PRAGMA foreign_keys = ON; DELETE FROM documents WHERE id = 'd1'`)
+	require.NoError(t, err)
+	assert.Empty(t, match(`"quorum"`), "a cascade delete takes the index entry")
+	assert.Equal(t, 1, countRows(t, db, "document_summaries"))
+	integrity()
+	_, err = db.Exec(`UPDATE document_summaries SET kind = 'other' WHERE document_id = 'd2'`)
+	require.NoError(t, err)
+	_, err = db.Exec(`UPDATE document_summaries SET owed = 2 WHERE document_id = 'd2'`)
+	require.ErrorContains(t, err, "CHECK", "owed is 0 or 1")
+
+	_, err = db.Exec(`DELETE FROM document_summaries`)
+	require.NoError(t, err)
+	_, err = p.DownTo(ctx, 21)
+	require.NoError(t, err)
+	assert.Equal(t, schemaBefore, schemaDump(t, db), "021's schema, byte for byte")
+
+	_, err = p.UpTo(ctx, 22)
+	require.NoError(t, err, "Up runs again")
+}
+
 // TestMigration008_ChunksFTSExternalContent seeds chunks the way the store
 // wrote them before migration 008 (chunk row, six-column FTS row, vector)
 // and checks that search is unchanged across it, in both directions.

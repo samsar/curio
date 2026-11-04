@@ -67,7 +67,10 @@ A Cobra-based CLI, thin client over the daemon's HTTP API. Subcommands:
 - `curio pause` / `curio resume` — stop starting jobs, and start again
   (running jobs finish; the pause survives restarts)
 - `curio throttle gentle|normal` — fewer jobs at once to spare the
-  machine, or every worker
+  machine (and a rest after each page's summary as long as it took), or
+  every worker
+- `curio summarize --outdated|--all` — write again the summaries another
+  model or prompt wrote, or every one and the pages whose summary failed
 - `curio schedule HH:MM-HH:MM|off` — start jobs only in a daily window
 - `curio keep-awake on|off` — keep the Mac from idle sleep while jobs are
   queued and it runs on AC power
@@ -159,12 +162,27 @@ all fetch/index/search/insight workflows.
   first-party module", "Library: a Date saved order lists saves" and
   "Dashboard: the Failures tab"
 - Internal worker pools process jobs from the SQLite-backed queue: fetch,
-  index, cluster (one goroutine) and cards (one goroutine, which embeds
-  the documents' stale cards). They claim through the queue gate
-  (`jobs.QueueGate`), which holds claims back while the queue is paused,
-  outside its daily schedule, or at the throttle's cap; its settings live
-  in SQLite (`queue_settings`) and are read and changed at `GET`/`PUT
-  /v1/queue`
+  index, cluster (one goroutine), cards (one goroutine, which embeds
+  the documents' stale cards) and summarize (one goroutine, the summary
+  pass: one structured call of the summaries role's model per fetched
+  page, `internal/summarize`, fed a job at a time by `jobs.Summaries`,
+  only while `summaries.enabled` is true; the summaries are stored, read
+  by no card, and searched only while `search.summary_weight` weighs their
+  list, 0 by default).
+  They claim through the queue gate (`jobs.QueueGate`), which holds claims
+  back while the queue is paused, outside its daily schedule, or at the
+  throttle's cap (under `gentle` the summary pass also rests after each
+  page as long as the page took); its settings live in SQLite
+  (`queue_settings`) and are read and changed at `GET`/`PUT /v1/queue`.
+  The summary pass also yields to the person (`jobs.Foreground`): no
+  page is started while a search, a plan or the interests' labels use a
+  model, or within a minute of the last, and the call in flight is
+  cancelled when such a use begins. The writer says how many jobs the
+  feed may keep (`summarize.Writer.Feed`): one while its model doesn't
+  answer or its fitness check waits to run again (then queued for the
+  wait's end, `Writer.CheckRetryAt`), none while Ollama
+  keeps unloading the model for others (an eviction hold) or doesn't
+  have it (the feed's 5-minute check asks its model listing)
 
 ### `curio-mcp` (sidecar)
 

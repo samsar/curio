@@ -122,10 +122,13 @@ type InterestsState struct {
 	ChangedDocuments int       `json:"changed_documents,omitempty"`
 	RebuildAt        int       `json:"rebuild_at,omitempty"`
 	DueSince         time.Time `json:"due_since,omitzero"`
-	FreshOwed        string    `json:"fresh_owed,omitempty"`
-	HeldReason       string    `json:"held_reason,omitempty"`
-	RetryAt          time.Time `json:"retry_at,omitzero"`
-	LastError        string    `json:"last_error,omitempty"`
+	// WaitingFor is what a due rebuild waits for before it is queued:
+	// reembedding, embedding_check or settle; absent in any other state.
+	WaitingFor string    `json:"waiting_for,omitempty"`
+	FreshOwed  string    `json:"fresh_owed,omitempty"`
+	HeldReason string    `json:"held_reason,omitempty"`
+	RetryAt    time.Time `json:"retry_at,omitzero"`
+	LastError  string    `json:"last_error,omitempty"`
 	// Map is the done rebuild's map: absent before the first check, with
 	// the insight layer off, and with no done rebuild unless the map is
 	// off.
@@ -183,7 +186,8 @@ func (d Deps) interestsState() InterestsState {
 	return InterestsState{
 		State: string(s.State), LastRebuildAt: s.LastRebuildAt.UTC(), LastKind: string(s.LastKind),
 		LastTrigger: string(s.LastTrigger), ChangedDocuments: s.Changed, RebuildAt: s.RebuildAt,
-		DueSince: s.DueSince.UTC(), FreshOwed: s.FreshOwed, HeldReason: s.HeldReason, RetryAt: s.RetryAt.UTC(),
+		DueSince: s.DueSince.UTC(), WaitingFor: string(s.WaitingFor), FreshOwed: s.FreshOwed,
+		HeldReason: s.HeldReason, RetryAt: s.RetryAt.UTC(),
 		LastError: s.LastError, Map: interestsMap(s.Map),
 	}
 }

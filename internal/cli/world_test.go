@@ -90,7 +90,7 @@ func upWorldFrom(t *testing.T, start func(testing.TB, ...func(*api.Deps)) *apite
 		// config.yaml's roles, in use with their defaults, write with
 		// generation.model.
 		d.GenerationModel = genModel
-		d.GenerationRoles = map[string]string{"labels": genModel, "planner": genModel}
+		d.GenerationRoles = map[string]string{"labels": genModel, "planner": genModel, "summaries": genModel}
 		d.GitHubToken = true
 	}}, opts...)...)
 	w.srv, w.home, w.daemonURL = srv, srv.Home.Path, srv.URL

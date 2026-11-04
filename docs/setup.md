@@ -940,6 +940,106 @@ start; but its drift check re-embeds passages without their context, so
 after an Ollama upgrade it may report a drift, which `curio reindex
 --all` clears.
 
+## Document summaries
+
+The daemon can ask the writing model for each page's summary, one page at
+a time: what kind of page it is (an article, a home page, a profile, a
+repository, a video, a sign-in wall that isn't the page saved, ...), the
+site and author it names, a line of what it is about, the names it holds,
+a few claims and short descriptions. The summary is stored beside the
+page (`curio docs show <id>` prints it, MCP's `get_document` returns it)
+and never becomes passages. Only the page's own title, address, site
+name, type and text go to the model, and only to the Ollama on this Mac
+unless `generation.roles.summaries` names another server itself.
+
+**Summaries are off by default**, whatever the writing model. Measured on
+a real library, search ranked no better with them: written into the
+page's card they cost the top results, and as a keyword list of their own
+they held the top results level while costing pages found by their
+titles. They are kept for later work that reads each candidate's summary
+as it ranks or answers. An upgrade starts no pass, pulls nothing for
+them, and changes no card: search ranks as curio 2.7 did.
+
+To turn them on, set them in config.yaml and restart the daemon (`curio
+daemon stop`; the next command starts it), whose start begins the pass:
+
+```yaml
+summaries:
+  enabled: true
+```
+
+`curio up` then offers to pull the summaries' model if no other role
+writes with it. The keyword list over the summaries stays off unless
+`search.summary_weight` weighs it (0 by default).
+
+The pass starts with the pages saved or refetched most recently, and then
+follows every new page. It runs under the queue like the rest of the
+work:
+
+- `curio pause` holds it, `curio schedule` keeps it to its window;
+- at `normal` throttle it writes page after page; at `gentle` it rests
+  after each page as long as the page took, about half the pace;
+- it yields to you: no page is started while a search, a planned search
+  or the interests' labels use a model, or within a minute of the last,
+  and a page in flight is stopped at once (Ollama frees the model within
+  about a second) and written again later. Measured with `gemma4:26b`,
+  searches a few seconds apart ran as fast as with the pass paused
+  (understood, a median 1.1 s), and one that met a summary in flight took
+  about 0.2 s more (1.2 s, 2.3 s at worst);
+- keep-awake holds the Mac awake while it runs, as for an import; while
+  the writing model isn't pulled, no page waits for it and nothing holds
+  the Mac awake: the daemon checks every 5 minutes whether it is, and the
+  pass goes on once it is (`curio up` pulls it);
+- when Ollama unloads the writing model twice within an hour for other
+  models (on a Mac where they don't fit in memory together), the pass
+  waits 15 minutes, twice as long each time it goes on, at most 4 hours,
+  rather than load the model again for every page; `curio status` and
+  `curio doctor` say so.
+
+What it costs depends on the writing model, measured on a 64 GB M-series
+Mac (a page's median; 5,000 pages at that pace, and at `gentle`, which
+rests as long again after each page, about twice as long):
+
+| writing model | a page | 5,000 pages | at `gentle` |
+|---|---|---|---|
+| `gemma4:26b` (64 GB) | 3.6 s | about 5 h | about 10 h |
+| `gemma4:26b-a4b-it-qat` (32 GB) | 3.6 s | about 5 h | about 10 h |
+| `gemma4:12b` (16 GB) | 5.9 s | about 8 h | about 16 h |
+| `qwen3:4b-instruct` (8 GB) | 4.0 s | about 5.5 h | about 11 h |
+
+Every model passed the check. Read by hand against their pages,
+`gemma4:26b`'s summaries stated nothing their page doesn't (0 of 50),
+`gemma4:26b-a4b-it-qat`'s once (1 of 50, 2%), `gemma4:12b`'s 3 times in 50
+and `qwen3:4b-instruct`'s at least once in 30. With summaries on and a
+model past those bars (more than 2% of its summaries stating what their
+page doesn't, a failed check, or more than 24 h for 5,000 pages), `curio
+doctor` warns and says how to change it.
+
+`curio status` prints a `summaries:` line (written of the total, what is
+left and when it is done at the measured rate, or that they are off by
+default and how to turn them on) and warns while no page gets one;
+`curio doctor`'s `summaries` check says why, with the fix.
+
+- **Turn it off again**: `summaries:` / `enabled: false` in config.yaml
+  (or leave the key out), then restart the daemon. The summaries written
+  stay stored; no page is sent to a model.
+- **Another model**: `generation.roles.summaries.model` (the summaries
+  role, `generation.model` without it). `curio up` offers to pull it; the
+  daemon never pulls it alone. A summary another model or prompt wrote is
+  kept and counted outdated; `curio summarize --outdated` writes those
+  again, `curio summarize --all` every one.
+- **A page whose summary failed** (an answer that couldn't be used) is
+  tried again after a week, when the page, model or prompt changes, or at
+  once with `curio summarize --all`.
+
+Going back to curio 2.7 needs no database restore: 2.7 leaves the
+summaries in place and reads none of them, and the cards are the same in
+both. Remove `summaries`, `search.summary_weight` and
+`generation.roles.summaries` from config.yaml first, if you set any: 2.7
+refuses each of them, and its daemon won't start. Coming back, this
+version writes only the summaries of pages refetched meanwhile with new
+content, while they are on.
+
 ## Config: time budgets for Ollama calls
 
 Each bounds how long one kind of work waits on Ollama; all are validated as
