@@ -77,6 +77,9 @@
   --shadow-md: 0 1px 2px rgba(16, 20, 30, 0.04), 0 4px 12px rgba(16, 20, 30, 0.06);
   --shadow-lg: 0 8px 28px rgba(16, 20, 30, 0.14), 0 2px 6px rgba(16, 20, 30, 0.06);
   --ring: 0 0 0 3px rgba(91, 91, 214, 0.28);
+  /* The focus outline: 3:1 or more against the page and the surface
+     (WCAG 1.4.11), so a soft ring is never the only sign of focus. */
+  --focus: #4b4ac2;
 
   --container: 76rem;
   --header-h: 3.5rem;
@@ -115,6 +118,7 @@
     --shadow-md: 0 1px 2px rgba(0, 0, 0, 0.3), 0 4px 14px rgba(0, 0, 0, 0.35);
     --shadow-lg: 0 10px 34px rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.4);
     --ring: 0 0 0 3px rgba(140, 140, 255, 0.4);
+    --focus: #a8a9ff;
   }
 }
 :root[data-theme="dark"] {
@@ -138,6 +142,7 @@
   --shadow-md: 0 1px 2px rgba(0, 0, 0, 0.3), 0 4px 14px rgba(0, 0, 0, 0.35);
   --shadow-lg: 0 10px 34px rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.4);
   --ring: 0 0 0 3px rgba(140, 140, 255, 0.4);
+  --focus: #a8a9ff;
 }
 
 /* ------------------------------------------------------------------ 2 base */
@@ -161,7 +166,9 @@ body {
 }
 
 h1, h2, h3, p, ul, ol, dl, figure, blockquote { margin: 0; }
-h1, h2, h3 { line-height: var(--lh-tight); letter-spacing: -0.012em; font-weight: 620; }
+h1, h2, h3 { line-height: var(--lh-tight); letter-spacing: -0.012em; font-weight: 620; text-wrap: balance; }
+/* Running text avoids a last line of one word. */
+p, li, dd, blockquote { text-wrap: pretty; }
 h1 { font-size: var(--fs-xl); }
 h2 { font-size: var(--fs-md); }
 h3 { font-size: var(--fs-base); }
@@ -169,7 +176,8 @@ h3 { font-size: var(--fs-base); }
 a { color: var(--accent-text); text-decoration: none; }
 a:hover { text-decoration: underline; text-underline-offset: 0.18em; text-decoration-thickness: 1px; }
 
-code, kbd, pre, .mono { font-family: var(--mono); font-size: 0.92em; }
+/* Monospace runs a little smaller than its text, never under 12px. */
+code, kbd, pre, .mono { font-family: var(--mono); font-size: max(0.92em, var(--fs-xs)); }
 code {
   background: var(--surface-2);
   border: 1px solid var(--border);
@@ -197,8 +205,10 @@ svg.icon {
 .btn svg, .header-search svg, .doc-url svg, .panel-error svg, .action-status svg,
 .bookmark-list svg, .pager-pages svg, .control > .label svg { width: 0.875rem; height: 0.875rem; }
 
+/* Focus: a 2px outline everywhere, never replaced by the ring, which
+   controls may add as decoration (TestStylesheet). */
 :focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--focus);
   outline-offset: 2px;
   border-radius: 4px;
 }
@@ -309,7 +319,6 @@ input, select, button, textarea { font: inherit; color: inherit; }
   border: 1px solid var(--border-strong);
   border-radius: var(--r-sm);
   box-shadow: var(--shadow-sm);
-  outline: none;
   min-width: 0;
 }
 .input::placeholder, .header-search input::placeholder { color: var(--text-3); }
@@ -322,6 +331,7 @@ input, select, button, textarea { font: inherit; color: inherit; }
 }
 .header-search input:focus { background: var(--surface); }
 .input:focus, .select:focus, .header-search input:focus { border-color: var(--accent); box-shadow: var(--ring); }
+.input:focus-visible, .select:focus-visible, .header-search input:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 .select {
   appearance: none; -webkit-appearance: none;
   padding-right: 2rem;
@@ -349,7 +359,6 @@ input, select, button, textarea { font: inherit; color: inherit; }
 }
 .btn:hover { background: var(--surface-2); text-decoration: none; }
 .btn:active { background: var(--surface-3); }
-.btn:focus-visible { outline: none; box-shadow: var(--ring); }
 .btn svg { color: var(--text-3); }
 
 .btn-primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); box-shadow: 0 1px 2px rgba(60, 60, 180, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.12); }
@@ -411,7 +420,7 @@ input, select, button, textarea { font: inherit; color: inherit; }
 }
 .switch input:checked { background: var(--accent); border-color: var(--accent); }
 .switch input:checked::after { transform: translateX(0.85rem); }
-.switch input:focus-visible { outline: none; box-shadow: var(--ring); }
+.switch input:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 
 /* Badges: document states, queue states, kinds ----------------------------- */
 
@@ -583,18 +592,20 @@ col.c-rank { width: 3.5rem; }
 /* Unsorted's nearest interest: a label, cut on one line. */
 col.c-nearest { width: 16rem; }
 
-/* A document cell: its title on one line, where it lives under it, and,
-   for a failed one, why, in at most two lines. */
+/* A document cell: its title in at most two lines, the row's main text,
+   cut, whole on hover; where it lives under it, and, for a failed one,
+   why, on a line each. */
 .doc-title {
-  display: block;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden;
   color: var(--text); font-weight: 560;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 a.doc-title:hover { color: var(--accent-text); }
-.doc-title.untitled { font-family: var(--mono); font-size: 0.86em; font-weight: 500; color: var(--text-2); }
-/* An untitled document named by its bookmark's title: the fallback style
-   of an unlabeled interest, in the title's own font and size. */
-.doc-title.from-bookmark { font-style: italic; font-weight: 500; color: var(--text-2); }
+/* An untitled document, wherever it is named: by its bookmark's title,
+   or by its short address when it has none (DocRef), in italics, in the
+   title's own font, secondary. One rule for the lists, a result, the
+   related documents, a card's members and the document's own page. */
+.doc-title.untitled, .result-title a.untitled, .related a.untitled, .interest .members a.untitled,
+.doc-head h1.untitled { font-style: italic; font-weight: 500; color: var(--text-2); }
 .doc-sub {
   display: flex; align-items: center; gap: 0.4rem; min-width: 0;
   margin-top: 0.15rem;
@@ -723,6 +734,8 @@ nav.pager {
 .confirm[popover]::backdrop { background: rgba(10, 12, 18, 0.45); backdrop-filter: blur(2px); }
 .confirm h2 { font-size: var(--fs-md); margin-bottom: var(--s2); display: flex; gap: var(--s2); align-items: center; }
 .confirm p { color: var(--text-2); }
+.confirm p + p { margin-top: var(--s2); }
+.confirm .confirm-note { color: var(--text-3); font-size: var(--fs-sm); }
 .confirm .actions { display: flex; justify-content: flex-end; gap: var(--s2); margin-top: var(--s5); flex-wrap: wrap; }
 
 /* Facts (dl) --------------------------------------------------------------- */
@@ -730,7 +743,7 @@ nav.pager {
 dl.facts { display: grid; grid-template-columns: minmax(6rem, max-content) minmax(0, 1fr); gap: var(--s2) var(--s4); font-size: var(--fs-sm); }
 dl.facts dt { color: var(--text-3); }
 dl.facts dd { margin: 0; color: var(--text); min-width: 0; }
-dl.facts dd code { font-size: 0.9em; }
+dl.facts dd code { font-size: max(0.9em, var(--fs-xs)); }
 dl.facts .mono { overflow-wrap: anywhere; color: var(--text-2); }
 
 /* Rows: a list of label/value lines inside a card. */
@@ -818,11 +831,11 @@ svg.stackbar rect { shape-rendering: crispEdges; }
   border: 1px solid var(--border-strong);
   border-radius: var(--r-lg);
   box-shadow: var(--shadow-md);
-  outline: none;
   -webkit-appearance: none; appearance: none;
 }
 .searchbox input[type="search"]::placeholder { color: var(--text-3); }
 .searchbox input[type="search"]:focus { border-color: var(--accent); box-shadow: var(--shadow-md), var(--ring); }
+.searchbox input[type="search"]:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .searchbox .searchbox-end { position: absolute; right: 0.45rem; top: 50%; transform: translateY(-50%); display: flex; align-items: center; gap: var(--s2); }
 .searchbox .btn { height: 2.4rem; border-radius: var(--r-md); }
 .search-scope { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); margin-top: var(--s3); font-size: var(--fs-sm); color: var(--text-3); }
@@ -883,12 +896,10 @@ ol.results { list-style: none; padding: 0; }
 .result-where .path b { color: var(--text-2); font-weight: 540; }
 .result-title { margin-top: 0.3rem; font-size: 1.0625rem; font-weight: 600; line-height: 1.35; letter-spacing: -0.01em; }
 .result-title a { color: var(--text); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
-/* An untitled result, named by its short address, or by its bookmark's
-   title in the title's own font, as a list's document cell names it. */
-.result-title a.untitled { font-family: var(--mono); font-size: 0.86em; font-weight: 500; color: var(--text-2); }
-.result-title a.from-bookmark { font-style: italic; font-weight: 500; color: var(--text-2); }
 .result-title a:hover { color: var(--accent-text); text-decoration: none; }
-.snippet { margin-top: var(--s2); color: var(--text-2); line-height: 1.6; overflow-wrap: anywhere; }
+/* A passage reads at about 75 characters a line, under a title that
+   may run the column's width. */
+.snippet { margin-top: var(--s2); max-width: 75ch; color: var(--text-2); line-height: 1.6; overflow-wrap: anywhere; }
 .snippet + .snippet { margin-top: var(--s1); padding-top: var(--s1); }
 /* A result that matched on what it was saved as: one line in its
    passage's place, cut to fit, the whole in its title; and for a page
@@ -903,6 +914,12 @@ ol.results { list-style: none; padding: 0; }
 .score { display: none; font-family: var(--mono); font-size: var(--fs-xs); color: var(--text-3); }
 /* "Show scores": a checkbox, no script. */
 body:has(#show-scores:checked) .score { display: inline; }
+/* A wordless search's first page: the rest of its nearest, a click
+   away, under a rule like a result's. */
+.more-results { border-top: 1px solid var(--border); }
+.more-results > summary { width: max-content; max-width: 100%; padding: var(--s4) 0; cursor: pointer; color: var(--text-2); font-size: var(--fs-sm); font-weight: 540; }
+.more-results > summary:hover { color: var(--text); }
+.more-results .result:first-child { border-top: 1px solid var(--border); }
 /* The last page of a search that matched more than it ranks says so. */
 .results-note { margin-top: var(--s5); color: var(--text-3); font-size: var(--fs-sm); text-align: center; }
 
@@ -940,7 +957,6 @@ main.page:has(.landing) { padding-bottom: var(--s6); }
 /* Document ------------------------------------------------------------------ */
 
 .doc-head h1 { font-size: var(--fs-xl); overflow-wrap: anywhere; }
-.doc-head h1.from-bookmark { font-style: italic; }
 .doc-url { display: flex; align-items: center; gap: 0.4rem; margin-top: var(--s2); min-width: 0; font-size: var(--fs-sm); }
 .doc-url a { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .doc-url svg { color: var(--text-3); }
@@ -963,7 +979,8 @@ main.page:has(.landing) { padding-bottom: var(--s6); }
 .job-why { display: block; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .job-outcome a, .job-hold a { font-weight: 560; }
 
-.prose { font-size: var(--fs-md); line-height: var(--lh-read); color: var(--text); max-width: 42rem; overflow-wrap: break-word; }
+/* The reading measure: about 70 characters a line. */
+.prose { font-size: var(--fs-md); line-height: var(--lh-read); color: var(--text); max-width: 70ch; overflow-wrap: break-word; }
 .prose > * + * { margin-top: 1em; }
 .prose h1, .prose h2, .prose h3 { margin-top: 1.8em; line-height: 1.3; }
 .prose h1 { font-size: 1.5rem; }
@@ -994,8 +1011,6 @@ aside.side { display: grid; gap: var(--s4); align-content: start; }
 .related li { padding: 0.65rem var(--s5); border-top: 1px solid var(--border); }
 .related li:first-child { border-top: 0; }
 .related a { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; color: var(--text); font-weight: 540; line-height: 1.4; }
-.related a.untitled { font-family: var(--mono); font-size: 0.86em; font-weight: 500; color: var(--text-2); }
-.related a.from-bookmark { font-style: italic; font-weight: 500; color: var(--text-2); }
 .related a:hover { color: var(--accent-text); text-decoration: none; }
 .related .doc-sub { justify-content: space-between; }
 .bookmark-list { list-style: none; padding: 0; }
@@ -1040,10 +1055,6 @@ aside.side { display: grid; gap: var(--s4); align-content: start; }
 .interest .members > li { min-width: 0; }
 .interest .members a { display: block; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .interest .members a:hover { color: var(--accent-text); text-decoration: none; }
-/* An untitled member, named as the Library names one: by its bookmark's
-   title, in italics, or by its address, in the address's mono. */
-.interest .members a.from-bookmark { font-style: italic; }
-.interest .members a.untitled { font-family: var(--mono); font-size: 0.86em; }
 .interest .all { font-size: var(--fs-sm); font-weight: 540; }
 /* An area's interests: each name on one line, cut, then a bar scaled to
    the area's largest, and its size. */
@@ -1145,11 +1156,12 @@ td .badge.fit-new { margin-top: var(--s1); }
 .map-row { width: 100%; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: var(--s2); padding: 0.3rem 0.4rem; border: 0; border-radius: var(--r-sm); background: transparent; color: var(--text); font: inherit; font-size: var(--fs-sm); text-align: left; cursor: pointer; }
 .map-row:hover { background: var(--surface-2); }
 .map-row-doc { grid-template-columns: minmax(0, 1fr) auto; }
-/* A row's name, and a document's host under its title: each on one line,
-   cut, whole on hover. */
+/* A row's name in at most two lines, and a document's host under its
+   title on one, each cut, whole on hover. */
 .map-row-name { display: flex; align-items: baseline; gap: 0.3rem; min-width: 0; }
 .map-row-doc .map-row-name { display: grid; }
 .map-row-name > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.map-row-name > span:first-child { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; white-space: normal; }
 .map-row-sub { color: var(--text-3); font-size: var(--fs-xs); }
 .map-row .n { color: var(--text-3); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .map-elsewhere { color: var(--accent-text); font-size: var(--fs-xs); }
@@ -1276,15 +1288,16 @@ td .badge.fit-new { margin-top: var(--s1); }
 .pools td:first-child { font-weight: 560; }
 .pools .num { text-align: right; }
 .pools th.num { text-align: right; }
+/* Columns apart, whatever their heads' lengths. */
+.pools th + th, .pools td + td { padding-left: var(--s3); }
 
 /* Starting and error pages ---------------------------------------------------- */
 
 .center-page { min-height: calc(100vh - var(--header-h) - 10rem); display: grid; place-items: center; }
 .center-card { width: min(30rem, 100%); padding: var(--s8); text-align: center; }
-.center-card .big-code { font-size: 3.5rem; font-weight: 700; letter-spacing: -0.04em; color: var(--text-3); line-height: 1; }
-.center-card h1 { margin-top: var(--s3); }
-/* An error's title is the API's, lower case: shown as a sentence. */
-.center-card .big-code + h1::first-letter { text-transform: uppercase; }
+/* An error leads with its sentence; its status and the API's title come
+   after, small. */
+.center-card .error-code { color: var(--text-3); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
 .center-card p { color: var(--text-2); margin-top: var(--s3); }
 .center-card .meta { color: var(--text-3); font-size: var(--fs-sm); }
 .center-card .actions { display: flex; justify-content: center; gap: var(--s2); margin-top: var(--s6); flex-wrap: wrap; }

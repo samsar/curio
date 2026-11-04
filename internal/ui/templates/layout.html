@@ -80,10 +80,10 @@ table's time column, its two parts take a line each.
 {{- end}}
 
 {{/*
-A document's name in a list, a DocRef: its title on one line; for an
-untitled one, its bookmark's title, styled as a fallback, or where it
-lives; the whole of any of them on hover. It links to the document's page
-when there is one.
+A document's name in a list, a DocRef: its title in two lines at most;
+for an untitled one, its bookmark's title or its short address, styled
+as untitled either way; the whole of any of them on hover. It links to
+the document's page when there is one.
 */}}
 {{define "doc-title" -}}
 {{if .ID}}<a class="doc-title{{with .Class}} {{.}}{{end}}" href="{{documentHref .ID}}" title="{{.Hover}}">{{.Name}}</a>
@@ -242,7 +242,7 @@ an interest shows its most similar members.
 
 {{define "interest-card" -}}
 <h2><a href="{{interestHref .ID}}">{{with .Label}}{{.}}{{else}}<span class="unlabeled">Unlabeled interest</span>{{end}}</a></h2>
-<div class="stats"><span><b>{{num .Size}}</b> documents</span>{{with .Loose}}<span><b>{{num .}}</b> {{if eq . 1}}loose fit{{else}}loose fits{{end}}</span>{{end}}{{with .New}}<span class="new"><b>{{num .}}</b> new</span>{{end}}{{template "cohesion" .Cohesion}}</div>
+<div class="stats"><span><b>{{num .Size}}</b> documents</span>{{with .Loose}}<span title="{{template "loose-why"}}"><b>{{num .}}</b> {{if eq . 1}}loose fit{{else}}loose fits{{end}}</span>{{end}}{{with .New}}<span class="new"><b>{{num .}}</b> new</span>{{end}}{{template "cohesion" .Cohesion}}</div>
 {{with .Summary}}<p class="summary">{{.}}</p>{{end}}
 {{with .Members}}<ul class="members">{{range .}}{{with .Ref}}<li><a{{with .Class}} class="{{.}}"{{end}} href="{{documentHref .ID}}" title="{{.Hover}}">{{.Name}}</a></li>{{end}}{{end}}</ul>{{end}}
 <a class="all" href="{{interestHref .ID}}">All {{num .Size}} documents →</a>
@@ -250,8 +250,14 @@ an interest shows its most similar members.
 
 {{/* An interest's cohesion: how alike its documents are, from 0 to 1. */}}
 {{define "cohesion" -}}
-<span class="meter-row" title="Cohesion: how alike its documents are"><meter class="meter" min="0" max="1" value="{{printf "%.2f" .}}">{{printf "%.2f" .}}</meter>{{printf "%.2f" .}}</span>
+<span class="meter-row" title="{{template "alike-why"}}"><meter class="meter" min="0" max="1" value="{{printf "%.2f" .}}">{{printf "%.2f" .}}</meter>{{printf "%.2f" .}}</span>
 {{- end}}
+
+{{/* What a group's cohesion means, for its title. */}}
+{{define "alike-why"}}How alike its documents are, from 0 (not at all) to 1 (the same){{end}}
+
+{{/* What a loose fit is, for a title. */}}
+{{define "loose-why"}}Loose fits are close to this interest without being grouped in it, and never name it{{end}}
 
 {{/* A document's similarity to an interest, from 0 to 1. */}}
 {{define "similarity" -}}
@@ -287,15 +293,15 @@ alone, so it sits inside a line of either.
 {{- else if eq .State "rebuilding"}}rebuilding
 {{- else if eq .State "held"}}rebuilds held: {{.HeldReason}}; run <code>curio reindex --all</code>
 {{- else if eq .State "failing"}}the last rebuild failed: <span class="state-error" title="{{.LastError}}">{{shortError .LastError}}</span>; {{if .Retrying}}retrying {{template "reltime" .RetryAt}}{{else}}retrying once the library settles{{end}}
-{{- else}}rebuilt{{if not .LastRebuildAt.IsZero}} {{template "reltime" .LastRebuildAt}}{{end}}{{with .LastKind}} ({{.}}){{end}} · {{count .Changed "document" "documents"}} changed, next at {{num .RebuildAt}}{{end}}
+{{- else}}rebuilt{{if not .LastRebuildAt.IsZero}} {{template "reltime" .LastRebuildAt}}{{end}}{{with .Kind}}, {{.}}{{end}} · <span title="{{.ChangedNote}}">{{.UntilNext}}</span>{{end}}
 {{- end}}
 
 {{/* A rebuild that is due, and what it waits for. */}}
 {{define "interests-due" -}}
 {{if .LastRebuildAt.IsZero}}the first grouping is due ({{count .Changed "document" "documents"}} indexed): waiting for the library to settle
-{{- else if eq .FreshOwed "reindex"}}a fresh rebuild is due: waiting for the re-embedding to finish
-{{- else if .FreshOwed}}a fresh rebuild is due ({{freshReason .FreshOwed}}): waiting for the library to settle
-{{- else}}a rebuild is due ({{num .Changed}} changed, threshold {{num .RebuildAt}}): waiting for the library to settle{{end}}
+{{- else if eq .FreshOwed "reindex"}}a rebuild from scratch is due: waiting for the re-embedding to finish
+{{- else if .FreshOwed}}a rebuild from scratch is due ({{freshReason .FreshOwed}}): waiting for the library to settle
+{{- else}}a rebuild is due ({{count .Changed "document" "documents"}} changed): waiting for the library to settle{{end}}
 {{- end}}
 
 {{/*
@@ -304,7 +310,7 @@ tagged new and unranked, named as the Library names them, with its
 similarity; and how many more there are.
 */}}
 {{define "new-band" -}}
-<section class="band" aria-labelledby="new-band"><div class="band-head"><h2 id="new-band">New since the last rebuild</h2><p>Placed by similarity; the next rebuild decides.</p></div>
+<section class="band" aria-labelledby="new-band"><div class="band-head"><h2 id="new-band">New since the last rebuild</h2><p>Shown where they are most alike; the next rebuild decides where they belong.</p></div>
 <div class="table-scroll"><table class="data">
 <colgroup><col><col class="c-sim"></colgroup>
 <thead><tr><th scope="col">Document</th><th scope="col">Similarity</th></tr></thead>

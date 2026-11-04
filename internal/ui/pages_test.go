@@ -133,11 +133,11 @@ func TestDocRef(t *testing.T) {
 		{DocRef{ID: "d1", Title: "A <title>", Fallback: "ignored", URL: url},
 			`<a class="doc-title" href="/ui/documents/d1" title="A &lt;title&gt;">A &lt;title&gt;</a>`},
 		{DocRef{ID: "d1", Fallback: "Saved as <this>", URL: url},
-			`<a class="doc-title from-bookmark" href="/ui/documents/d1" title="Saved as &lt;this&gt;">Saved as &lt;this&gt;</a>`},
+			`<a class="doc-title untitled" href="/ui/documents/d1" title="Saved as &lt;this&gt;">Saved as &lt;this&gt;</a>`},
 		{DocRef{ID: "d1", URL: url},
 			`<a class="doc-title untitled" href="/ui/documents/d1" title="` + url + `">example.com/a/b?q=1</a>`},
 		{DocRef{Fallback: "Saved as <this>", URL: url},
-			`<span class="doc-title from-bookmark" title="Saved as &lt;this&gt;">Saved as &lt;this&gt;</span>`},
+			`<span class="doc-title untitled" title="Saved as &lt;this&gt;">Saved as &lt;this&gt;</span>`},
 		{DocRef{URL: url},
 			`<span class="doc-title untitled" title="` + url + `">example.com/a/b?q=1</span>`},
 	} {
@@ -187,7 +187,7 @@ func TestLibrary_Saved(t *testing.T) {
 	assert.Contains(t, out, `<span class="sep wide">·</span><span class="wide" title="/Reading/Web">safari</span>`)
 	assert.Contains(t, out, `<span class="sep wide">·</span><span class="wide">chrome</span>`, "no folder, no title")
 	assert.Contains(t, out, `<time datetime="`+datetime(saved)+`"`)
-	assert.Contains(t, out, `<span class="doc-title from-bookmark" title="No document">No document</span>`)
+	assert.Contains(t, out, `<span class="doc-title untitled" title="No document">No document</span>`)
 	assert.Contains(t, out, `<td class="state-cell"></td>`+"\n"+`<td class="c-type"></td>`, "no document, no state or type")
 	assert.Contains(t, out, `<div class="load-more" id="more"><a class="btn" href="/ui/library?cursor=c&amp;order=saved"`)
 	assert.Equal(t, 1, strings.Count(out, `<p class="table-note">Newest saves first, one row per bookmark: `+
@@ -253,7 +253,7 @@ func TestInterests_Pages(t *testing.T) {
 	assert.Contains(t, out, `<span class="item"><span class="swatch swatch-accent"></span><span class="n">1,951</span> in an interest <span class="pct">62%</span></span>`+
 		`<span class="item"><span class="swatch swatch-accent-border"></span><span class="n">191</span> loose fits <span class="pct">6%</span></span>`+
 		`<span class="item"><span class="swatch swatch-track"></span><span class="n">1,000</span> unsorted <span class="pct">32%</span></span>`)
-	assert.Regexp(t, `<span class="item run">Run of \d{4}-\d\d-\d\d \d\d:\d\d · warm · 3,142 documents</span>`, out)
+	assert.Regexp(t, `<span class="item run">Rebuilt \d{4}-\d\d-\d\d \d\d:\d\d, updated in place · 3,142 documents</span>`, out)
 	assert.NotContains(t, out, "style=")
 	assert.Contains(t, out, `<span class="pager-summary">Interests 1–24 of 222</span>`)
 	assert.Contains(t, out, `<a href="/ui/interests?run=run-1" aria-label="Page 1" aria-current="page">1</a>`)
@@ -408,7 +408,7 @@ func TestInterestPage_AreaAndLoose(t *testing.T) {
 		`<span class="sep">›</span><a class="truncate" href="/ui/interests/a1" title="Cloud &lt;and&gt; AWS">Cloud &lt;and&gt; AWS</a>`+
 		`<span class="sep">›</span><span class="truncate" aria-current="page" title="AWS Serverless Architecture">`+
 		`AWS Serverless Architecture</span></nav>`)
-	assert.Contains(t, out, `<span class="badge plain">3 loose fits</span>`)
+	assert.Contains(t, out, `<span class="badge plain" title="Loose fits are close to this interest without being grouped in it, and never name it">3 loose fits</span>`)
 	assert.Equal(t, 1, strings.Count(out, `<h2 id="loose-fits">Loose fits</h2>`))
 	members, loose := strings.Index(out, `<tr class="fit-member">`), strings.Index(out, `id="loose-fits"`)
 	assert.Less(t, members, loose, "the members, then the loose fits")
@@ -440,15 +440,15 @@ func TestInterests_MemberNames(t *testing.T) {
 	page := interestsPage(1)
 	page.Interests[0].Members = []Member{
 		{DocumentID: "d1", Title: "A <title>", BookmarkTitle: "ignored", URL: "https://example.com/a"},
-		{DocumentID: "d2", BookmarkTitle: "AWS Serverless Application Lens",
+		{DocumentID: "d2", BookmarkTitle: "Field Guide to Queue Design",
 			URL: "https://d1.awsstatic.com/whitepapers/AWS-Serverless-Applications-Lens.pdf"},
 		{DocumentID: "d3", URL: "https://example.com/b/?q=1"},
 	}
 	out := render(t, r, PageInterests, page)
 	assert.Contains(t, out, `<ul class="members">`+
 		`<li><a href="/ui/documents/d1" title="A &lt;title&gt;">A &lt;title&gt;</a></li>`+
-		`<li><a class="from-bookmark" href="/ui/documents/d2" title="AWS Serverless Application Lens">`+
-		`AWS Serverless Application Lens</a></li>`+
+		`<li><a class="untitled" href="/ui/documents/d2" title="Field Guide to Queue Design">`+
+		`Field Guide to Queue Design</a></li>`+
 		`<li><a class="untitled" href="/ui/documents/d3" title="https://example.com/b/?q=1">example.com/b?q=1</a></li>`+
 		`</ul>`)
 }
@@ -473,7 +473,7 @@ func TestInterestPage_Pages(t *testing.T) {
 	one := interestPage(1, 84)
 	one.RunAt = time.Date(2026, 9, 28, 10, 34, 0, 0, time.Local)
 	out := render(t, r, PageInterest, one)
-	assert.Contains(t, out, `cohesion 0.59</span><span class="sep">·</span><span class="text">run of 2026-09-28 10:34</span>`+
+	assert.Contains(t, out, `how alike 0.59</span><span class="sep">·</span><span class="text">rebuilt 2026-09-28 10:34</span>`+
 		`<a class="map-link" href="/ui/interests/map?select=interest%3Ai1">`)
 	assert.NotContains(t, out, "showing")
 	assert.Contains(t, out, `<td class="num muted">1</td>`)
@@ -528,7 +528,7 @@ func TestMember_Cell(t *testing.T) {
 	const url = "https://example.com/a/b?q=1"
 	named := Member{DocumentID: "d1", BookmarkTitle: "Saved", URL: url}.Cell()
 	assert.Equal(t, DocRef{ID: "d1", Fallback: "Saved", URL: url}, named.Ref)
-	assert.Equal(t, "from-bookmark", named.Ref.Class())
+	assert.Equal(t, "untitled", named.Ref.Class())
 	assert.Equal(t, "example.com/a/b?q=1", named.Where)
 	titled := Member{DocumentID: "d1", Title: "Title", URL: url}.Cell()
 	assert.Equal(t, "example.com/a/b?q=1", titled.Where)
@@ -537,7 +537,7 @@ func TestMember_Cell(t *testing.T) {
 	assert.Equal(t, "example.com", address.Where)
 
 	out := render(t, newRenderer(t), PageInterest, interestPage(1, 1))
-	assert.Contains(t, out, `<a class="doc-title from-bookmark" href="/ui/documents/d0" title="Saved 0">Saved 0</a>`+
+	assert.Contains(t, out, `<a class="doc-title untitled" href="/ui/documents/d0" title="Saved 0">Saved 0</a>`+
 		"\n"+`<span class="doc-sub"><span class="host" title="https://example.com/0">example.com/0</span>`)
 }
 
@@ -564,9 +564,9 @@ func TestDocument_Head(t *testing.T) {
 	doc.Meta.State, doc.Extraction, doc.FailureCause = "dead", nil, "dead_link"
 	doc.Meta.Title, doc.Meta.URL = "", "ftp://gone.example/a/"
 	out = render(t, r, PageDocument, doc)
-	assert.Contains(t, out, "<h1>gone.example/a</h1>", "an untitled document by its short URL")
+	assert.Contains(t, out, `<h1 class="untitled">gone.example/a</h1>`, "an untitled document by its short URL")
 	doc.Meta.BookmarkTitle = "Saved as <this>"
-	assert.Contains(t, render(t, r, PageDocument, doc), `<h1 class="from-bookmark">Saved as &lt;this&gt;</h1>`,
+	assert.Contains(t, render(t, r, PageDocument, doc), `<h1 class="untitled">Saved as &lt;this&gt;</h1>`,
 		"or by its bookmark's title, styled as a fallback")
 	doc.Meta.Title = "Its own"
 	assert.Contains(t, render(t, r, PageDocument, doc), "<h1>Its own</h1>", "a title of its own comes first")
@@ -877,7 +877,7 @@ func TestSearch_Paging(t *testing.T) {
 	page := func(n, total int, capped bool) Search {
 		hits := make([]SearchHit, max(0, min(SearchPageSize, total-PageOffset(n, SearchPageSize))))
 		return Search{Query: "kafka", Type: "pdf", Page: n,
-			Results: &SearchResults{Total: total, Capped: capped, Hits: hits}}
+			Results: &SearchResults{WordHits: 1, Total: total, Capped: capped, Hits: hits}}
 	}
 	for _, tc := range []struct {
 		search             Search
@@ -922,7 +922,7 @@ func TestSearch_Paging(t *testing.T) {
 		}
 	}
 	assert.Equal(t, "Results 1–10 of 37", Search{Query: "kafka",
-		Results: &SearchResults{Total: 37, Hits: make([]SearchHit, 10)}}.Pager().Summary, "page 0 is the first")
+		Results: &SearchResults{WordHits: 1, Total: 37, Hits: make([]SearchHit, 10)}}.Pager().Summary, "page 0 is the first")
 	assert.Zero(t, Search{}.Pages(), "no results, no pages")
 	assert.Nil(t, Search{}.Pager())
 	assert.Nil(t, Search{}.OutOfRange())
@@ -1014,16 +1014,18 @@ func TestSearch_ResultsPage(t *testing.T) {
 		{DocumentID: "bare", URL: "https://example.com/some/where", Score: 0.02},
 	}
 	out := render(t, r, PageSearch, Search{Layout: layout, Query: "kafka", Page: 2,
-		Results: &SearchResults{Total: 37, TookMS: 12, Hits: hits}})
+		Results: &SearchResults{WordHits: 1, Total: 37, TookMS: 12, Hits: hits}})
 	assert.Contains(t, out, `<div class="results-head"><span><strong>37 documents</strong> match · 12 ms</span>`+
 		`<label class="toggle"><input type="checkbox" id="show-scores" hx-preserve="true"> Show scores</label></div>`)
 	assert.Contains(t, out, `<mark>kafka</mark> partitions <span class="score">bm25 22.523 · vector 0.710</span></p>`)
-	assert.Contains(t, out, `<span class="badge badge-accent plain">keyword &#43; meaning</span><span class="score">score 0.0328</span>`)
+	assert.Contains(t, out, `<div class="result-foot"><span class="tag">article</span><span class="score">score 0.0328</span>`,
+		"no badge for the usual case, both")
+	assert.NotContains(t, out, "keyword &#43; meaning")
 	assert.Contains(t, out, `<span class="badge badge-accent plain">meaning only</span>`)
 	assert.NotRegexp(t, `(bm25|vector|score) \d`, regexp.MustCompile(`<span class="score">[^<]*</span>`).ReplaceAllString(out, ""),
 		"no score outside .score")
 	assert.Contains(t, out, `<h2 class="result-title"><a href="/ui/documents/titled" title="Kafka partitions">Kafka partitions</a></h2>`)
-	assert.Contains(t, out, `<a href="/ui/documents/saved" title="Saved as &lt;this&gt;" class="from-bookmark">Saved as &lt;this&gt;</a>`)
+	assert.Contains(t, out, `<a href="/ui/documents/saved" title="Saved as &lt;this&gt;" class="untitled">Saved as &lt;this&gt;</a>`)
 	assert.Contains(t, out, `<a href="/ui/documents/bare" title="https://example.com/some/where" class="untitled">example.com/some/where</a>`)
 	assert.Contains(t, out, `<span class="path" title="https://example.com/saved"><b>example.com</b> › saved</span>`,
 		"the address stays above a result named by its bookmark")
@@ -1040,11 +1042,11 @@ func TestSearch_ResultsPage(t *testing.T) {
 	assert.Contains(t, out, `hx-sync="closest .search-page:replace"`, "a keystroke aborts a page in flight")
 
 	first := render(t, r, PageSearch, Search{Layout: layout, Query: "kafka", Page: 1,
-		Results: &SearchResults{Total: 37, Hits: hits}})
+		Results: &SearchResults{WordHits: 1, Total: 37, Hits: hits}})
 	assert.Contains(t, first, `<span class="step" aria-disabled="true"><svg`)
 	assert.NotContains(t, first, `id="pager-prev"`, "no step back from the first page")
 	last := render(t, r, PageSearch, Search{Layout: layout, Query: "kafka", Page: 10,
-		Results: &SearchResults{Total: 100, Capped: true, TookMS: 9, Hits: hits}})
+		Results: &SearchResults{WordHits: 1, Total: 100, Capped: true, TookMS: 9, Hits: hits}})
 	assert.Contains(t, last, `<strong>100&#43; documents</strong> match · showing the best 100 · 9 ms</span>`)
 	assert.Contains(t, last, `<p class="results-note">curio ranks the best 100 matches; refine the query to see others.</p>`)
 	assert.NotContains(t, last, `id="pager-next"`, "no step on from the last page")
@@ -1052,7 +1054,7 @@ func TestSearch_ResultsPage(t *testing.T) {
 		`<path d="m9 18 6-6-6-6"/></svg></span></div></nav>`)
 
 	past := render(t, r, PageSearch, Search{Layout: layout, Query: "kafka", Page: 5,
-		Results: &SearchResults{Total: 37}})
+		Results: &SearchResults{WordHits: 1, Total: 37}})
 	assert.Contains(t, past, `<strong>37 documents</strong> match`)
 	assert.Contains(t, past, `<div class="scores-kept"><input type="checkbox" id="show-scores" hx-preserve="true"`,
 		"no scores to show, but the checkbox stays, unseen, so its state carries to the next results")
@@ -1063,7 +1065,7 @@ func TestSearch_ResultsPage(t *testing.T) {
 	assert.NotContains(t, past, "Nothing in your library matches")
 
 	one := render(t, r, PageSearch, Search{Layout: layout, Query: "kafka", Page: 1,
-		Results: &SearchResults{Total: 1, Hits: hits[:1]}})
+		Results: &SearchResults{WordHits: 1, Total: 1, Hits: hits[:1]}})
 	assert.Contains(t, one, `<strong>1 document</strong> matches`)
 	assert.NotContains(t, one, `class="pager"`, "one page, no pager")
 
@@ -1487,13 +1489,13 @@ func TestInterestsState(t *testing.T) {
 		{"the first due", InterestsState{State: "due", Changed: 25, RebuildAt: 20},
 			`^the first grouping is due \(25 documents indexed\): waiting for the library to settle$`},
 		{"due after a reindex", InterestsState{State: "due", LastRebuildAt: now, FreshOwed: "reindex"},
-			`^a fresh rebuild is due: waiting for the re-embedding to finish$`},
+			`^a rebuild from scratch is due: waiting for the re-embedding to finish$`},
 		{"due, asked for", InterestsState{State: "due", LastRebuildAt: now, FreshOwed: "manual"},
-			`^a fresh rebuild is due \(asked for\): waiting for the library to settle$`},
+			`^a rebuild from scratch is due \(you asked for one\): waiting for the library to settle$`},
 		{"due, the params changed", InterestsState{State: "due", LastRebuildAt: now, FreshOwed: "params"},
-			`^a fresh rebuild is due \(the grouping&#39;s parameters changed\): waiting for the library to settle$`},
+			`^a rebuild from scratch is due \(the grouping&#39;s parameters changed\): waiting for the library to settle$`},
 		{"due", InterestsState{State: "due", LastRebuildAt: now, Changed: 300, RebuildAt: 263},
-			`^a rebuild is due \(300 changed, threshold 263\): waiting for the library to settle$`},
+			`^a rebuild is due \(300 documents changed\): waiting for the library to settle$`},
 		{"queued", InterestsState{State: "queued"}, `^a rebuild is queued$`},
 		{"rebuilding", InterestsState{State: "rebuilding"}, `^rebuilding$`},
 		{"held", InterestsState{State: "held", HeldReason: "the embedding model's digest " + evilScript},
@@ -1505,11 +1507,11 @@ func TestInterestsState(t *testing.T) {
 		{"failing, no backoff", InterestsState{State: "failing", LastError: "boom"}, `; retrying once the library settles$`},
 		{"current", InterestsState{State: "current", LastRebuildAt: now.Add(-2 * time.Hour), LastKind: "warm", Changed: 37,
 			RebuildAt: 276},
-			`^rebuilt <time datetime="[^"]+" title="[^"]+">2 h ago</time> \(warm\) · 37 documents changed, next at 276$`},
+			`^rebuilt <time datetime="[^"]+" title="[^"]+">2 h ago</time>, updated in place · <span title="37 documents changed since; 276 make the next rebuild due">rebuilds after 239 more changes</span>$`},
 		{"current, one change", InterestsState{State: "current", Changed: 1, RebuildAt: 263},
-			`^rebuilt · 1 document changed, next at 263$`},
+			`^rebuilt · <span title="1 document changed since; 263 make the next rebuild due">rebuilds after 262 more changes</span>$`},
 		{"a state it doesn't know", InterestsState{State: evilScript, Changed: 2, RebuildAt: 5},
-			`^rebuilt · 2 documents changed, next at 5$`},
+			`^rebuilt · <span title="2 documents changed since; 5 make the next rebuild due">rebuilds after 3 more changes</span>$`},
 	} {
 		var buf bytes.Buffer
 		require.NoError(t, set.ExecuteTemplate(&buf, "interests-state", tc.state), tc.name)
@@ -1540,15 +1542,28 @@ func TestInterests_Rebuild(t *testing.T) {
 	out, doc := page(Rebuild{Enabled: true, Shown: "r1", State: current})
 	rebuild := byID(doc, "rebuild")
 	require.NotNil(t, rebuild)
-	assert.Equal(t, "/v1/interests/rebuild", attrValue(rebuild, "data-path"))
+	assert.Equal(t, "confirm-rebuild", attrValue(rebuild, "popovertarget"), "it asks first")
+	assert.False(t, hasAttr(rebuild, "data-method"))
 	assert.False(t, hasAttr(rebuild, "aria-disabled"))
+	confirm := byID(doc, "confirm-rebuild")
+	require.NotNil(t, confirm)
+	assert.Equal(t, "alertdialog", attrValue(confirm, "role"))
+	assert.Contains(t, textOf(byID(doc, "confirm-rebuild-text")), "keep their names")
+	assert.True(t, hasAttr(byID(doc, "rebuild-cancel"), "autofocus"))
+	sent := byID(doc, "rebuild-confirm")
+	assert.Equal(t, "/v1/interests/rebuild", attrValue(sent, "data-path"))
+	assert.Equal(t, "rebuild-status", attrValue(sent, "data-status"))
+	for n := confirm; n != nil; n = n.Parent {
+		assert.NotContains(t, []string{"rebuild-control", "rebuild-state"}, attrValue(n, "id"), "outside the regions")
+	}
 	assert.Contains(t, out, `<span class="action-status" id="rebuild-status" role="status" aria-live="polite"></span>`)
 	assert.Contains(t, out, `<span class="no-js muted">Rebuild them with <code>curio interests rebuild</code>.</span>`)
-	assert.Regexp(t, `<p class="interests-state tone-ok">rebuilt <time[^>]*>2 h ago</time> \(warm\) · 3 documents changed, next at 20</p>`, out)
+	assert.Regexp(t, `<p class="interests-state tone-ok">rebuilt <time[^>]*>2 h ago</time>, updated in place · <span title="3 documents changed since; 20 make the next rebuild due">rebuilds after 17 more changes</span></p>`, out)
 	assert.Contains(t, out, `hx-get="/ui/interests?poll=rebuild&amp;run=r1" hx-trigger="every 30s, curio:changed from:body"`)
 
 	out, doc = page(Rebuild{Enabled: true, Queued: true, Hold: "outside_schedule", Shown: "r1", State: current})
 	assert.Equal(t, "true", attrValue(byID(doc, "rebuild"), "aria-disabled"))
+	assert.False(t, hasAttr(byID(doc, "rebuild"), "popovertarget"), "nothing to confirm while one is in flight")
 	assert.Contains(t, out, `<div class="rebuild-state" id="rebuild-state"><p>Rebuild queued · <a id="rebuild-hold" href="/ui/status">`+
 		`the queue is closed: Outside its schedule</a></p></div>`, "the queue's, not the snapshot's")
 	assert.Contains(t, out, `hx-trigger="every 2s, curio:changed from:body"`)
@@ -1822,23 +1837,43 @@ func TestFailures_States(t *testing.T) {
 
 // TestFailures_Actions: a group's Refetch sends refetch-all by its cause
 // and says what it queued in the page's one status, outside the live
-// regions; the dead links' opens a confirm in their card, whose button
-// sends their state too; each needs JavaScript, and its command stands in
-// without it. The status holds nothing at rest.
+// regions; the dead links', and a group's of more than ConfirmOver
+// documents, opens a confirm in its card, which says what the refetch
+// costs and where to watch it, and whose button sends it; each needs
+// JavaScript, and its command stands in without it. The status holds
+// nothing at rest.
 func TestFailures_Actions(t *testing.T) {
 	r := newRenderer(t)
 	out := render(t, r, PageFailures, sampleFailures())
 	doc := parse(t, out)
 
-	refetch := byID(doc, "refetch-anti_bot")
+	refetch := byID(doc, "refetch-tls")
 	require.NotNil(t, refetch)
 	assert.Equal(t, "btn btn-sm js-only", attrValue(refetch, "class"))
 	assert.Equal(t, "POST", attrValue(refetch, "data-method"))
-	assert.Equal(t, "/v1/documents/refetch-all?cause=anti_bot", attrValue(refetch, "data-path"))
+	assert.Equal(t, "/v1/documents/refetch-all?cause=tls", attrValue(refetch, "data-path"))
 	assert.Equal(t, "failures-status", attrValue(refetch, "data-status"))
-	assert.Equal(t, "Blocked by bot protection: 927 refetches queued", attrValue(refetch, "data-done"))
-	assert.Equal(t, "Refetch 927", textOf(refetch))
+	assert.Equal(t, "Certificate problem: 43 refetches queued", attrValue(refetch, "data-done"))
+	assert.Equal(t, "Refetch 43", textOf(refetch))
 	assert.False(t, hasAttr(refetch, "hidden"))
+	assert.False(t, hasAttr(refetch, "popovertarget"), "43 documents: no confirm")
+	assert.Nil(t, byID(doc, "confirm-tls"))
+
+	big := byID(doc, "refetch-anti_bot")
+	require.NotNil(t, big)
+	assert.Equal(t, "confirm-anti_bot", attrValue(big, "popovertarget"))
+	assert.False(t, hasAttr(big, "data-method"), "it only opens the confirm")
+	assert.Equal(t, "Refetch 927…", textOf(big))
+	assert.Equal(t, "Refetch 927 documents?", textOf(byID(doc, "confirm-anti_bot-title")))
+	assert.Contains(t, textOf(byID(doc, "confirm-anti_bot-text")), "Jina Reader", "what a blocked page costs")
+	assert.Equal(t, "/ui/status", attrValue(byID(doc, "confirm-anti_bot-status"), "href"), "where to watch it")
+	sent := byID(doc, "refetch-anti_bot-confirm")
+	assert.Equal(t, "/v1/documents/refetch-all?cause=anti_bot", attrValue(sent, "data-path"))
+	assert.Equal(t, "Blocked by bot protection: 927 refetches queued", attrValue(sent, "data-done"))
+	assert.Equal(t, "hide", attrValue(sent, "popovertargetaction"))
+	assert.True(t, hasAttr(byID(doc, "refetch-anti_bot-cancel"), "autofocus"))
+	assert.NotContains(t, textOf(byID(doc, "confirm-unreachable-text")), "Jina Reader",
+		"a group Jina doesn't read says nothing of it")
 
 	opener := byID(doc, "refetch-dead_link")
 	require.NotNil(t, opener)
@@ -1883,7 +1918,7 @@ func TestFailures_Actions(t *testing.T) {
 
 	assert.Contains(t, out, `<code class="no-js">curio refetch --all --cause anti_bot</code>`)
 	assert.Contains(t, out, `<code class="no-js">curio refetch --all --state dead --cause dead_link</code>`)
-	assert.Equal(t, 12, len(withAttr(doc, "data-method")), "a refetch for every group, the dead links' in its confirm")
+	assert.Equal(t, 12, len(withAttr(doc, "data-method")), "a refetch for every group, a large one's in its confirm")
 }
 
 // TestLibrary_Head: the Library's head, in either order, has its subnav
@@ -2008,9 +2043,9 @@ func TestInterests_Cards(t *testing.T) {
 	v.Interests[0].Loose, v.Interests[0].New = 2, 3
 	v.Interests[1].Loose = 1
 	out := render(t, r, PageInterests, v)
-	assert.Contains(t, out, `<div class="stats"><span><b>84</b> documents</span><span><b>2</b> loose fits</span>`+
+	assert.Contains(t, out, `<div class="stats"><span><b>84</b> documents</span><span title="Loose fits are close to this interest without being grouped in it, and never name it"><b>2</b> loose fits</span>`+
 		`<span class="new"><b>3</b> new</span><span class="meter-row"`)
-	assert.Contains(t, out, `<div class="stats"><span><b>83</b> documents</span><span><b>1</b> loose fit</span><span class="meter-row"`)
+	assert.Contains(t, out, `<div class="stats"><span><b>83</b> documents</span><span title="Loose fits are close to this interest without being grouped in it, and never name it"><b>1</b> loose fit</span><span class="meter-row"`)
 	assert.Contains(t, out, `<div class="stats"><span><b>82</b> documents</span><span class="meter-row"`, "none of either")
 
 	area := Interest{ID: "a1", Area: true, Label: "Cloud", Size: 120, New: 4, NumChildren: 2,
@@ -2080,8 +2115,8 @@ func TestInterestPage_NewBand(t *testing.T) {
 	page.Interest.NewMembers = []Member{{DocumentID: "n1", BookmarkTitle: "Placed <here>", URL: "https://example.com/n1",
 		Similarity: 0.61, Fit: "new"}, {DocumentID: "n2", URL: "https://example.com/n2", Similarity: 0.52, Fit: "new"}}
 	out := render(t, r, PageInterest, page)
-	assert.Contains(t, out, `<h2 id="new-band">New since the last rebuild</h2><p>Placed by similarity; the next rebuild decides.</p>`)
-	assert.Contains(t, out, `<tr class="fit-new"><td><a class="doc-title from-bookmark" href="/ui/documents/n1" title="Placed &lt;here&gt;">`+
+	assert.Contains(t, out, `<h2 id="new-band">New since the last rebuild</h2><p>Shown where they are most alike; the next rebuild decides where they belong.</p>`)
+	assert.Contains(t, out, `<tr class="fit-new"><td><a class="doc-title untitled" href="/ui/documents/n1" title="Placed &lt;here&gt;">`+
 		`Placed &lt;here&gt;</a>`)
 	assert.Contains(t, out, `<span class="badge plain fit-new">new</span></td><td><span class="meter-row">`+
 		`<meter class="meter" min="0" max="1" value="0.61">0.61</meter>0.61</span></td></tr>`)
@@ -2111,7 +2146,7 @@ func TestAreaPage_Pages(t *testing.T) {
 		Cohesion: 0.4, Children: children}}
 	out := render(t, r, PageInterest, page)
 	assert.Contains(t, out, `<span class="badge badge-accent plain">400 documents</span><span class="badge plain">30 interests</span>`+
-		`<span class="badge plain">2 loose fits</span><span class="badge plain fit-new">5 new</span>`)
+		`<span class="badge plain" title="Loose fits are close to this interest without being grouped in it, and never name it">2 loose fits</span><span class="badge plain fit-new">5 new</span>`)
 	assert.Contains(t, out, `<p class="lede">Building things.</p>`)
 	assert.Equal(t, 6, strings.Count(out, `<li class="card interest">`))
 	assert.Contains(t, out, `<span class="pager-summary">Interests 25–30 of 30</span>`)
@@ -2201,7 +2236,7 @@ func TestChanges_Page(t *testing.T) {
 		}}
 	out := render(t, r, PageChanges, Changes{Layout: Layout{Title: "What changed", Nav: NavInterests}, Run: run})
 	assert.Contains(t, out, `<p class="lede">The rebuild of <time datetime="2026-10-09T14:03:00Z" title="`+when(at)+`">`+
-		localDay(at)+`</time>: asked for, warm.</p>`)
+		localDay(at)+`</time>: you asked for it, updated in place.</p>`)
 	assert.Contains(t, out, `<span class="text">1 interest split, 1 merged, 1 dissolved, 1 moved, 1 new</span>`+
 		`<span class="sep">·</span><span class="text">180 interests kept</span>`)
 	heads := make([]string, 0, 5)
@@ -2305,7 +2340,7 @@ func TestDocument_Place(t *testing.T) {
 	}{
 		{DocumentPlace{Fit: "member", Interest: kafka, Area: area}, `In ` + ref(area) + ` › ` + ref(kafka)},
 		{DocumentPlace{Fit: "member", Interest: kafka}, `In ` + ref(kafka)},
-		{DocumentPlace{Fit: "loose", Interest: kafka, Area: area}, `Loose fit of ` + ref(area) + ` › ` + ref(kafka)},
+		{DocumentPlace{Fit: "loose", Interest: kafka, Area: area}, `<span title="Loose fits are close to this interest without being grouped in it, and never name it">Loose fit of</span> ` + ref(area) + ` › ` + ref(kafka)},
 		{DocumentPlace{Fit: "unsorted", Nearest: kafka}, `In <a href="/ui/interests/unsorted">Unsorted</a> · nearest ` + ref(kafka)},
 		{DocumentPlace{Fit: "unsorted"}, `In <a href="/ui/interests/unsorted">Unsorted</a></span>`},
 		{DocumentPlace{Fit: "new", Interest: kafka, Area: area}, `New since the last rebuild: in ` + ref(area) + ` › ` + ref(kafka)},
@@ -2501,4 +2536,157 @@ func TestShowOnMap(t *testing.T) {
 		{PageUnsorted, Unsorted{Layout: layout}}} {
 		assert.Empty(t, links(render(t, r, tc.page, tc.data)), tc.page)
 	}
+}
+
+// meaningHits are n hits found by meaning alone: each a passage only the
+// vector search returned.
+func meaningHits(n int) []SearchHit {
+	hits := make([]SearchHit, n)
+	for i := range hits {
+		id := "m" + strconv.Itoa(i)
+		hits[i] = SearchHit{DocumentID: id, Title: "Page " + id, URL: "https://example.com/" + id,
+			ContentType: "article", Matches: []Match{{Segments: []Segment{{Text: "footer text"}}, Vector: new(0.3)}}}
+	}
+	return hits
+}
+
+// TestSearch_Wordless: a search whose ranking matched nothing by the
+// query's words (no passage, and no title, folder or site: WordHits 0), as
+// a query of nonsense gets, says so in a quiet note on every page, heads
+// its results "Nearest by meaning" rather than counting matches, drops the
+// capped note, and on its first page shows the nearest three, the rest of
+// the page a click away, with the pager as it is; no hit carries a badge.
+// It is the ranking's, whatever a page's hits: a word match anywhere (a
+// title the fields list found, say) makes none of its pages wordless. A
+// page whose hits are all by meaning, of a search whose words matched
+// elsewhere, says so in its head alone, and drops its badges.
+func TestSearch_Wordless(t *testing.T) {
+	r := newRenderer(t)
+	layout := Layout{Title: "Search", Nav: NavSearch}
+	results := func(wordHits int, hits []SearchHit) *SearchResults {
+		return &SearchResults{Total: 100, Capped: true, TookMS: 9, WordHits: wordHits, Hits: hits}
+	}
+
+	first := Search{Layout: layout, Query: "zzqx", Results: results(0, meaningHits(10))}
+	assert.True(t, first.Results.Wordless())
+	out := render(t, r, PageSearch, first)
+	doc := parse(t, out)
+	assert.Contains(t, out, `<p class="callout-title">Nothing in your library uses these words</p>`)
+	assert.Contains(t, out, `<div class="results-head"><span><strong>Nearest by meaning</strong> · 9 ms</span>`)
+	assert.NotContains(t, out, "documents</strong>", "no count of matches")
+	assert.NotContains(t, out, "meaning only", "the head says it once")
+	lead, rest := first.LeadHits(), first.RestHits()
+	assert.Len(t, lead, nearestShown)
+	assert.Len(t, rest, 10-nearestShown)
+	assert.Contains(t, out, `<details class="more-results"><summary>Show 7 more nearest in meaning</summary>`+
+		`<ol class="results" start="4">`)
+	assert.Equal(t, 10, strings.Count(out, `<li class="result">`), "every hit of the page, the rest folded")
+	assert.NotNil(t, byID(doc, "pager-next"), "the pager stays")
+	uitest.AssertInert(t, out)
+
+	// Every page of it is, the last one without the capped note, whatever
+	// its hits: one by what it was saved as (a card, by meaning) too.
+	last := first
+	last.Page, last.Results = 10, results(0, append(meaningHits(9), SearchHit{DocumentID: "s",
+		URL: "https://example.com/s", Bookmarks: []SavedBookmark{{Title: "Saved"}}}))
+	assert.True(t, last.Results.Wordless())
+	assert.False(t, last.Results.ByMeaning())
+	assert.False(t, last.CappedNote())
+	out = render(t, r, PageSearch, last)
+	assert.Contains(t, out, "Nothing in your library uses these words")
+	assert.Contains(t, out, "<strong>Nearest by meaning</strong>")
+	assert.NotContains(t, out, "more-results", "only the first page folds")
+	assert.NotContains(t, out, "results-note", "no capped note under nothing")
+	assert.NotContains(t, out, "bookmark details", "no badge on a wordless page")
+	assert.Len(t, last.LeadHits(), 10)
+
+	// A word match anywhere in the ranking, though no hit of this page
+	// shows one: no page of it is wordless.
+	titled := Search{Layout: layout, Query: "kafka", Results: results(1, meaningHits(10))}
+	assert.False(t, titled.Results.Wordless())
+	out = render(t, r, PageSearch, titled)
+	assert.NotContains(t, out, "callout-title")
+	assert.NotContains(t, out, "more-results")
+	assert.Contains(t, out, `<strong>100&#43; documents</strong> match · showing the best 100 · these by meaning alone · 9 ms`)
+	assert.NotContains(t, out, "meaning only", "a page by meaning alone drops its badges")
+	titled.Page = 10
+	assert.True(t, titled.CappedNote())
+
+	keyword := meaningHits(10)
+	keyword[4].Matches[0].BM25, keyword[4].Matches[0].Vector = new(3.1), nil
+	for name, res := range map[string]*SearchResults{
+		"a passage by its words": results(1, keyword),
+		"degraded":               {Total: 3, Degraded: true, Hits: meaningHits(3)},
+	} {
+		assert.False(t, res.Wordless(), name)
+		assert.False(t, res.ByMeaning(), name)
+	}
+	assert.False(t, (&SearchResults{}).Wordless(), "nothing ranked: the empty state, not the note")
+	out = render(t, r, PageSearch, Search{Layout: layout, Query: "kafka", Results: results(1, keyword)})
+	assert.Contains(t, out, `<span class="badge badge-accent plain">meaning only</span>`)
+	assert.Contains(t, out, `<span class="badge badge-accent plain">keyword only</span>`)
+	assert.NotContains(t, out, "more-results")
+}
+
+// TestDocRef_AddressFallback: a bookmark titled with an address (a page
+// saved without a title) names nothing: the document is named by its
+// short address, as one without a bookmark's title is, in the same style.
+func TestDocRef_AddressFallback(t *testing.T) {
+	for _, title := range []string{"https://example.com/a/b", "  HTTP://example.com/a", "www.example.com/a",
+		"ftp://files.example/x"} {
+		ref := DocRef{ID: "d", Fallback: title, URL: "https://example.com/a/b"}
+		assert.False(t, ref.Named(), title)
+		assert.Equal(t, "example.com/a/b", ref.Name(), title)
+		assert.Equal(t, "https://example.com/a/b", ref.Hover(), title)
+		assert.Equal(t, "untitled", ref.Class(), title)
+	}
+	for _, title := range []string{"Kafka: a guide", "Notes on http://x", "://x"} {
+		ref := DocRef{ID: "d", Fallback: title, URL: "https://example.com/a"}
+		assert.True(t, ref.Named(), title)
+		assert.Equal(t, title, ref.Name())
+		assert.Equal(t, "untitled", ref.Class(), "an untitled document, named by its bookmark")
+	}
+	assert.Empty(t, DocRef{Title: "T", Fallback: "https://x.example/"}.Class())
+}
+
+// TestHealth_Version: Status shows the daemon's version and its build
+// stamp apart, so the stamp never breaks inside a token.
+func TestHealth_Version(t *testing.T) {
+	p := HealthPanel{Version: "v2.7.0-3-gabc1234 (abc1234, 2026-11-04T00:18:54Z)"}
+	assert.Equal(t, "v2.7.0-3-gabc1234", p.VersionName())
+	assert.Equal(t, "abc1234, 2026-11-04T00:18:54Z", p.VersionBuild())
+	p = HealthPanel{Version: "dev"}
+	assert.Equal(t, "dev", p.VersionName())
+	assert.Empty(t, p.VersionBuild())
+	out := render(t, newRenderer(t), PageStatus, Status{Layout: Layout{Title: "Status", Nav: NavStatus},
+		Health: &HealthPanel{Version: "v2.7.0 (abc1234, 2026-11-04T00:18:54Z)"}})
+	assert.Contains(t, out, `<span class="value"><span class="nowrap">v2.7.0</span>`+
+		`<span class="sub nowrap">abc1234, 2026-11-04T00:18:54Z</span></span>`)
+}
+
+// TestErrorPage_Lead: an error page leads with a sentence for people, its
+// status and the API's title after it, smaller; a map address that isn't
+// one says so and leads back to the map.
+func TestErrorPage_Lead(t *testing.T) {
+	r := newRenderer(t)
+	for status, lead := range map[int]string{400: "curio can't answer this address.", 404: "There's nothing here.",
+		410: "This is gone.", 409: "That can't be done right now.", 500: "Something went wrong in curio.",
+		503: "curio isn't ready for that yet."} {
+		assert.Equal(t, lead, ErrorPage{Status: status}.Lead(), status)
+	}
+	_, err := ParseMapQuery(map[string][]string{"view": {"zoom"}})
+	require.Error(t, err)
+	sentence, message, back := MapQueryError(err)
+	assert.Equal(t, "This map view doesn't exist.", sentence)
+	out := render(t, r, PageError, ErrorPage{Layout: Layout{Title: "bad request"}, Status: 400, Title: "bad request",
+		Message: message, Sentence: sentence, Back: back, Retry: NavInterests})
+	assert.Contains(t, out, `<h1>This map view doesn&#39;t exist.</h1>`+"\n"+
+		`<p>The map shows your library by similarity or by group.</p>`+"\n"+
+		`<p class="error-code">Error 400 · bad request</p>`)
+	assert.Contains(t, out, `<a class="btn btn-primary" href="/ui/interests/map">Show the map</a>`)
+	assert.NotContains(t, out, "Start over", "the map, not the Interests, is the way back")
+	_, err = ParseMapQuery(map[string][]string{"select": {"planet:x"}})
+	require.Error(t, err)
+	sentence, _, _ = MapQueryError(err)
+	assert.Equal(t, "The map can't show what this address selects.", sentence)
 }

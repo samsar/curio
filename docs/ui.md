@@ -21,9 +21,9 @@ the dashboard does what these commands do:
 | a document's **Refetch** | fetches the page again | `curio refetch <id>` |
 | a dead link's **Refetch anyway…**, after you confirm | fetches it though it was found gone | `curio refetch --force <id>` |
 | a document's **Reindex** (once it has text) | re-chunks and re-embeds its text | `curio reindex <id>` |
-| a group's **Refetch N** on Failures | fetches again every document that failed for that cause | `curio refetch --all --cause <cause>` |
+| a group's **Refetch N** on Failures (over 50 documents, after you confirm) | fetches again every document that failed for that cause | `curio refetch --all --cause <cause>` |
 | dead links' **Refetch N anyway…** on Failures, after you confirm | fetches every dead link again | `curio refetch --all --state dead --cause dead_link` |
-| **Rebuild** on Interests | rebuilds the interests now, rather than when the daemon would on its own; a second click while one waits queues nothing more | `curio interests rebuild` |
+| **Rebuild…** on Interests, after you confirm | rebuilds the interests now, rather than when the daemon would on its own; a second click while one waits queues nothing more | `curio interests rebuild` |
 | **Pause** / **Resume** on Status | stops starting jobs, or starts them again | `curio pause`, `curio resume` |
 | **Throttle** on Status | runs fewer jobs at once (gentle), or all (normal) | `curio throttle gentle\|normal` |
 | **Keep awake** on Status | keeps the Mac from idle sleep while jobs run on AC power | `curio keep-awake on\|off` |
@@ -31,9 +31,18 @@ the dashboard does what these commands do:
 
 Each says what came of it next to it (on Failures, over the groups,
 since a group that was refetched goes): done, or the daemon's reason for
-refusing it. One change runs at a time. The controls need JavaScript;
-without it the pages show the commands instead, and Status the queue's
-settings.
+refusing it. One change runs at a time. A change that queues a lot of
+work asks first, in a small dialog that says what it does: a refetch of
+dead links or of a group of more than 50 documents (how long it takes,
+that pages a site blocks or keeps behind a login go through Jina Reader,
+which reads only a few a minute, and that Status shows how far it has
+got), and Rebuild (what a rebuild does, and that the interests you know
+keep their names). The controls need JavaScript; without it the pages
+show the commands instead, and Status the queue's settings.
+
+Press **/** on any page to jump to its search box (the home's, or the
+header's on a wide window), unless you are typing in a field or a
+dialog is open; the interest map's own **/** goes to the map's search.
 
 ## What refreshes by itself
 
@@ -82,16 +91,31 @@ footer names the address the daemon listens on.
   says how many pages there are. A line over them counts what matched
   ("37 documents match"), or, past 100, says "100+ documents match ·
   showing the best 100", and the last page then says to refine the query
-  to see others. Each result shows where the page lives, its title, how
-  it matched (keyword, meaning, or both), and the first two passages
-  that matched with the matched words highlighted (the rest a click
-  away). A passage is shown without its markdown (a link's text without
-  its address, no heading or bold marks); the document's page has the
-  whole text. **Show scores** adds each passage's bm25 and vector scores
+  to see others. Each result shows where the page lives, its title, and
+  the first two passages that matched with the matched words highlighted
+  (the rest a click away); a badge says how it matched only when it is
+  the unusual case ("keyword only", "meaning only", "bookmark details"),
+  not for the usual one, both. A search whose words nothing in the
+  library holds, in a page's text, title, bookmark's title or folder,
+  site or author (a typo, nonsense, a word you never saved), still finds
+  the pages nearest in meaning, since every page has some distance to
+  any query: a quiet note on every page then says "Nothing in your
+  library uses these words", the line over the results reads "Nearest by
+  meaning" rather than counting matches, no result carries a badge, the
+  last page says nothing of the best 100, and the first page shows the
+  nearest three with **Show N more nearest in meaning** under them; the
+  pages after it list the rest as usual. A page whose results were all found by meaning, of a search
+  whose words matched elsewhere, says "these by meaning alone" in that
+  line instead of a badge on each. A passage is shown without its
+  markdown (a link's text without its address, no heading or bold
+  marks), without HTML tags, whole or cut where the passage was cut, and
+  without emoji shortcodes such as `:fire:`; the document's page has the whole
+  text. **Show scores** adds each passage's bm25 and vector scores
   and each result's fused score, and stays on while you type and page. A
   page with no title of its own is named by its bookmark's title, in
   italics, as the Library names it, and so is a related document on a
-  document's page. A result can also match on what it was saved as
+  document's page; one whose bookmark has no title, or one that is an
+  address, by its short address, in the same italics. A result can also match on what it was saved as
   (its bookmark's title or folder, its site, its author, its card)
   without a passage: it says it matched on "bookmark details", and one
   line in place of the passages says what it was saved as ("Saved as
@@ -137,12 +161,13 @@ footer names the address the daemon listens on.
   library.
   Filters narrow it by type, host (`example.com`, exactly) and bookmark
   folder (the folder and the folders under it), and Apply keeps the tab
-  chosen. Each row shows the title on one line with where the page lives
-  under it, its state, type and when it was last updated. A page with no
-  title of its own (every one that failed, and a few others) is named by
-  its bookmark's title, in italics, with its address under it; one
-  without a titled bookmark is named by its address, with its host under
-  it. A failed or dead row adds why it failed, its cause and the start of
+  chosen. Each row shows the title, in two lines at most (the whole on
+  hover), with where the page lives under it, its state, type and when it
+  was last updated. A page with no title of its own (every one that
+  failed, and a few others) is named by its bookmark's title, in italics,
+  with its address under it; one without a titled bookmark, or whose
+  bookmark's title is an address, is named by its short address, in the
+  same italics, with its host under it. A failed or dead row adds why it failed, its cause and the start of
   its error, with the whole error on hover and on the document's page. On
   a phone the type and time move under the title. "Load more" pages
   through the rest, and the line under the table counts the documents
@@ -179,14 +204,15 @@ footer names the address the daemon listens on.
   the cause means, the sites most of its documents are on (each leading
   to the Library of that cause on that site), how many documents and
   their share, **Refetch N**, and **View in Library →**; the dead links'
-  refetch asks first. Under the cards, the causes no document failed for.
+  refetch, and that of a group of more than 50 documents, asks first.
+  Under the cards, the causes no document failed for.
   A refetch queues a fresh fetch for each document of the group, so its
   card goes; while the queue is paused, or outside its schedule, the
   fetches wait there (Status says so), and the documents are pending
   meanwhile.
 - **Document**: the page's title (for an untitled page, its bookmark's
-  title, in italics, as the Library names it) and address, its state,
-  type, length, author, published date and language; for a failed page,
+  title or its short address, in italics, as the Library names it) and
+  address, its state, type, length, author, published date and language; for a failed page,
   a box naming why it failed and what that means, with its **Full
   error** a click away, and for a dead one, that the page is gone. Then
   its text, and beside it related documents, its bookmarks with their
@@ -201,7 +227,10 @@ footer names the address the daemon listens on.
   **Reindex**, and how its text was fetched; for a dead link, **Refetch
   anyway…**, which asks first. The text shown is at most the first 1
   MiB; the page says when it is cut and where the whole file is. A text
-  whose markdown would take too long or too much memory to format (a
+  that opens with a heading saying the page's title leaves that heading
+  out, so the title isn't said twice (a text of that heading alone keeps
+  it). A text whose markdown would take
+  too long or too much memory to format (a
   line nesting dozens of quotes, lists nested deep over thousands of
   blank lines, a paragraph thick with unclosed brackets, a table padded
   to thousands of columns: a few shapes a page can hold, by accident or
@@ -216,14 +245,15 @@ footer names the address the daemon listens on.
   levels: areas, each holding interests ("29 areas holding 182 interests
   in your library"); a smaller one in interests alone. The head says how
   many there are, and beside it where rebuilds stand: when the interests
-  were last rebuilt (fresh or warm) and how many documents changed since
-  against how many make the next due; that a rebuild is due, and what it
+  were last rebuilt (regrouped from scratch, or updated in place) and
+  after how many more changes the next comes (hover for the counts); that a rebuild is due, and what it
   waits for (the library to settle, or a re-embedding to finish); queued,
   and why the queue holds it; running, and since when; held, while the
   embeddings may have drifted, with the fix (`curio reindex --all`); or
   failing, with the error (whole on hover) and when it is tried again.
-  **Rebuild** groups the library again now, whatever that line says: a
-  rebuild you ask for isn't held, and it retries a failure at once; it is
+  **Rebuild…** groups the library again now, after a dialog that says
+  what that does, whatever that line says: a rebuild you ask for isn't
+  held, and it retries a failure at once; it is
   disabled only while one is queued or running. For a week after a
   rebuild that split, merged or dissolved interests, a note says how many
   ("Rebuilt on Oct 9, 2026: 5 interests split, 1 merged, 9 new") and leads
@@ -233,7 +263,8 @@ footer names the address the daemon listens on.
   counts its documents, its interests and those added since ("4 new"),
   and lists its five largest interests, each with its size and a bar
   against the largest, then "+ N more interests →" to the rest. An
-  interest's card counts its documents, its loose fits and its new ones,
+  interest's card counts its documents, its loose fits (close to it
+  without being grouped in it; hover for that) and its new ones,
   and shows a few of its documents (an untitled one named by its
   bookmark's title, in italics). After the last page's cards, **Unsorted**
   counts the documents close to no interest and those placed there since.
@@ -289,11 +320,12 @@ footer names the address the daemon listens on.
   rebuild` draws one now), the map failed (with its error), or the map
   is off (`insight.map: false` in config.yaml).
 - **An area's page**: the area's summary, its documents, interests,
-  loose fits, new documents and cohesion, the run it comes from, and what
+  loose fits, new documents and how alike they are (from 0 to 1), when it
+  was rebuilt, and what
   the last rebuild did to it; then its interests as cards, 24 a page.
 - **An interest's page**: Interests › its area › the interest above its
   name, each cut on one line; its documents, loose fits, new documents,
-  cohesion and run. A note says what the last rebuild did to it, dated,
+  how alike they are and when it was rebuilt. A note says what the last rebuild did to it, dated,
   each name linking to its page: split off from another, another split
   off from it, took in others, moved here from another area, or new; one
   it only kept says nothing. On the first page, "New since the last
@@ -310,6 +342,11 @@ footer names the address the daemon listens on.
   ran, what started it and its counts, then what it split, merged, moved,
   dissolved and created, under a heading each, areas first; a first
   grouping, and a rebuild that changed nothing, say so in a line.
+- A page that can't be shown leads with what went wrong in plain words
+  ("There's nothing here.", "This map view doesn't exist."), then the
+  daemon's reason, the status and the request to find in `curio daemon
+  logs`, and a way on: the page to start over from, or the page that
+  helps (a map address that isn't one leads to the map).
 - An interest keeps its ID, and its page its address, across rebuilds
   while it keeps most of its documents. One that a rebuild split, merged
   into another or dissolved answers 410 in the Interests' frame, saying
@@ -327,15 +364,20 @@ footer names the address the daemon listens on.
   degraded. Then cards for the library (how many documents,
   fetched and bookmarks, and a bar of the documents by state, each state
   linking to the Library of those; while documents are left to re-embed
-  for a new chunk context, as after an upgrade, a line says how many
-  chunks in how many of the fetched ones, and, once the re-embed's rate
+  with their titles and headings, as after an upgrade, a line says how
+  many passages in how many of the fetched ones, and, once the re-embed's rate
   is measured, about how long it has left at it), the queue (open or
   closed and why,
   with Pause or Resume, its throttle, keep-awake and schedule controls,
-  and each pool's load and the jobs it finished in the last 10 minutes),
+  and each kind of work's load and the jobs it finished in the last 10
+  minutes: fetch, index, grouping (the interests) and metadata
+  embeddings (each document's title, site and folder, which search
+  matches), each explained on hover),
   and why documents failed (the five commonest causes as bars, each
   leading to its group on Failures, and **All failures →** to the tab);
-  beside them, health (the daemon, Ollama, the models, the interests,
+  beside them, health (the daemon and its build, Ollama, the models (the
+  writing model with what it does, which Status doesn't check; `curio
+  doctor` does), the interests,
   embedding drift, the Jina Reader fallback and the YouTube fetcher,
   each with a status dot; the interests' row says where their rebuilds
   stand, in the line `curio status` prints, its dot a warning while they

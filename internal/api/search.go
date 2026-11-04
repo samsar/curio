@@ -165,6 +165,8 @@ type SearchResponse struct {
 	TookMS        int64               `json:"took_ms"`
 	BM25Hits      int                 `json:"bm25_hits"`
 	VectorHits    int                 `json:"vector_hits"`
+	FieldsHits    int                 `json:"fields_hits"`
+	TitleHits     int                 `json:"title_hits"`
 	Total         int                 `json:"total"`
 	Capped        bool                `json:"capped"`
 	Degraded      bool                `json:"degraded,omitempty"`
@@ -253,6 +255,8 @@ func (d Deps) search(ctx context.Context, req SearchRequest) (SearchResponse, er
 		TookMS:        time.Since(start).Milliseconds(),
 		BM25Hits:      res.BM25Hits,
 		VectorHits:    res.VectorHits,
+		FieldsHits:    res.FieldsHits,
+		TitleHits:     res.TitleHits,
 		Total:         res.Total,
 		Capped:        res.Capped,
 		Degraded:      res.Degraded,

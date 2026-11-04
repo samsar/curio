@@ -233,6 +233,29 @@ func TestEngine_TitleListReadsTwoTermsOrMore(t *testing.T) {
 	}
 }
 
+// TestEngine_WordDocumentCounts: a search reports how many distinct
+// documents its fields and title lists matched, over every query (the
+// question and each rewrite here, which read the same lists), and none for
+// a list it doesn't read.
+func TestEngine_WordDocumentCounts(t *testing.T) {
+	index := &listIndex{fields: []store.DocumentHit{{DocumentID: "a"}, {DocumentID: "b"}},
+		titles: []store.DocumentHit{{DocumentID: "b"}}}
+	engine := New(listChunks{}, idDocs{}, index, &countingEmbedder{},
+		Config{BM25Weight: 1, FieldsWeight: 1, TitleWeight: 1, RewriteWeight: 0.5})
+	res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "zebra stripes",
+		Rewrites: []string{"striped zebras"}})
+	require.NoError(t, err)
+	assert.Equal(t, 2, res.FieldsHits, "a and b, each once whatever the queries")
+	assert.Equal(t, 1, res.TitleHits)
+	assert.Zero(t, res.BM25Hits)
+
+	res, err = New(listChunks{}, idDocs{}, index, &countingEmbedder{}, Config{BM25Weight: 1}).Search(
+		context.Background(), Request{TenantID: "local", Query: "zebra stripes"})
+	require.NoError(t, err)
+	assert.Zero(t, res.FieldsHits, "unweighted, unread")
+	assert.Zero(t, res.TitleHits)
+}
+
 // TestEngine_OneEmbedPerSearch: the query is embedded once for both
 // semantic lists, and not at all when neither is weighted.
 func TestEngine_OneEmbedPerSearch(t *testing.T) {

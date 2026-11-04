@@ -312,7 +312,7 @@ func TestFixedSets(t *testing.T) {
 		store.JobKindCards: "Cards", store.JobKind(evilScript): "Job"} {
 		assert.Equal(t, want, jobKindLabel(string(kind)), kind)
 	}
-	assert.Equal(t, "asked for", freshReason(string(store.FreshManual)))
+	assert.Equal(t, "you asked for one", freshReason(string(store.FreshManual)))
 	assert.Equal(t, "the grouping's parameters changed", freshReason("params"))
 	assert.Equal(t, evilQuotes, freshReason(evilQuotes))
 	at := time.Date(2026, 10, 9, 23, 30, 0, 0, time.UTC)

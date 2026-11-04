@@ -139,7 +139,8 @@ func ParseMapQuery(q url.Values) (MapQuery, error) {
 	case MapViewGroups:
 		out.View = view
 	default:
-		return MapQuery{}, fmt.Errorf("%s %q: want %s or %s", mapViewParam, view, MapViewSimilarity, MapViewGroups)
+		return MapQuery{}, fmt.Errorf("%w: %s %q: want %s or %s", errMapView, mapViewParam, view, MapViewSimilarity,
+			MapViewGroups)
 	}
 	sel := q.Get(mapSelectParam)
 	if sel == "" {
@@ -160,6 +161,9 @@ func ParseMapQuery(q url.Values) (MapQuery, error) {
 	out.Select = MapSelection{Kind: kind, ID: id}
 	return out, nil
 }
+
+// errMapView is ParseMapQuery's refusal of a view that isn't one.
+var errMapView = errors.New("no such map view")
 
 // mapSelectForms names the selections the map takes, for a refusal.
 const mapSelectForms = "want " + MapSelectUnsorted + ", " + MapSelectArea + ":<id>, " + MapSelectInterest +

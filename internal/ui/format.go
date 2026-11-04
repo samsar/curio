@@ -91,6 +91,18 @@ func shortURL(u string) string {
 	return out
 }
 
+// looksLikeAddress reports whether a bookmark's title is an address
+// rather than a name: one that starts with a scheme's "://" or "www.",
+// as a browser saves a page that has no title.
+func looksLikeAddress(title string) bool {
+	t := strings.ToLower(strings.TrimSpace(title))
+	if strings.HasPrefix(t, "www.") {
+		return true
+	}
+	scheme, _, ok := strings.Cut(t, "://")
+	return ok && scheme != "" && !strings.ContainsAny(scheme, " \t/")
+}
+
 // urlTrail is where under its host u leads: its path's segments, escaped
 // as stored, joined by " › ", without the query. "" for a URL without a
 // path or one that doesn't parse.
@@ -378,9 +390,9 @@ func triggerLabel(trigger string) string {
 	case store.RunTriggerFirst:
 		return "the library's first grouping"
 	case store.RunTriggerAuto:
-		return "automatic"
+		return "on its own, once enough of the library changed"
 	case store.RunTriggerManual:
-		return "asked for"
+		return "you asked for it"
 	case store.RunTriggerReindex:
 		return "after a re-embedding"
 	case store.RunTriggerParams:
@@ -396,7 +408,7 @@ func triggerLabel(trigger string) string {
 func freshReason(owed string) string {
 	switch owed {
 	case string(store.FreshManual):
-		return "asked for"
+		return "you asked for one"
 	case freshParams:
 		return "the grouping's parameters changed"
 	}
@@ -406,6 +418,67 @@ func freshReason(owed string) string {
 // freshParams is the fresh rebuild owed when the grouping's parameters
 // changed (insight.FreshParams), which nothing stores.
 const freshParams = "params"
+
+// kindLabel says how a rebuild grouped the library (store.RunKind), for
+// people: a warm one started from the groups it had, a fresh one from
+// nothing; "" for a value it doesn't know.
+func kindLabel(kind string) string {
+	switch store.RunKind(kind) {
+	case store.RunKindWarm:
+		return "updated in place"
+	case store.RunKindFresh:
+		return "regrouped from scratch"
+	}
+	return ""
+}
+
+// poolLabel names a job pool, by its kind, as Status lists them: what its
+// work is.
+func poolLabel(kind string) string {
+	switch store.JobKind(kind) {
+	case store.JobKindFetch:
+		return "fetch"
+	case store.JobKindIndex:
+		return "index"
+	case store.JobKindCluster:
+		return "grouping"
+	case store.JobKindCards:
+		return "metadata embeddings"
+	case store.JobKindImport:
+		return "import"
+	case store.JobKindSummarize:
+		return "summaries"
+	}
+	return kind
+}
+
+// poolHint says what a job pool does, for the title of its name.
+func poolHint(kind string) string {
+	switch store.JobKind(kind) {
+	case store.JobKindFetch:
+		return "Fetches saved pages and reads their text"
+	case store.JobKindIndex:
+		return "Splits a page's text into passages and embeds them for search"
+	case store.JobKindCluster:
+		return "Groups the library into interests"
+	case store.JobKindCards:
+		return "Embeds each document's title, site and folder, so search finds it by them"
+	case store.JobKindImport, store.JobKindSummarize:
+	}
+	return ""
+}
+
+// roleUse says what a writing model's role does (config.Role), for
+// people; "" for a role this build doesn't know.
+func roleUse(role string) string {
+	switch role {
+	case "labels":
+		return "names your interests"
+	case "planner":
+		return "understands search questions"
+	}
+	return ""
+}
 
 // localDay is t's date on the daemon's clock: when a rebuild ran.
 func localDay(t time.Time) string { return t.Local().Format("Jan 2, 2006") }

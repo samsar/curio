@@ -162,12 +162,17 @@ func (h pageHandlers) notFound(w http.ResponseWriter, r *http.Request) {
 // errorPage answers the error page. Should it fail to render too, nothing
 // has been written yet, and a plain-text answer still can be.
 func (h pageHandlers) errorPage(w http.ResponseWriter, r *http.Request, status int, title, message string, retry ui.Nav) {
+	h.renderError(w, r, ui.ErrorPage{Status: status, Title: title, Message: message, Retry: retry})
+}
+
+// renderError answers vm, the error page, with its layout and the
+// request's ID filled in.
+func (h pageHandlers) renderError(w http.ResponseWriter, r *http.Request, vm ui.ErrorPage) {
 	id := middleware.GetReqID(r.Context())
-	vm := ui.ErrorPage{Layout: h.pages.layout(title, ui.NavNone), Status: status, Title: title, Message: message,
-		RequestID: id, Retry: retry}
-	if err := h.pages.render.Page(w, status, ui.PageError, vm, ui.CSP); err != nil {
+	vm.Layout, vm.RequestID = h.pages.layout(vm.Title, ui.NavNone), id
+	if err := h.pages.render.Page(w, vm.Status, ui.PageError, vm, ui.CSP); err != nil {
 		h.d.Log.Error("render the error page", "request_id", id, "err", err)
-		http.Error(w, fmt.Sprintf("%s: %s (request %s)", title, message, id), status)
+		http.Error(w, fmt.Sprintf("%s: %s (request %s)", vm.Title, vm.Message, id), vm.Status)
 	}
 }
 

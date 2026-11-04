@@ -2,6 +2,8 @@ package ui
 
 import (
 	"cmp"
+	"errors"
+	"net/http"
 	"slices"
 	"strconv"
 	"strings"
@@ -145,6 +147,14 @@ type QueuePanel struct {
 	KeepAwake       bool
 	KeepAwakeActive bool
 	PowerSource     string
+}
+
+// FinishedLabel heads the pools' Finished column: the window it covers.
+func (p QueuePanel) FinishedLabel() string {
+	if p.FinishedIn > 0 && p.FinishedIn < time.Hour {
+		return "Done in the last " + count(int(p.FinishedIn.Round(time.Minute)/time.Minute), "min", "min")
+	}
+	return "Done in the last " + duration(p.FinishedIn)
 }
 
 // KindLoad is one pool's load, and how many of its jobs finished, done or
@@ -292,12 +302,43 @@ type HealthPanel struct {
 	EmbeddingDim    int
 	// WritingModel is the models the roles in use write with, and empty
 	// when no role is in use: no writing model is then built or pulled.
+	// WritingRoles are those roles (config.Role), sorted.
 	WritingModel   string
+	WritingRoles   []string
 	Drift          *Drift // nil when the embeddings haven't drifted
 	Upstreams      []Upstream
 	YouTubeFetcher string // the yt-dlp videos go to; empty for none
 	// Interests is where automatic rebuilds of the interests stand.
 	Interests InterestsState
+}
+
+// WritingUse says what the writing model does, by its roles, for the
+// Health card's line under it.
+func (p HealthPanel) WritingUse() string {
+	var uses []string
+	for _, r := range p.WritingRoles {
+		if u := roleUse(r); u != "" {
+			uses = append(uses, u)
+		}
+	}
+	return strings.Join(uses, " and ")
+}
+
+// VersionName is the daemon's version without its build stamp: the
+// version's first word, "v2.7.0" of "v2.7.0 (abc1234, 2026-11-04T00:18:54Z)".
+func (p HealthPanel) VersionName() string {
+	name, _, _ := strings.Cut(p.Version, " (")
+	return name
+}
+
+// VersionBuild is the build stamp in the version's parentheses, the commit
+// and when it was built; "" for a version without one.
+func (p HealthPanel) VersionBuild() string {
+	_, build, ok := strings.Cut(p.Version, " (")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSuffix(build, ")")
 }
 
 // Drift is what changed in the build that makes the embeddings since the
@@ -440,9 +481,10 @@ func (s Search) OutOfRange() *PageOutOfRange {
 }
 
 // CappedNote reports whether the page says the ranking stops at the cap:
-// on the last page of a search that matched more than it ranks.
+// on the last page of a search that matched more than it ranks, by its
+// words: a wordless one's matches are only the nearest.
 func (s Search) CappedNote() bool {
-	return s.Results != nil && s.Results.Capped && s.page() == s.Pages()
+	return s.Results != nil && s.Results.Capped && !s.Results.Wordless() && s.page() == s.Pages()
 }
 
 // Pager is the pager under the results, nil when they fit on one page or
@@ -463,6 +505,57 @@ func (s Search) pageHref(page int) string { return searchHref(s.Query, s.Type, p
 // understood search's history entry holds, so that reload, back and
 // forward search by the plan rather than asking the model again.
 func (s Search) Address() string { return s.pageHref(s.page()) }
+
+// nearestShown is how many of a wordless search's first page a result
+// shows before the rest, a click away: the nearest by meaning are weak
+// matches, and ten of them read as ten answers.
+const nearestShown = 3
+
+// ShownHit is a hit as the results list shows it: its badge, which a
+// page found by meaning alone leaves to the head.
+type ShownHit struct {
+	SearchHit
+	Badge string
+}
+
+// LeadHits are the hits the results list shows: all of the page's, or a
+// wordless search's first few on its first page (RestHits are the others).
+func (s Search) LeadHits() []ShownHit {
+	hits := s.shownHits()
+	return hits[:min(len(hits), s.leadCount())]
+}
+
+// RestHits are the page's hits after LeadHits, which a wordless search's
+// first page folds away; none otherwise.
+func (s Search) RestHits() []ShownHit { return s.shownHits()[s.leadCount():] }
+
+func (s Search) leadCount() int {
+	if s.Results == nil {
+		return 0
+	}
+	if s.Results.Wordless() && s.page() == 1 {
+		return min(len(s.Results.Hits), nearestShown)
+	}
+	return len(s.Results.Hits)
+}
+
+func (s Search) shownHits() []ShownHit {
+	if s.Results == nil {
+		return nil
+	}
+	quiet := s.Results.Wordless() || s.Results.ByMeaning()
+	out := make([]ShownHit, len(s.Results.Hits))
+	for i, h := range s.Results.Hits {
+		out[i] = ShownHit{SearchHit: h}
+		if !quiet {
+			out[i].Badge = h.Badge()
+		}
+	}
+	return out
+}
+
+// RestStart is the rank of RestHits' first, for its list's start.
+func (s Search) RestStart() int { return s.leadCount() + 1 }
 
 // SearchHome is what the search page shows without a query, under the
 // box. Zero values are unknown: a read the home does without is left out.
@@ -527,8 +620,39 @@ type SearchResults struct {
 	// store.MaxSearchK, and Capped whether more matched than it ranks.
 	Total  int
 	Capped bool
-	Hits   []SearchHit // the page's
+	// WordHits is how many matches by the query's words the ranking was
+	// built from, over all its pages: the passages BM25 found and the
+	// documents the fields and title lists found (POST /v1/search's
+	// bm25_hits, fields_hits and title_hits). None, and the ranking is the
+	// documents nearest in meaning alone.
+	WordHits int
+	Hits     []SearchHit // the page's
 }
+
+// ByMeaning reports whether every hit on the page was found by meaning
+// alone: each has passages, and no passage uses the query's words. Then a
+// badge on each would say what the head says once, and the page drops
+// them. A degraded search, keyword results only, never is.
+func (r SearchResults) ByMeaning() bool {
+	if r.Degraded || len(r.Hits) == 0 {
+		return false
+	}
+	for _, h := range r.Hits {
+		if len(h.Matches) == 0 || h.keyword() {
+			return false
+		}
+	}
+	return true
+}
+
+// Wordless reports whether nothing in the search's ranking matched the
+// query's words, in a passage, a title, a bookmark's title or folder, a
+// site or an author, so that it holds only what is nearest in meaning:
+// what a query of words the library doesn't hold, or of nonsense, gets,
+// since the vector search ranks every document by its distance. It is the
+// ranking's, the same on every page. The page then says so, and shows the
+// nearest few first.
+func (r SearchResults) Wordless() bool { return !r.Degraded && r.Total > 0 && r.WordHits == 0 }
 
 // Count is how many documents match, as the results' head counts them:
 // "1 document", "37 documents", or, past the cap, "100+ documents".
@@ -575,6 +699,24 @@ func (h SearchHit) Ref() DocRef {
 	return DocRef{ID: h.DocumentID, Title: h.Title, Fallback: h.BookmarkTitle, URL: h.URL}
 }
 
+// keyword reports whether a passage of the hit uses the query's words.
+func (h SearchHit) keyword() bool {
+	return slices.ContainsFunc(h.Matches, func(m Match) bool { return m.BM25 != nil })
+}
+
+// Badge is the hit's MatchKind when it is the unusual case, worth a badge:
+// a passage found by its words or its meaning alone, or a match on what it
+// was saved as; nothing for one found by both, as most are.
+func (h SearchHit) Badge() string {
+	if k := h.MatchKind(); k != matchBoth {
+		return k
+	}
+	return ""
+}
+
+// matchBoth is MatchKind's words for a hit both retrievers found.
+const matchBoth = "keyword + meaning"
+
 // MatchKind says which retrievers found the hit's matching chunks, in
 // words: keyword search's words, the vector search's meaning, or both;
 // and for a hit without matches, which matched on what it was saved as,
@@ -590,7 +732,7 @@ func (h SearchHit) MatchKind() string {
 	}
 	switch {
 	case keyword && meaning:
-		return "keyword + meaning"
+		return matchBoth
 	case keyword:
 		return "keyword only"
 	case meaning:
@@ -853,8 +995,10 @@ func (r LibraryRow) Cell() DocCell {
 }
 
 // DocRef names a document in a list (the doc-title partial): by its
-// title; while it has none, by Fallback, a bookmark's title, styled as
-// one; or by its short URL. It links to its page when it has an ID.
+// title; while it has none, by Fallback, a bookmark's title; or, when the
+// bookmark has none or its title is an address (browsers save a page
+// without one under its URL), by its short URL. Untitled, both are named
+// one way (the untitled class). It links to its page when it has an ID.
 type DocRef struct {
 	ID, Title, URL string
 	Fallback       string
@@ -862,29 +1006,36 @@ type DocRef struct {
 
 // Named reports whether a title or a fallback names the document, rather
 // than its address.
-func (r DocRef) Named() bool { return r.Title != "" || r.Fallback != "" }
+func (r DocRef) Named() bool { return r.Title != "" || r.fallback() != "" }
+
+// fallback is Fallback when it names the document, "" when it is an
+// address.
+func (r DocRef) fallback() string {
+	if looksLikeAddress(r.Fallback) {
+		return ""
+	}
+	return r.Fallback
+}
 
 // Name is what a list calls the document: its title, its fallback, or its
 // short URL.
 func (r DocRef) Name() string {
 	if r.Named() {
-		return cmp.Or(r.Title, r.Fallback)
+		return cmp.Or(r.Title, r.fallback())
 	}
 	return shortURL(r.URL)
 }
 
 // Hover is the whole of its name, shown on hover: its title, its
 // fallback, or its URL.
-func (r DocRef) Hover() string { return cmp.Or(r.Title, r.Fallback, r.URL) }
+func (r DocRef) Hover() string { return cmp.Or(r.Title, r.fallback(), r.URL) }
 
-// Class is the class its name carries besides doc-title: from-bookmark
-// for a fallback, untitled for its address, and none for its title.
+// Class is the class its name carries besides doc-title: untitled for a
+// document without a title of its own, however it is named, and none for
+// its title.
 func (r DocRef) Class() string {
-	switch {
-	case r.Title != "":
+	if r.Title != "" {
 		return ""
-	case r.Fallback != "":
-		return "from-bookmark"
 	}
 	return "untitled"
 }
@@ -1014,6 +1165,47 @@ func (g FailureGroup) Known() bool { return store.FailureCause(g.Cause).Valid() 
 // DeadLinks reports whether the group is the dead links, which are
 // refetched only after a confirm.
 func (g FailureGroup) DeadLinks() bool { return g.Cause == string(store.FailureCauseDeadLink) }
+
+// ConfirmOver is how many documents a group's refetch queues at most
+// without a confirm: past it, a click could queue hours of fetching.
+const ConfirmOver = 50
+
+// Confirms reports whether the group's refetch asks first: the dead
+// links' always, since a refetch rarely brings one back, and any other
+// group's past ConfirmOver documents.
+func (g FailureGroup) Confirms() bool { return g.DeadLinks() || g.Count > ConfirmOver }
+
+// ConfirmTitle is the question the group's confirm asks.
+func (g FailureGroup) ConfirmTitle() string {
+	if g.DeadLinks() {
+		return "Refetch " + count(g.Count, "dead link", "dead links") + "?"
+	}
+	return "Refetch " + count(g.Count, "document", "documents") + "?"
+}
+
+// ConfirmText is what the group's confirm says the refetch does: that
+// each page is fetched again, what it costs when a site blocks curio, and
+// how long it takes, in words, never an estimate the page can't make.
+func (g FailureGroup) ConfirmText() string {
+	cause := store.FailureCause(g.Cause)
+	switch {
+	case cause == store.FailureCauseDeadLink:
+		return "curio found these pages gone. It will try each one again, and a page still gone stays dead."
+	case slices.Contains(viaJina, cause):
+		return "curio fetches each of these pages again, in the background. Pages a site blocks or keeps " +
+			"behind a login are read through Jina Reader when it is on, which reads only a few pages a minute " +
+			"and fewer from one site, so this many can take hours."
+	case cause == store.FailureCauseRateLimited:
+		return "curio fetches each of these pages again, in the background, a few at a time and fewer " +
+			"from one site, so a site that asked curio to slow down isn't asked all at once."
+	}
+	return "curio fetches each of these pages again, in the background, a few at a time and fewer from one site."
+}
+
+// viaJina are the causes whose pages a refetch reads through Jina Reader
+// when it is on: the site blocked curio or kept the page behind a login.
+var viaJina = []store.FailureCause{store.FailureCauseAntiBot, store.FailureCauseLoginWall,
+	store.FailureCauseJinaRefused}
 
 // Refetch is the group's refetch of a known cause: the dead links', which
 // names their state, or the cause's.
@@ -1187,6 +1379,11 @@ type DocumentMeta struct {
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
 	MarkdownPath  string // absolute; empty when it has none
+}
+
+// Ref names the document as its page heads it: as a list names it.
+func (m DocumentMeta) Ref() DocRef {
+	return DocRef{ID: m.ID, Title: m.Title, Fallback: m.BookmarkTitle, URL: m.URL}
 }
 
 // Extraction is how the document's current text was fetched.
@@ -1467,6 +1664,25 @@ const (
 	rebuildsUnknown    = "unknown"
 	rebuildsOff        = "off"
 )
+
+// Kind says how the last rebuild grouped the library, in words
+// (kindLabel): "updated in place" or "regrouped from scratch".
+func (s InterestsState) Kind() string { return kindLabel(s.LastKind) }
+
+// UntilNext says when automatic rebuilds come next, as a current state
+// does: after how many more documents change.
+func (s InterestsState) UntilNext() string {
+	if left := s.RebuildAt - s.Changed; left > 0 {
+		return "rebuilds after " + count(left, "more change", "more changes")
+	}
+	return "rebuilds once the library settles"
+}
+
+// ChangedNote is UntilNext's title: the count it comes from.
+func (s InterestsState) ChangedNote() string {
+	return count(s.Changed, "document", "documents") + " changed since; " + num(s.RebuildAt) +
+		" make the next rebuild due"
+}
 
 // InFlight reports whether the scheduler saw a rebuild queued or running.
 func (s InterestsState) InFlight() bool {
@@ -2252,11 +2468,56 @@ func (MapPage) UnsortedPage() string { return unsortedHref(1, "") }
 type ErrorPage struct {
 	Layout    Layout
 	Status    int
-	Title     string
+	Title     string // the API's problem title, lower case: "bad request"
 	Message   string
 	RequestID string
 	// Retry is the page to go back to, when there is one to suggest.
 	Retry Nav
+	// Sentence is what went wrong, for people, which the page leads with;
+	// empty for Lead's sentence for the status.
+	Sentence string
+	// Back is a page that helps more than Retry's: its address and label.
+	Back *Link
+}
+
+// Link is a link a page offers: its address, built in Go, and its label.
+type Link struct {
+	Href, Label string
+}
+
+// Lead is the sentence the error page leads with: Sentence, or what the
+// status means for people. The status and the problem's title follow it,
+// smaller.
+func (e ErrorPage) Lead() string {
+	if e.Sentence != "" {
+		return e.Sentence
+	}
+	switch {
+	case e.Status == http.StatusNotFound:
+		return "There's nothing here."
+	case e.Status == http.StatusGone:
+		return "This is gone."
+	case e.Status == http.StatusConflict:
+		return "That can't be done right now."
+	case e.Status == http.StatusServiceUnavailable:
+		return "curio isn't ready for that yet."
+	case e.Status >= 500:
+		return "Something went wrong in curio."
+	case e.Status >= 400:
+		return "curio can't answer this address."
+	}
+	return "That didn't work."
+}
+
+// MapQueryError is the error page's Sentence and Message for an interest
+// map address ParseMapQuery refused, err, and its way back: the map.
+func MapQueryError(err error) (sentence, message string, back *Link) {
+	back = &Link{Href: mapHref(MapQuery{}), Label: "Show the map"}
+	if errors.Is(err, errMapView) {
+		return "This map view doesn't exist.", "The map shows your library by similarity or by group.", back
+	}
+	return "The map can't show what this address selects.",
+		"It selects an area, an interest or a document by its ID, or Unsorted.", back
 }
 
 // Starting is what the pages show while the daemon is starting.

@@ -142,6 +142,7 @@ func estimateProgress(q QueueResponse, m MetricsResponse) ui.Progress {
 func healthPanel(h Health) ui.HealthPanel {
 	p := ui.HealthPanel{Version: h.Version, OllamaReachable: h.OllamaReachable, OllamaDetail: h.OllamaDetail,
 		EmbeddingModel: h.EmbeddingModel, EmbeddingDim: h.EmbeddingDim, WritingModel: writingModels(h),
+		WritingRoles:   slices.Sorted(maps.Keys(h.GenerationRoles)),
 		YouTubeFetcher: h.YouTubeFetcher, Interests: interestsStateView(h.Interests)}
 	if d := h.EmbeddingDrift; d != nil {
 		p.Drift = &ui.Drift{Verified: d.Verification.Verified, Detail: d.Verification.Detail, Fix: d.Fix}
