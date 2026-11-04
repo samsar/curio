@@ -12,24 +12,25 @@ import (
 )
 
 // MaxRewrites and MaxNames bound a request's rewrites and names: each
-// rewrite reads five lists, and each name three.
+// rewrite reads six lists, and each name three or four.
 const (
 	MaxRewrites = 3
 	MaxNames    = 4
 )
 
 // maxConcurrentReads bounds the store reads one search runs at once. A
-// planned search makes up to 33 reads (32 lists, and the count of what a
-// date filter couldn't judge), from a pool of 32 connections the workers
-// share; measured on the operator's library, 6 at once ranked a planned
-// search no slower than no bound (decisions.md "Understanding the
-// question").
+// planned search makes up to 41 reads (40 lists: the question and three
+// rewrites six each, four names four each; and the count of what a date
+// filter couldn't judge), from a pool of 32 connections the workers share;
+// measured on the operator's library, 6 at once ranked a planned search no
+// slower than no bound (decisions.md "Understanding the question").
 const maxConcurrentReads = 6
 
 // query is one text a search ranks documents by: the question, a rewrite
 // or a name, at weight, which multiplies each list's own. The question and
 // its rewrites read every list; a name only the document lists, which
-// match what a document was saved as.
+// match what a document was saved as, the summary list held to the
+// summaries' site and author.
 type query struct {
 	text   string
 	weight float64
@@ -93,9 +94,9 @@ func checkQueries(req Request) error {
 // queryHits are one query's lists, and how long each read took. Each read
 // writes only its own fields, read after the reads are done.
 type queryHits struct {
-	bm25, vector          []store.ChunkHit
-	fields, cards, titles []store.DocumentHit
-	took                  Timings // BM25, Fields, Titles, Vector and Cards
+	bm25, vector                     []store.ChunkHit
+	fields, cards, titles, summaries []store.DocumentHit
+	took                             Timings // BM25, Fields, Titles, Summaries, Vector and Cards
 }
 
 // listHits are every list a search read: each query's, the documents a
@@ -172,6 +173,14 @@ func (e *Engine) readLists(ctx context.Context, req Request, qs []query) (listHi
 				}))
 			})
 		}
+		if read := e.summaryRead(q); read != nil {
+			g.Go(func() error {
+				return wrap("summaries", slots.read(gctx, &h.took.Summaries, func() (err error) {
+					h.summaries, err = read(gctx, req.TenantID, q.fts, documentListDepth, req.Filters)
+					return err
+				}))
+			})
+		}
 	}
 	// The count of what a date filter couldn't judge is local SQLite, as
 	// the keyword lists are, and fails the search like them.
@@ -199,6 +208,19 @@ func (e *Engine) readLists(ctx context.Context, req Request, qs []query) (listHi
 		return listHits{}, err
 	}
 	return out, nil
+}
+
+// summaryRead is how q reads the summary list, nil when it doesn't: the
+// question and its rewrites read the summaries whole; a name never does,
+// since names on the list cost the plans' vague references in the grid
+// (decisions.md "Choosing the ranking defaults"); and nothing while the
+// list is weighted 0, or for a query that sanitizes to nothing.
+func (e *Engine) summaryRead(q query) func(context.Context, string, string, int, store.SearchFilters) (
+	[]store.DocumentHit, error) {
+	if e.summaryW == 0 || q.fts == "" || !q.chunks {
+		return nil
+	}
+	return e.index.SearchSummaries
 }
 
 // wrap prefixes a list's error with its name; nil stays nil.
@@ -293,6 +315,7 @@ func (h listHits) timings() Timings {
 		t.BM25 = max(t.BM25, q.took.BM25)
 		t.Fields = max(t.Fields, q.took.Fields)
 		t.Titles = max(t.Titles, q.took.Titles)
+		t.Summaries = max(t.Summaries, q.took.Summaries)
 		t.Vector = max(t.Vector, q.took.Vector)
 		t.Cards = max(t.Cards, q.took.Cards)
 	}

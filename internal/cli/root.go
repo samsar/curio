@@ -170,6 +170,7 @@ over HTTP; auto-starts the daemon if it's not running. New here? Run
 		newImportCmd(&env),
 		newRefetchCmd(&env),
 		newReindexCmd(&env),
+		newSummarizeCmd(&env),
 		newJobsCmd(&env),
 		newDocsCmd(&env),
 		newSearchCmd(&env),

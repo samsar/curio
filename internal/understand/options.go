@@ -41,6 +41,11 @@ type Options struct {
 	Location *time.Location
 	// Log receives the planner's warnings; nil is slog.Default().
 	Log *slog.Logger
+	// Using, when set, is told of each call the planner makes of its model
+	// (a plan, a probe of the fitness check, a load, an unload): it returns
+	// the func that marks the call ended. The daemon's summary pass yields
+	// to these calls; nil tells nobody.
+	Using func() (end func())
 }
 
 // OptionsFrom is the planner's Options as config.yaml sets them: the one
@@ -94,20 +99,18 @@ func (o *Options) fitBudget(understandSeconds, embedSeconds int) {
 // withheld is why questions may not go to the planner's model, "" when
 // they may. A question is the user's own words, so it goes off this
 // machine, or to a provider other than a local Ollama, only when the
-// planner role names that server or provider itself: a role inherits
-// generation's, and a base URL set for the labels, which send no
-// question, must not send every search there.
+// planner role names that server or provider itself
+// (config.Generation.Unnamed).
 func withheld(g config.Generation) string {
-	spec, own := g.Role(config.RolePlanner), g.Roles[config.RolePlanner]
-	switch {
-	case spec.Provider != config.ProviderOllama && own.Provider == "":
+	switch key, value := g.Unnamed(config.RolePlanner); key {
+	case config.KeyProvider:
 		return fmt.Sprintf("questions would go to the provider %s, generation.provider, which the planner role "+
 			"doesn't name; set generation.roles.planner.provider to send them there, or search.understand: false",
-			spec.Provider)
-	case !config.OnThisMachine(spec.BaseURL) && own.BaseURL == "":
+			value)
+	case config.KeyBaseURL:
 		return fmt.Sprintf("questions would leave this machine for %s, generation.base_url, which the planner role "+
 			"doesn't name; set generation.roles.planner.base_url to send them there, or search.understand: false",
-			spec.BaseURL)
+			value)
 	}
 	return ""
 }

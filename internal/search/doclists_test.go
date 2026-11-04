@@ -60,8 +60,8 @@ func (idDocs) GetByID(_ context.Context, id string) (*store.Document, error) {
 // limit each list was read at and fails as told.
 type listIndex struct {
 	store.DocumentIndex
-	fields, cards, titles          []store.DocumentHit
-	fieldsErr, cardsErr, titlesErr error
+	fields, cards, titles, summaries             []store.DocumentHit
+	fieldsErr, cardsErr, titlesErr, summariesErr error
 
 	mu     sync.Mutex
 	limits map[string][]int
@@ -89,6 +89,12 @@ func (x *listIndex) SearchCards(_ context.Context, _ string, _ []float32, limit 
 func (x *listIndex) SearchTitles(_ context.Context, _, _ string, limit int, _ store.SearchFilters) ([]store.DocumentHit, error) {
 	x.record("titles", limit)
 	return x.titles, x.titlesErr
+}
+
+func (x *listIndex) SearchSummaries(_ context.Context, _, _ string, limit int, _ store.SearchFilters) (
+	[]store.DocumentHit, error) {
+	x.record("summaries", limit)
+	return x.summaries, x.summariesErr
 }
 
 // countingEmbedder embeds every text as a 1-wide vector, counting the
@@ -234,19 +240,19 @@ func TestEngine_TitleListReadsTwoTermsOrMore(t *testing.T) {
 }
 
 // TestEngine_WordDocumentCounts: a search reports how many distinct
-// documents its fields and title lists matched, over every query (the
-// question and each rewrite here, which read the same lists), and none for
-// a list it doesn't read.
+// documents its fields, title and summary lists matched, over every query
+// (the question and each rewrite here, which read the same lists), and
+// none for a list it doesn't read.
 func TestEngine_WordDocumentCounts(t *testing.T) {
-	index := &listIndex{fields: []store.DocumentHit{{DocumentID: "a"}, {DocumentID: "b"}},
-		titles: []store.DocumentHit{{DocumentID: "b"}}}
+	index := &listIndex{fields: docHits("a", "b"), titles: docHits("b"), summaries: docHits("c", "a")}
 	engine := New(listChunks{}, idDocs{}, index, &countingEmbedder{},
-		Config{BM25Weight: 1, FieldsWeight: 1, TitleWeight: 1, RewriteWeight: 0.5})
+		Config{BM25Weight: 1, FieldsWeight: 1, TitleWeight: 1, SummaryWeight: 1, RewriteWeight: 0.5})
 	res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "zebra stripes",
 		Rewrites: []string{"striped zebras"}})
 	require.NoError(t, err)
 	assert.Equal(t, 2, res.FieldsHits, "a and b, each once whatever the queries")
 	assert.Equal(t, 1, res.TitleHits)
+	assert.Equal(t, 2, res.SummaryHits, "c and a, though the fields found a too")
 	assert.Zero(t, res.BM25Hits)
 
 	res, err = New(listChunks{}, idDocs{}, index, &countingEmbedder{}, Config{BM25Weight: 1}).Search(
@@ -254,6 +260,7 @@ func TestEngine_WordDocumentCounts(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, res.FieldsHits, "unweighted, unread")
 	assert.Zero(t, res.TitleHits)
+	assert.Zero(t, res.SummaryHits)
 }
 
 // TestEngine_OneEmbedPerSearch: the query is embedded once for both
@@ -318,20 +325,35 @@ func TestEngine_SemanticFailureDropsBothLists(t *testing.T) {
 		res.Warnings, "no cards to be without")
 }
 
-// TestEngine_KeywordDocumentListFailureIsFatal: the fields and title lists
-// are local SQLite, like BM25, so a failure of either fails the search.
+// TestEngine_KeywordDocumentListFailureIsFatal: the fields, title and
+// summary lists are local SQLite, like BM25, so a failure of any fails the
+// search.
 func TestEngine_KeywordDocumentListFailureIsFatal(t *testing.T) {
 	errDisk := errors.New("disk I/O error")
 	for list, index := range map[string]*listIndex{
-		"fields": {fieldsErr: errDisk},
-		"titles": {titlesErr: errDisk},
+		"fields":    {fieldsErr: errDisk},
+		"titles":    {titlesErr: errDisk},
+		"summaries": {summariesErr: errDisk},
 	} {
 		engine := New(listChunks{}, idDocs{}, index, &countingEmbedder{},
-			Config{BM25Weight: 1, VectorWeight: 1, FieldsWeight: 1, CardsWeight: 1, TitleWeight: 1})
+			Config{BM25Weight: 1, VectorWeight: 1, FieldsWeight: 1, CardsWeight: 1, TitleWeight: 1, SummaryWeight: 1})
 		_, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "zebra stripes"})
 		require.ErrorIs(t, err, errDisk, list)
 		assert.ErrorContains(t, err, list+": ")
 	}
+}
+
+// TestEngine_DegradedKeepsTheSummaries: a search whose semantic lists
+// failed keeps the summary list, a keyword list.
+func TestEngine_DegradedKeepsTheSummaries(t *testing.T) {
+	engine := New(listChunks{vectorErr: errors.New("connection refused")}, idDocs{},
+		&listIndex{summaries: docHits("S")}, &countingEmbedder{},
+		Config{BM25Weight: 1, VectorWeight: 1, SummaryWeight: 0.5, Log: slog.New(slog.DiscardHandler)})
+	res, err := engine.Search(context.Background(), Request{TenantID: "local", Query: "zebra stripes"})
+	require.NoError(t, err)
+	assert.True(t, res.Degraded)
+	assert.Equal(t, []string{"S"}, hitIDs(res.Items))
+	assert.Equal(t, rr(0.5, 1), res.Items[0].Score)
 }
 
 // TestEngine_DocumentOnlyHitsCount: documents only the document lists

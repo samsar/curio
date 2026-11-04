@@ -90,6 +90,7 @@ type Planner struct {
 	timeout   time.Duration
 	keepAlive time.Duration
 	shared    bool
+	using     func() (end func())
 	now       func() time.Time
 	loc       *time.Location
 	log       *slog.Logger
@@ -110,7 +111,12 @@ type Planner struct {
 	logged      map[string]bool // the causes logged at WARN since the last plan
 	// timeouts counts the plans in a row that timed out; while
 	// timeoutHoldUntil is ahead, questions answer timeout at once, and
-	// timeoutHold is how long the last hold of the run lasted.
+	// timeoutHold is how long the last hold of the run lasted. Each hold's
+	// end is wall time, its monotonic reading dropped: healthz reports it,
+	// and judged on Go's monotonic clock, which stops while a Mac sleeps,
+	// a hold would outlast the time it says. The 60 s retries (warmErrAt,
+	// checkErrAt) and keptUntil, which stands for Ollama's own keep-alive
+	// timer, stay monotonic: nothing reports or stores them.
 	timeouts         int
 	timeoutHoldUntil time.Time
 	timeoutHold      time.Duration
@@ -152,6 +158,7 @@ func New(lifetime context.Context, gen generator.Generator, opts Options) *Plann
 		keepAlive: opts.KeepAlive,
 		shared:    opts.Shared,
 		withheld:  opts.Withheld,
+		using:     opts.Using,
 		now:       opts.Now,
 		loc:       opts.Location,
 		log:       opts.Log,
@@ -192,6 +199,17 @@ func New(lifetime context.Context, gen generator.Generator, opts Options) *Plann
 	p.gen = jg
 	p.warmer, _ = gen.(generator.Warmer)
 	return p
+}
+
+// use marks a call of the model beginning (Options.Using), and returns
+// the func that marks it ended, which its callers defer: a call that
+// panics (net/http recovers a search's) would otherwise leave the use
+// open, holding the summary pass back until a restart.
+func (p *Planner) use() (end func()) {
+	if p.using == nil {
+		return func() {}
+	}
+	return p.using()
 }
 
 // Wait returns once the planner's background work has stopped, after the
@@ -291,6 +309,8 @@ func (p *Planner) KeepAlive() time.Duration { return p.keepAlive }
 func (p *Planner) ask(ctx context.Context, question string) (Outcome, error) {
 	pctx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
+	end := p.use()
+	defer end()
 	raw, err := p.gen.GenerateJSON(pctx, renderPrompt(question, p.now().In(p.loc)), schema(), p.planOptions())
 	if cerr := ctx.Err(); cerr != nil {
 		return Outcome{}, cerr
@@ -356,7 +376,7 @@ func (p *Planner) holdTimeoutsLocked() {
 	} else {
 		p.timeoutHold = min(2*p.timeoutHold, lastTimeoutHold)
 	}
-	p.timeoutHoldUntil = p.now().Add(p.timeoutHold)
+	p.timeoutHoldUntil = p.now().Add(p.timeoutHold).Round(0)
 	p.recordLocked("timeout:held", fmt.Errorf("%d plans in a row took longer than %s", p.timeouts, p.timeout))
 	p.noteLocked("timeout:held", "search understanding: plans keep timing out; searches use their words for a while",
 		nil, "timeouts", p.timeouts, "hold", p.timeoutHold, "until", p.timeoutHoldUntil)
@@ -500,7 +520,7 @@ func (p *Planner) unloadedLocked(now time.Time) (Outcome, bool) {
 		return Outcome{}, false
 	}
 	p.evictions = 0
-	p.evictionHoldUntil = now.Add(evictionHold)
+	p.evictionHoldUntil = now.Add(evictionHold).Round(0)
 	p.recordLocked("evicted", fmt.Errorf("unloaded within its keep-alive %d times", evictionsToHold))
 	p.noteLocked("evicted", "search understanding: Ollama keeps unloading the planner's model for other models; "+
 		"searches use their words while it isn't loaded again", nil, "hold", evictionHold,
@@ -613,6 +633,8 @@ func (p *Planner) startLocked(warm bool) {
 // warm loads the model on the daemon's context, reporting whether it did.
 func (p *Planner) warm() bool {
 	p.log.Info("search understanding: loading the planner's model", "model", p.model)
+	end := p.use()
+	defer end()
 	err := p.warmer.Warm(p.lifetime, p.keepAlive)
 	if p.lifetime.Err() != nil {
 		return false
@@ -644,6 +666,8 @@ func (p *Planner) unload() {
 	}
 	ctx, cancel := context.WithTimeout(p.lifetime, unloadBound)
 	defer cancel()
+	end := p.use()
+	defer end()
 	err := p.warmer.Unload(ctx)
 	if p.lifetime.Err() != nil {
 		return
@@ -736,6 +760,8 @@ const UnfitFix = "set generation.roles.planner.model to a model that passes, or 
 func (p *Planner) probe(ctx context.Context, question string) (answer, error) {
 	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
+	end := p.use()
+	defer end()
 	raw, err := p.gen.GenerateJSON(ctx, renderPrompt(question, p.now().In(p.loc)), schema(), p.planOptions())
 	if err != nil {
 		return answer{}, err

@@ -35,6 +35,7 @@ type Config struct {
 	Chunking   Chunking   `yaml:"chunking"`
 	Insight    Insight    `yaml:"insight"`
 	Generation Generation `yaml:"generation"`
+	Summaries  Summaries  `yaml:"summaries"`
 	UI         UI         `yaml:"ui"`
 
 	// deprecated are the keys the loaded file sets that nothing reads
@@ -165,15 +166,22 @@ type Search struct {
 	// vector, and its title and bookmark titles holding every word of a
 	// query of two words or more (see decisions.md "Metadata search: a
 	// fields index and a card per document"). Each is finite and not
-	// negative, and not all five are zero. A zero switches that list off;
-	// with VectorWeight and CardsWeight both zero the query is never
-	// embedded, so search never waits on or degrades for Ollama.
+	// negative, and not all six (SummaryWeight with them) are zero. A zero
+	// switches that list off; with VectorWeight and CardsWeight both zero
+	// the query is never embedded, so search never waits on or degrades
+	// for Ollama.
 	BM25Weight   float64 `yaml:"bm25_weight"`
 	VectorWeight float64 `yaml:"vector_weight"`
 	FieldsWeight float64 `yaml:"fields_weight"`
 	CardsWeight  float64 `yaml:"cards_weight"`
 	TitleWeight  float64 `yaml:"title_weight"`
-	Collapse     string  `yaml:"collapse"` // max | sum | top3_avg
+	// SummaryWeight weighs the summary list: the words of the documents'
+	// summaries (the summaries role's), their own index beside the fields'.
+	// Finite and not negative; 0, the default, leaves the list unread, and
+	// the ranking is then the five lists' alone (decisions.md "Choosing the
+	// ranking defaults").
+	SummaryWeight float64 `yaml:"summary_weight"`
+	Collapse      string  `yaml:"collapse"` // max | sum | top3_avg
 	// EmbedTimeoutSeconds bounds embedding a search query. When Ollama is
 	// down or slower than this, search returns keyword-only results marked
 	// degraded instead of failing. Default 10. Keep it well under the CLI and
@@ -279,6 +287,22 @@ type Generation struct {
 	Roles map[Role]ModelSpec `yaml:"roles"`
 }
 
+// Summaries configures the summary pass: one call of a writing model (the
+// summaries role) per fetched document, whose answer is stored for the
+// reranker and searched by its own list when search.summary_weight weighs
+// it (decisions.md "Choosing the ranking defaults").
+type Summaries struct {
+	// Enabled writes the summaries: true turns the pass on, and false, or
+	// left out (nil), leaves it off, whatever the model: no ranking yet
+	// gains from them, and a pass costs hours of a writing model. With it
+	// true and a model below the measured bars, curio doctor warns
+	// (SummariesBelowBars). The daemon never pulls the role's model for it
+	// alone: curio up does, with consent, or another role's pull of the
+	// same model. Off, no page is sent to a model, the summaries written
+	// stay stored, and the summarize jobs left drain without a call.
+	Enabled *bool `yaml:"enabled"`
+}
+
 // ModelSpec is a writing model and where it runs.
 type ModelSpec struct {
 	Provider       string `yaml:"provider"`
@@ -297,6 +321,9 @@ const (
 	// RolePlanner understands a search question: what it asks for, the
 	// filters it states, rewrites and the names it points at.
 	RolePlanner Role = "planner"
+	// RoleSummaries writes each fetched document's summary: what the page
+	// is, who made it, what it is about and the names it holds.
+	RoleSummaries Role = "summaries"
 )
 
 // roles are every role, in the order they are listed and pulled: what
@@ -312,6 +339,7 @@ var roles = []struct {
 		return c.Insight.Enabled && c.Insight.Labeling == labelingLLM
 	}, true},
 	{RolePlanner, "search understanding", func(c Config) bool { return c.Search.Understand }, false},
+	{RoleSummaries, "document summaries", Config.SummariesOn, false},
 }
 
 // Roles lists every role.
@@ -335,9 +363,9 @@ func (r Role) UsedFor() string {
 }
 
 // PullsAlone reports whether the daemon pulls r's model on its own, with
-// generation.auto_pull. The planner's doesn't: search understanding is on
+// generation.auto_pull. The planner's and the summaries' don't: each is on
 // by default, and a home that labels nothing with a writing model would
-// otherwise download gigabytes on its first start after an upgrade. Its
+// otherwise download gigabytes on its first start after an upgrade. Their
 // model is pulled by curio up, which asks first, or with the pull of
 // another role in use that writes with the same model.
 func (r Role) PullsAlone() bool {
@@ -353,18 +381,50 @@ func (r Role) PullsAlone() bool {
 // r's server: the model then serves that role too, whatever r does with
 // it.
 func (c Config) SharesModel(r Role) bool {
-	mine := c.Generation.Role(r)
-	for _, o := range c.RolesInUse() {
-		if o == r {
-			continue
-		}
-		theirs := c.Generation.Role(o)
-		if theirs.Provider == mine.Provider && theirs.Model == mine.Model &&
-			strings.TrimRight(theirs.BaseURL, "/") == strings.TrimRight(mine.BaseURL, "/") {
-			return true
-		}
+	return slices.ContainsFunc(c.RolesInUse(), func(o Role) bool { return c.sameModel(r, o) })
+}
+
+// SharesModelWith reports whether o, another role, is in use and writes
+// with r's model on r's server.
+func (c Config) SharesModelWith(r, o Role) bool {
+	return slices.Contains(c.RolesInUse(), o) && c.sameModel(r, o)
+}
+
+// sameModel reports whether o, another role than r, writes with r's model
+// on r's server.
+func (c Config) sameModel(r, o Role) bool {
+	if o == r {
+		return false
 	}
-	return false
+	mine, theirs := c.Generation.Role(r), c.Generation.Role(o)
+	return theirs.Provider == mine.Provider && theirs.Model == mine.Model &&
+		strings.TrimRight(theirs.BaseURL, "/") == strings.TrimRight(mine.BaseURL, "/")
+}
+
+// The keys Generation.Unnamed names: a role's provider and its server.
+const (
+	KeyProvider = "provider"
+	KeyBaseURL  = "base_url"
+)
+
+// Unnamed reports where r's requests would go that r doesn't name itself:
+// key is KeyProvider when they would go to a provider other than Ollama,
+// or KeyBaseURL when to a server off this machine (OnThisMachine), and
+// value is that provider or URL, inherited from generation's own field;
+// key is "" when r's requests stay on this machine's Ollama, or r's entry
+// in Roles names where they go. A role that sends the user's own content
+// (a question, a page) sends it there only when its own entry names it: a
+// base URL set for the labels, which send no such content, must not send
+// every page there. The provider is checked first.
+func (g Generation) Unnamed(r Role) (key, value string) {
+	spec, own := g.Role(r), g.Roles[r]
+	switch {
+	case spec.Provider != ProviderOllama && own.Provider == "":
+		return KeyProvider, spec.Provider
+	case !OnThisMachine(spec.BaseURL) && own.BaseURL == "":
+		return KeyBaseURL, spec.BaseURL
+	}
+	return "", ""
 }
 
 // OnThisMachine reports whether baseURL, a model server's, is on this
@@ -406,9 +466,10 @@ func (g Generation) Role(r Role) ModelSpec {
 }
 
 // RolesInUse lists the roles whose feature is on, in Roles' order: labels
-// while insight is enabled and labels its interests with an LLM, and the
-// planner while search understands questions. A role not in use has no
-// writing model to build, pull or check.
+// while insight is enabled and labels its interests with an LLM, the
+// planner while search understands questions, and the summaries while
+// they are written (SummariesOn). A role not in use has no writing model
+// to build, pull or check.
 func (c Config) RolesInUse() []Role {
 	var out []Role
 	for _, r := range roles {
@@ -492,6 +553,13 @@ func Default() Config {
 			UnderstandKeepAliveMinutes: 30,
 			RewriteWeight:              0.5,
 			NameWeight:                 1,
+			// The summary list is off: on the operator's library no weight
+			// passed the pick rule (decisions.md "Choosing the ranking
+			// defaults"). At 0.1 to 0.25 it held the top 10 level but cost
+			// known-item S@1 on failed and dead pages, which have no
+			// summary; at depth it finds pages (R@100 up), so it is kept for
+			// the reranker, not fused.
+			SummaryWeight: 0,
 		},
 		Chunking: Chunking{
 			// 384 words keeps chunks topical, and dense markdown (URLs,
@@ -522,6 +590,8 @@ func Default() Config {
 			TimeoutSeconds: 120,
 			AutoPull:       true,
 		},
+		// Summaries are off unless config.yaml sets summaries.enabled true
+		// (SummariesOn).
 	}
 }
 
@@ -840,7 +910,7 @@ func (d Daemon) SlogLevel() slog.Level {
 
 // validateWeights checks the RRF weights, the lists' and the ones a plan's
 // rewrites and names multiply them by. NaN or a negative weight corrupts
-// the fused ordering, and with all five lists at zero every document
+// the fused ordering, and with all six lists at zero every document
 // scores zero.
 func validateWeights(s Search) error {
 	for _, w := range []struct {
@@ -849,7 +919,7 @@ func validateWeights(s Search) error {
 	}{
 		{"search.bm25_weight", s.BM25Weight}, {"search.vector_weight", s.VectorWeight},
 		{"search.fields_weight", s.FieldsWeight}, {"search.cards_weight", s.CardsWeight},
-		{"search.title_weight", s.TitleWeight},
+		{"search.title_weight", s.TitleWeight}, {"search.summary_weight", s.SummaryWeight},
 		{"search.rewrite_weight", s.RewriteWeight}, {"search.name_weight", s.NameWeight},
 	} {
 		// Written so NaN, which fails every comparison, is rejected.
@@ -857,9 +927,10 @@ func validateWeights(s Search) error {
 			return fmt.Errorf("%s must be a finite number >= 0, got %g", w.key, w.v)
 		}
 	}
-	if s.BM25Weight == 0 && s.VectorWeight == 0 && s.FieldsWeight == 0 && s.CardsWeight == 0 && s.TitleWeight == 0 {
-		return errors.New("search.bm25_weight, vector_weight, fields_weight, cards_weight and title_weight " +
-			"must not all be 0")
+	if s.BM25Weight == 0 && s.VectorWeight == 0 && s.FieldsWeight == 0 && s.CardsWeight == 0 &&
+		s.TitleWeight == 0 && s.SummaryWeight == 0 {
+		return errors.New("search.bm25_weight, vector_weight, fields_weight, cards_weight, title_weight and " +
+			"summary_weight must not all be 0")
 	}
 	return nil
 }

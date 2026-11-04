@@ -91,6 +91,9 @@ type fakeOllama struct {
 	// plan answers a planner's question, the fitness check's included;
 	// nil plays an Ollama without the writing model.
 	plan func(question string) string
+	// summary answers a summary's prompt, the fitness check's pages
+	// included; nil plays an Ollama without the writing model for them.
+	summary func(prompt string) string
 
 	mu                    sync.Mutex
 	digest, version, salt string
@@ -180,14 +183,15 @@ func (f *fakeOllama) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// generate answers a planner's request with plan's reply to its question;
-// one without a prompt loads the model.
+// generate answers a planner's request with plan's reply to its question,
+// and a summary's, told apart by its schema, with summary's reply to its
+// prompt; one without a prompt loads the model.
 func (f *fakeOllama) generate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Prompt *string         `json:"prompt"`
 		Format json.RawMessage `json:"format"`
 	}
-	if !assert.NoError(f.t, json.NewDecoder(r.Body).Decode(&req)) || f.plan == nil {
+	if !assert.NoError(f.t, json.NewDecoder(r.Body).Decode(&req)) || (f.plan == nil && f.summary == nil) {
 		http.Error(w, `{"error":"model not found"}`, http.StatusNotFound)
 		return
 	}
@@ -195,9 +199,19 @@ func (f *fakeOllama) generate(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"response":"","done":true,"done_reason":"load"}`)
 		return
 	}
-	assert.NotEmpty(f.t, req.Format, "a plan is asked for under its schema")
-	_, question, _ := strings.Cut(*req.Prompt, "\nQuestion: ")
-	reply, err := json.Marshal(f.plan(strings.TrimSuffix(question, "\n")))
+	assert.NotEmpty(f.t, req.Format, "a plan or a summary is asked for under its schema")
+	var answer string
+	switch summary := strings.Contains(string(req.Format), `"descriptions"`); {
+	case summary && f.summary != nil:
+		answer = f.summary(*req.Prompt)
+	case !summary && f.plan != nil:
+		_, question, _ := strings.Cut(*req.Prompt, "\nQuestion: ")
+		answer = f.plan(strings.TrimSuffix(question, "\n"))
+	default:
+		http.Error(w, `{"error":"model not found"}`, http.StatusNotFound)
+		return
+	}
+	reply, err := json.Marshal(answer)
 	assert.NoError(f.t, err)
 	fmt.Fprintf(w, `{"response":%s,"done":true,"done_reason":"stop"}`, reply)
 }
@@ -297,6 +311,8 @@ insight:
   labeling: terms
 search:
   understand: false
+summaries:
+  enabled: false
 fetcher:
   native:
     backend: stock

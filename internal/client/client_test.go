@@ -26,6 +26,7 @@ import (
 	"github.com/samsar/curio/internal/insight"
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/summarize"
 	"github.com/samsar/curio/internal/understand"
 )
 
@@ -941,6 +942,57 @@ func TestInterests(t *testing.T) {
 	assert.Equal(t, 2, s.Scheduler.Kicks())
 }
 
+// TestSummaries: the client reads a document's summary, the summaries'
+// counts and the writer's state, and owes summaries a rewrite.
+func TestSummaries(t *testing.T) {
+	writer := &writerState{state: summarize.State{On: true, Model: "gemma4:26b", PromptVersion: "p1",
+		Check: summarize.CheckFit}}
+	s := apitest.Start(t, func(d *api.Deps) { d.SummaryWriter = writer })
+	c := client.New(s.URL)
+	ctx := context.Background()
+	doc := s.AddDocument(t, "https://example.com/a", store.DocStateFetched)
+	ext := &store.DocumentExtraction{DocumentID: doc.ID, Fetcher: "test", Status: store.ExtractionStatusOK}
+	require.NoError(t, s.Deps.Extractions.Create(ctx, ext))
+	require.NoError(t, s.Deps.Documents.SetCurrentExtraction(ctx, doc.ID, ext.ID))
+	written := time.Date(2026, 11, 3, 1, 2, 3, 0, time.UTC)
+	require.NoError(t, s.Deps.Summaries.PutSummary(ctx, "local", store.Summary{DocumentID: doc.ID,
+		ExtractionID: ext.ID, Kind: store.SummaryKindArticle, About: "Why queues back up.",
+		Entities: []string{"Kafka"}, SummaryWriter: store.SummaryWriter{Model: "gemma4:26b", PromptVersion: "p0"},
+		WrittenAt: written}))
+
+	got, err := c.GetDocument(ctx, doc.ID)
+	require.NoError(t, err)
+	assert.Equal(t, &client.DocumentSummary{Kind: "article", About: "Why queues back up.", Entities: []string{"Kafka"},
+		Claims: []string{}, Descriptions: []string{}, Model: "gemma4:26b", PromptVersion: "p0", ExtractionID: ext.ID,
+		WrittenAt: written, Current: true, Outdated: true}, got.Summary)
+	stats, err := c.Stats(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, stats.Summaries)
+	assert.WithinDuration(t, time.Now(), stats.Summaries.CountedAt, time.Minute)
+	stats.Summaries.CountedAt = time.Time{}
+	assert.Equal(t, &client.SummaryStats{Outdated: 1}, stats.Summaries)
+	health, err := c.Healthz(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, health.Summaries)
+	assert.Equal(t, client.SummariesHealth{On: true, Model: "gemma4:26b", PromptVersion: "p1", Check: "fit"},
+		*health.Summaries)
+
+	owed, err := c.SummarizeAll(ctx, "outdated")
+	require.NoError(t, err)
+	assert.Equal(t, 1, owed.SummariesOwed)
+	writer.state.On = false
+	_, err = c.SummarizeAll(ctx, "all")
+	require.ErrorContains(t, err, "summaries are off")
+}
+
+// writerState is a summaries' writer in a state the test sets.
+type writerState struct{ state summarize.State }
+
+func (w *writerState) State() summarize.State { return w.state }
+func (w *writerState) Identity() store.SummaryWriter {
+	return store.SummaryWriter{Model: w.state.Model, PromptVersion: w.state.PromptVersion}
+}
+
 // TestInterestsState: the client reads every field of where automatic
 // rebuilds stand, on healthz and as the list's next.
 func TestInterestsState(t *testing.T) {
@@ -949,11 +1001,13 @@ func TestInterestsState(t *testing.T) {
 	at := func(h int) time.Time { return time.Date(2026, 10, 9, h, 0, 0, 0, time.UTC) }
 	s.Scheduler.Set(insight.Snapshot{State: insight.StateFailing, LastRebuildAt: at(10), LastKind: store.RunKindWarm,
 		LastTrigger: store.RunTriggerAuto, Changed: 271, RebuildAt: 263, DueSince: at(11),
-		FreshOwed: string(store.FreshReindex), HeldReason: "the embeddings drifted", RetryAt: at(12), LastError: "boom",
+		WaitingFor: insight.WaitingReembedding, FreshOwed: string(store.FreshReindex),
+		HeldReason: "the embeddings drifted", RetryAt: at(12), LastError: "boom",
 		Map: insight.MapState{Status: store.MapFailed, Took: 2 * time.Minute, Error: "the map took longer than 2m0s"}})
 	took := int64(120000)
 	want := client.InterestsState{State: client.StateFailing, LastRebuildAt: at(10), LastKind: "warm",
-		LastTrigger: "auto", ChangedDocuments: 271, RebuildAt: 263, DueSince: at(11), FreshOwed: client.FreshReindex,
+		LastTrigger: "auto", ChangedDocuments: 271, RebuildAt: 263, DueSince: at(11),
+		WaitingFor: client.WaitingReembedding, FreshOwed: client.FreshReindex,
 		HeldReason: "the embeddings drifted", RetryAt: at(12), LastError: "boom",
 		Map: &client.InterestsMap{Status: client.MapFailed, TookMS: &took, Error: "the map took longer than 2m0s"}}
 
@@ -1022,7 +1076,7 @@ func TestQueue(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, &client.Queue{Throttle: client.ThrottleNormal, State: client.QueueOpen, Kinds: []client.QueueKind{
 		{Kind: "fetch", Limit: apitest.Pools.Fetch}, {Kind: "index", Limit: apitest.Pools.Index}, {Kind: "cluster", Limit: 1},
-		{Kind: "cards", Limit: 1},
+		{Kind: "cards", Limit: 1}, {Kind: "summarize", Limit: 1},
 	}}, q)
 
 	later := time.Now().UTC().Add(24 * time.Minute).Truncate(time.Millisecond)

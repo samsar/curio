@@ -219,11 +219,18 @@ func runOwnChecks(ctx context.Context, flags *rootFlags, d deps, r *doctorReport
 			if stats, err := daemon.Stats(ctx); err != nil {
 				r.add("cards", statusWarn, "couldn't count the cards left to embed: "+err.Error(), "")
 				r.add("chunk context", statusWarn, "couldn't count the documents left to re-embed: "+err.Error(), "")
+				r.add("summaries", statusWarn, "couldn't count the summaries: "+err.Error(), "")
 			} else {
 				status, detail, hint := cardsCheckOf(ctx, daemon, stats.CardsStale)
 				r.add("cards", status, detail, hint)
 				status, detail, hint = reembedCheckOf(ctx, daemon, stats.Reembed, health.ReembedBrake)
 				r.add("chunk context", status, detail, hint)
+				// Whether the summary pass writes, and has jobs to write what
+				// is left.
+				if h := health.Summaries; h != nil {
+					status, detail, hint = summariesCheckOf(ctx, daemon, stats.Summaries, *h)
+					r.add("summaries", status, detail, hint)
+				}
 			}
 		}
 	}
@@ -346,8 +353,14 @@ func embedderHoldCheck(h client.EmbedderHold) (status checkStatus, detail, hint 
 		"wait for it, failing nothing", localTime(h.Since), h.Error), embedderFix
 }
 
-// The fitness check's verdict on an unfit model, as healthz says it.
-const checkUnfit = "unfit"
+// The fitness check's verdicts as healthz says them: an unfit model, and
+// one not yet checked; and the summaries writer's failure cause for a
+// check that reached no verdict.
+const (
+	checkUnfit     = "unfit"
+	checkUnchecked = "unchecked"
+	failureCheck   = "check"
+)
 
 // Fixes for search understanding that plans no question: a model that
 // failed its check (understand.UnfitFix, which its reason ends with), one

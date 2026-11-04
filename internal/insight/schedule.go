@@ -188,6 +188,9 @@ type Snapshot struct {
 	// DueSince is when the rebuild became due, while it is: the check
 	// that saw it so, since this scheduler started.
 	DueSince time.Time
+	// WaitingFor is what the rebuild that is due waits for before it is
+	// queued, while the state is due; empty in every other state.
+	WaitingFor WaitingFor
 	// FreshOwed is why the next rebuild must be fresh: a store.FreshReason
 	// or FreshParams.
 	FreshOwed string
@@ -200,6 +203,42 @@ type Snapshot struct {
 	// Map is the done rebuild's map, read with it: no read of its own.
 	Map       MapState
 	CheckedAt time.Time
+}
+
+// WaitingFor is what a due rebuild waits for before it is queued.
+type WaitingFor string
+
+// What a due rebuild waits for.
+const (
+	// WaitingReembedding: a re-embedding owes a fresh rebuild, and index
+	// jobs are pending or running.
+	WaitingReembedding WaitingFor = "reembedding"
+	// WaitingEmbeddingCheck: the drift monitor's first verdict since the
+	// daemon started is pending.
+	WaitingEmbeddingCheck WaitingFor = "embedding_check"
+	// WaitingSettle: the library to settle: nothing indexed for a while
+	// (or, but for a re-embedding's, the longest wait passed).
+	WaitingSettle WaitingFor = "settle"
+)
+
+// waitingText is each WaitingFor as the scheduler's log words it.
+var waitingText = map[WaitingFor]string{
+	WaitingReembedding:    "the re-embedding to finish",
+	WaitingEmbeddingCheck: "the first embedding check since the daemon started",
+	WaitingSettle:         "the library to settle",
+}
+
+// waitsFor is what a rebuild due for in waits for, of the WaitingFor a
+// due state can be in: drift holds it (the state held), and a backoff
+// fails it (failing).
+func waitsFor(in inputs) WaitingFor {
+	switch {
+	case in.driftUnchecked:
+		return WaitingEmbeddingCheck
+	case in.State.FreshOwed == store.FreshReindex && in.IndexBusy > 0:
+		return WaitingReembedding
+	}
+	return WaitingSettle
 }
 
 // Library is what a check reads of a tenant's library and of the queue;
@@ -616,7 +655,7 @@ func decide(in inputs, now, dueSince time.Time, cfg SchedulerConfig) verdict {
 	case retrying:
 		s.State, s.RetryAt, s.LastError = StateFailing, RetryAt(r.State), r.State.LastError
 	case due:
-		s.State = StateDue
+		s.State, s.WaitingFor = StateDue, waitsFor(in)
 	case r.Done != nil:
 		s.State = StateCurrent
 	default:
@@ -661,18 +700,16 @@ func triggerOf(r Reading, freshOwed string) store.RunTrigger {
 	}
 }
 
-// waitingFor says what a due rebuild waits for, for its log line.
+// waitingFor says what a due rebuild waits for, for its log line: a drift
+// or a backoff, which hold it in another state, else its WaitingFor.
 func waitingFor(in inputs, now time.Time) string {
 	switch {
 	case in.drift != "":
 		return "the embeddings to be re-indexed"
 	case in.driftUnchecked:
-		return "the first embedding check since the daemon started"
+		return waitingText[WaitingEmbeddingCheck]
 	case now.Before(RetryAt(in.State)):
 		return "the retry after a failed rebuild"
-	case in.State.FreshOwed == store.FreshReindex:
-		return "the re-embedding to finish"
-	default:
-		return "the library to settle"
 	}
+	return waitingText[waitsFor(in)]
 }

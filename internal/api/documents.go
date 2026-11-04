@@ -36,8 +36,12 @@ type DocumentResponse struct {
 	State             string              `json:"state"`
 	FailureCause      string              `json:"failure_cause,omitempty"`
 	CurrentExtraction *ExtractionResponse `json:"current_extraction,omitempty"`
-	CreatedAt         time.Time           `json:"created_at"`
-	UpdatedAt         time.Time           `json:"updated_at"`
+	// Summary and SummaryFailure are the document's summary and its last
+	// failure for good, on GET /v1/documents/{id} and /lookup alone.
+	Summary        *SummaryResponse        `json:"summary,omitempty"`
+	SummaryFailure *SummaryFailureResponse `json:"summary_failure,omitempty"`
+	CreatedAt      time.Time               `json:"created_at"`
+	UpdatedAt      time.Time               `json:"updated_at"`
 }
 
 // ExtractionResponse mirrors the Extraction schema.
@@ -85,10 +89,14 @@ func (d Deps) handleLookupDocument(w http.ResponseWriter, r *http.Request) {
 }
 
 // writeDocument answers doc as the document endpoints do, with its current
-// extraction when it has one.
+// extraction and its summary when it has them.
 func (d Deps) writeDocument(w http.ResponseWriter, r *http.Request, doc *store.Document) {
 	resp, err := d.document(r.Context(), doc)
 	if err != nil {
+		d.writeError(w, r, err)
+		return
+	}
+	if err := d.attachSummary(r.Context(), doc, &resp); err != nil {
 		d.writeError(w, r, err)
 		return
 	}

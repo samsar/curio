@@ -19,9 +19,9 @@ import (
 	"slices"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/samsar/curio/internal/search"
+	"github.com/samsar/curio/internal/textutil"
 )
 
 // Kind is what a question wants back.
@@ -129,7 +129,7 @@ func Validate(p Plan) error {
 }
 
 // checkTexts holds a plan's rewrites or names to most of them, each
-// non-empty and a text textProblem takes.
+// non-empty and a text textutil.TextProblem takes.
 func checkTexts(field string, texts []string, most, maxBytes int) error {
 	if len(texts) > most {
 		return &FieldError{field, fmt.Sprintf("%d of them, at most %d", len(texts), most)}
@@ -138,48 +138,12 @@ func checkTexts(field string, texts []string, most, maxBytes int) error {
 		if strings.TrimSpace(t) == "" {
 			return &FieldError{field, "an empty one"}
 		}
-		if problem := textProblem(t, maxBytes); problem != "" {
+		if problem := textutil.TextProblem(t, maxBytes); problem != "" {
 			return &FieldError{field, problem}
 		}
 	}
 	return nil
 }
-
-// textProblem says what keeps t from being one of a plan's rewrites or
-// names, "" when nothing does: more than maxBytes once trimmed, a control
-// character, which no search needs and JSON writes six bytes long, or a
-// format character (Unicode's Cf: bidirectional overrides and isolates,
-// zero-width spaces, soft hyphens), which no search needs either and which
-// can make a chip or the understood line read other than it is. The
-// zero-width non-joiner and joiner are words' own letters' business in
-// Persian, Hindi and emoji sequences, so they stay. A plan held to these
-// is a dashboard ?plan token of bounded size (internal/api's
-// maxPlanParam).
-func textProblem(t string, maxBytes int) string {
-	t = strings.TrimSpace(t)
-	switch {
-	case len(t) > maxBytes:
-		return fmt.Sprintf("one of %d bytes, at most %d", len(t), maxBytes)
-	case strings.ContainsFunc(t, unicode.IsControl):
-		return "one with a control character"
-	case strings.ContainsFunc(t, formatCharacter):
-		return "one with a format character"
-	}
-	return ""
-}
-
-// formatCharacter reports whether r is a format character a plan's text
-// refuses: Unicode's Cf but the zero-width non-joiner and joiner.
-func formatCharacter(r rune) bool {
-	return unicode.Is(unicode.Cf, r) && r != zeroWidthNonJoiner && r != zeroWidthJoiner
-}
-
-// The zero-width non-joiner and joiner, which shape Persian and Indic
-// words and join emoji.
-const (
-	zeroWidthNonJoiner = '\u200c'
-	zeroWidthJoiner    = '\u200d'
-)
 
 func joinKinds() string {
 	out := make([]string, 0, len(Kinds()))
@@ -233,7 +197,9 @@ func (e *invalidAnswer) Error() string { return "the model's answer couldn't be 
 
 // decodeAnswer reads raw strictly: one JSON object of the schema's shape,
 // no key it doesn't have, a kind of the set, and at most the schema's
-// names and rewrites, each a text textProblem takes. The schema holds
+// names and rewrites, each a text textutil.TextProblem takes. A plan held
+// to these is a dashboard ?plan token of bounded size (internal/api's
+// maxPlanParam). The schema holds
 // Ollama's decoding to most of this; a provider or a model that strays
 // is caught here. A failure is an *invalidAnswer.
 func decodeAnswer(raw []byte) (answer, error) {
@@ -262,7 +228,7 @@ func decodeAnswer(raw []byte) (answer, error) {
 			return answer{}, &invalidAnswer{l.rule, fmt.Sprintf("%d %s, at most %d", len(l.texts), l.rule, l.most)}
 		}
 		for _, t := range l.texts {
-			if problem := textProblem(t, l.maxBytes); problem != "" {
+			if problem := textutil.TextProblem(t, l.maxBytes); problem != "" {
 				return answer{}, &invalidAnswer{l.rule, "its " + l.rule + " have " + problem}
 			}
 		}

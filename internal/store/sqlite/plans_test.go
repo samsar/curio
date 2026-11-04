@@ -628,7 +628,7 @@ func TestQueryPlans(t *testing.T) {
 		},
 	}
 	for _, tc := range slices.Concat(cases, listPlanCases(t), insightPlanCases(), documentIndexPlanCases(t),
-		voteTriggerPlanCases(t, db), searchFilterPlanCases(t)) {
+		voteTriggerPlanCases(t, db), searchFilterPlanCases(t), summaryPlanCases(), summaryTriggerPlanCases(t, db)) {
 		t.Run(tc.name, func(t *testing.T) {
 			plan := queryPlan(t, db, tc.query, tc.args...)
 			assert.True(t, strings.HasPrefix(plan, tc.first), "plan starts with %q:\n%s", tc.first, plan)
@@ -915,6 +915,142 @@ func documentIndexPlanCases(t *testing.T) []planCase {
 			sorts: true,
 		},
 	}
+}
+
+// summaryPlanCases pin the summary store's statements and the summary
+// list's searches (see "Summaries: one structured call per document,
+// stored for the reranker"). A write reaches its document
+// and its row by their keys; the count reads the tenant's fetched
+// documents once, each row by its key; and the feed's walk reads the
+// tenant's documents newest indexed first, in idx_documents_tenant_indexed's
+// order, with no sort, each document's row and its summarize jobs by
+// their keys, outside the write lock.
+func summaryPlanCases() []planCase {
+	summariesQ, summariesArgs := summariesQuery("local", `"kafka"`, 200, store.SearchFilters{})
+	const (
+		document     = "SEARCH d USING INDEX sqlite_autoindex_documents_1 (id=?)"
+		summaryOfDoc = "SEARCH s USING INDEX sqlite_autoindex_document_summaries_1 (document_id=?)"
+	)
+	return []planCase{
+		{
+			// As SearchFields: the MATCH drives, each hit's row by rowid
+			// and document by primary key.
+			name:  "SearchSummaries",
+			query: summariesQ, args: summariesArgs,
+			first: "SCAN document_summaries_fts VIRTUAL TABLE",
+			want:  []string{"SEARCH f USING INTEGER PRIMARY KEY (rowid=?)", document},
+			sorts: true,
+		},
+		{
+			name:  "PutSummary guard",
+			query: summaryGuardSQL, args: []any{"doc", "local", "ext", store.DocStateFetched},
+			want: []string{"SEARCH documents USING INDEX sqlite_autoindex_documents_1 (id=?)"},
+		},
+		{
+			// The upsert finds its conflict through the unique key.
+			name:  "PutSummary upsert",
+			query: putSummarySQL, args: unbound(putSummarySQL),
+			avoid: []string{"SCAN"},
+		},
+		{
+			name:  "RecordSummaryFailure",
+			query: recordSummaryFailureSQL, args: unbound(recordSummaryFailureSQL),
+			first: "SEARCH documents EXISTS USING INDEX sqlite_autoindex_documents_1 (id=?)",
+		},
+		{
+			name:  "GetSummary",
+			query: getSummarySQL, args: []any{"doc", "local"},
+			want: []string{document, summaryOfDoc},
+		},
+		{
+			// The tenant's fetched documents, one range, each row by its key:
+			// about 7 ms on the operator's library with every page summarized.
+			name:  "CountSummaries",
+			query: countSummariesSQL, args: []any{"local", store.DocStateFetched, "model", "prompt"},
+			first: "SEARCH d USING INDEX idx_documents_tenant_state_updated (tenant_id=? AND state=?)",
+			want:  []string{summaryOfDoc + " LEFT-JOIN"},
+		},
+		{
+			// A user's request: the tenant's fetched documents listed once,
+			// each row by its key.
+			name:  "OweSummaries outdated",
+			query: oweOutdatedSQL, args: []any{"local", store.DocStateFetched, "model", "prompt"},
+			want: []string{"SEARCH document_summaries USING INDEX sqlite_autoindex_document_summaries_1 (document_id=?)",
+				"LIST SUBQUERY", "SEARCH documents USING INDEX idx_documents_tenant_state_updated (tenant_id=? AND state=?)"},
+		},
+		{
+			name:  "OweSummaries all",
+			query: oweAllSQL, args: []any{"local", store.DocStateFetched},
+			want: []string{"SEARCH document_summaries USING INDEX sqlite_autoindex_document_summaries_1 (document_id=?)",
+				"LIST SUBQUERY", "SEARCH documents USING INDEX idx_documents_tenant_state_updated (tenant_id=? AND state=?)"},
+		},
+		{
+			// Newest indexed first, in the index's order: about 8 ms when
+			// nothing is left on the operator's library.
+			name:  "EnqueueSummarize next",
+			query: nextToSummarizeSQL, args: []any{"local", store.DocStateFetched, "model", "prompt", "now",
+				store.JobStatusPending, store.JobStatusRunning, store.JobKindSummarize, 3},
+			first: "SEARCH d USING INDEX idx_documents_tenant_indexed (tenant_id=?)",
+			want: []string{"SEARCH j USING INDEX idx_jobs_document (document_id=? AND status=?)",
+				summaryOfDoc + " LEFT-JOIN"},
+		},
+		{
+			name:  "EnqueueSummarize queued",
+			query: summarizeQueuedSQL, args: []any{store.JobStatusRunning, store.JobStatusPending,
+				store.JobKindSummarize, "now"},
+			want:  []string{"SEARCH jobs USING COVERING INDEX idx_jobs_claim (status=? AND kind=?)"},
+			avoid: []string{"SCAN jobs"},
+		},
+		{
+			// A document's own jobs and row, never a walk of the queue.
+			name:  "EnqueueSummarize insert",
+			query: insertSummarizeJobSQL, args: []any{"job", "local", store.JobKindSummarize,
+				`{"document_id":"doc"}`, store.JobStatusPending, 0, "now"},
+			want: []string{"SEARCH jobs USING INDEX idx_jobs_document (document_id=? AND status=?)",
+				"SEARCH documents EXISTS USING COVERING INDEX sqlite_autoindex_documents_1 (id=?)"},
+			avoid: []string{"SCAN jobs", "idx_jobs_claim"},
+		},
+	}
+}
+
+// summaryTriggerPlanCases pin each statement of migration 022's triggers
+// on its own, bound as voteTriggerPlanCases binds 019's: each writes the
+// index from the row's own values, reading no table.
+func summaryTriggerPlanCases(t *testing.T, db *DB) []planCase {
+	ref := regexp.MustCompile(`\b(?:old|new)\.(\w+)`)
+	body := regexp.MustCompile(`(?s)\bBEGIN\b(.*)\bEND$`)
+	cases := make([]planCase, 0, 4)
+	for _, tr := range []struct {
+		name       string
+		statements int
+	}{
+		{"trg_document_summaries_insert", 1},
+		{"trg_document_summaries_delete", 1},
+		{"trg_document_summaries_update", 2},
+	} {
+		var text string
+		require.NoError(t, db.QueryRow(`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?`,
+			tr.name).Scan(&text))
+		m := body.FindStringSubmatch(text)
+		require.NotNil(t, m, "the body of %s:\n%s", tr.name, text)
+		var statements []string
+		for s := range strings.SplitSeq(m[1], ";") {
+			if s = strings.TrimSpace(s); s != "" {
+				statements = append(statements, s)
+			}
+		}
+		require.Len(t, statements, tr.statements, "the statements of %s", tr.name)
+		for i, s := range statements {
+			args := make([]any, len(ref.FindAllString(s, -1)))
+			for j := range args {
+				args[j] = "x"
+			}
+			cases = append(cases, planCase{name: fmt.Sprintf("%s %d", tr.name, i+1),
+				query: ref.ReplaceAllString(s, "?"), args: args,
+				avoid: []string{"SCAN document_summaries ", "SEARCH", "TEMP"}})
+		}
+	}
+	return cases
 }
 
 // voteTriggerPlanCases pin the statements of migration 019's vote

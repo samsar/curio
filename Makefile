@@ -112,7 +112,7 @@ cluster-report:
 	@test -n "$(DB)" || { echo 'usage: make cluster-report DB=<copy of curio.db> [JSON=<file>] [DRAWS=n] [SEED=n]' >&2; exit 2; }
 	$(GO) run -tags=$(GOTAGS) ./cmd/clusterreport -db "$(DB)" $(if $(JSON),-json "$(JSON)") $(if $(DRAWS),-draws $(DRAWS)) $(if $(SEED),-seed $(SEED))
 
-## search-eval: score search on a copy of a home's database against a graded query file (DB=<copy> QUERIES=<file> [CONFIG=<config.yaml>] [JSON=<file>] [BASELINE=<previous JSON>] [VARIANTS=hybrid,bm25,vector,fields,cards,titles,planned,...] [TODAY=YYYY-MM-DD] [PLANS=<previous JSON>] [REINDEX=1 CONTENT=<home's content dir>])
+## search-eval: score search on a copy of a home's database against a graded query file (DB=<copy> QUERIES=<file> [CONFIG=<config.yaml>] [JSON=<file>] [BASELINE=<previous JSON>] [VARIANTS=hybrid,bm25,vector,fields,cards,titles,summaries,planned,...] [TODAY=YYYY-MM-DD] [PLANS=<previous JSON>] [REINDEX=1] [CONTENT=<home's content dir>] [SUMMARIZE=1 [DOCUMENTS=<ids>] [SUMMARIES_OUT=<file>] | SUMMARIES=<file>])
 # A developer's tool: go run, so nothing lands in ./bin; built with the
 # release's version stamp, which the report records. It migrates the
 # database it reads and refuses a home's own, like cluster-report, and
@@ -121,13 +121,18 @@ cluster-report:
 # variants plan each query with config.yaml's planner model, as of TODAY,
 # or replay PLANS, a previous report's plans. REINDEX=1 first re-embeds the
 # copy's chunks that predate the chunk context, as the daemon would, from
-# the markdown under CONTENT (the copy's home's content directory). Keep
-# the query file and the JSON report out of the repository. See
-# cmd/searcheval.
+# the markdown under CONTENT (the copy's home's content directory).
+# SUMMARIZE=1 first writes the copy's summaries with config.yaml's
+# summaries role, as the summary pass would, from the markdown under
+# CONTENT, one page at a time and resumably: DOCUMENTS holds it to a file
+# of document IDs, SUMMARIES_OUT appends each summary and its cost to a
+# file, which SUMMARIES replays into another copy, asking no model. Keep
+# the query file, the JSON report, the ID lists and the summaries files
+# out of the repository. See cmd/searcheval.
 .PHONY: search-eval
 search-eval:
-	@test -n "$(DB)" && test -n "$(QUERIES)" || { echo 'usage: make search-eval DB=<copy of curio.db> QUERIES=<file> [CONFIG=<config.yaml>] [JSON=<file>] [BASELINE=<previous JSON>] [VARIANTS=hybrid,bm25,vector,fields,cards,titles,planned,planned-filters,planned-rewrites,planned-names] [TODAY=YYYY-MM-DD] [PLANS=<previous JSON>] [REINDEX=1 CONTENT=<dir>]' >&2; exit 2; }
-	$(GO) run -tags=$(GOTAGS) -ldflags "$(LDFLAGS)" ./cmd/searcheval -db "$(DB)" -queries "$(QUERIES)" $(if $(CONFIG),-config "$(CONFIG)") $(if $(JSON),-json "$(JSON)") $(if $(BASELINE),-baseline "$(BASELINE)") $(if $(VARIANTS),-variants "$(VARIANTS)") $(if $(TODAY),-today "$(TODAY)") $(if $(PLANS),-plans "$(PLANS)") $(if $(REINDEX),-reindex) $(if $(CONTENT),-content "$(CONTENT)")
+	@test -n "$(DB)" && test -n "$(QUERIES)" || { echo 'usage: make search-eval DB=<copy of curio.db> QUERIES=<file> [CONFIG=<config.yaml>] [JSON=<file>] [BASELINE=<previous JSON>] [VARIANTS=hybrid,bm25,vector,fields,cards,titles,summaries,planned,planned-filters,planned-rewrites,planned-names] [TODAY=YYYY-MM-DD] [PLANS=<previous JSON>] [REINDEX=1] [CONTENT=<dir>] [SUMMARIZE=1 [DOCUMENTS=<ids>] [SUMMARIES_OUT=<file>] | SUMMARIES=<file>]' >&2; exit 2; }
+	$(GO) run -tags=$(GOTAGS) -ldflags "$(LDFLAGS)" ./cmd/searcheval -db "$(DB)" -queries "$(QUERIES)" $(if $(CONFIG),-config "$(CONFIG)") $(if $(JSON),-json "$(JSON)") $(if $(BASELINE),-baseline "$(BASELINE)") $(if $(VARIANTS),-variants "$(VARIANTS)") $(if $(TODAY),-today "$(TODAY)") $(if $(PLANS),-plans "$(PLANS)") $(if $(REINDEX),-reindex) $(if $(CONTENT),-content "$(CONTENT)") $(if $(SUMMARIZE),-summarize) $(if $(DOCUMENTS),-documents "$(DOCUMENTS)") $(if $(SUMMARIES_OUT),-summaries-out "$(SUMMARIES_OUT)") $(if $(SUMMARIES),-summaries "$(SUMMARIES)")
 
 ## planner-check: measure a writing model as search understanding's planner on this machine (MODEL=<name> [CONFIG=<config.yaml>])
 # A developer's tool: go run, so nothing lands in ./bin. It runs the

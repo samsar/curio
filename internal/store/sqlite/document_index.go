@@ -17,10 +17,11 @@ import (
 )
 
 // DocumentIndex implements store.DocumentIndex over document_fields, its
-// FTS index, document_cards and document_cards_vec. The rows are written
-// by refreshFields, in the transactions of the writes that change what
-// they are derived from; this type searches them and keeps the cards'
-// vectors.
+// FTS index, document_cards and document_cards_vec, and the summaries' FTS
+// index. The derived rows are written by refreshFields, in the
+// transactions of the writes that change what they are derived from, and
+// the summaries by the summary store; this type searches them and keeps
+// the cards' vectors.
 type DocumentIndex struct {
 	db  *DB
 	dim int // the card vectors' width, the home's
@@ -60,51 +61,89 @@ const (
 // titlesColumns is the FTS5 column filter SearchTitles' match is held to.
 const titlesColumns = "{title bookmark_titles}"
 
-// fieldsBM25 and titlesBM25 are bm25() over document_fields_fts with the
-// fields list's and the title list's column weights.
-var (
-	fieldsBM25 = documentFieldsBM25(fieldsTitleWeight, fieldsBookmarkTitlesWeight, fieldsFoldersWeight,
-		fieldsSiteWeight, fieldsAuthorWeight)
-	titlesBM25 = documentFieldsBM25(titlesTitleWeight, titlesBookmarkTitlesWeight, titlesFoldersWeight,
-		titlesSiteWeight, titlesAuthorWeight)
+// The weights the summary list's bm25 gives each column of a summary,
+// unmeasured beyond the grid that turned the list off by default
+// (search.summary_weight 0; decisions.md "Choosing the ranking
+// defaults"), which ran them as they are. A claim is a sentence of the
+// page's own argument, and says less of what the page is than its about
+// line or its names, so it counts half.
+const (
+	summarySiteWeight         = 1.0
+	summaryAuthorWeight       = 1.0
+	summaryEntitiesWeight     = 1.0
+	summaryAboutWeight        = 1.0
+	summaryDescriptionsWeight = 1.0
+	summaryClaimsWeight       = 0.5
 )
 
-// documentFieldsBM25 is bm25() over document_fields_fts with weights for
-// its columns, in the order the index declares them.
-func documentFieldsBM25(title, bookmarkTitles, folders, site, author float64) string {
-	weights := []string{formatWeight(title), formatWeight(bookmarkTitles), formatWeight(folders), formatWeight(site),
-		formatWeight(author)}
-	return "bm25(document_fields_fts, " + strings.Join(weights, ", ") + ")"
+// The FTS indexes a document list searches, each with its content table,
+// aliased f, whose rowid is the index's.
+const (
+	fieldsFTS    = "document_fields_fts"
+	fieldsTable  = "document_fields"
+	summaryFTS   = "document_summaries_fts"
+	summaryTable = "document_summaries"
+)
+
+// fieldsBM25 and titlesBM25 are bm25() over document_fields_fts with the
+// fields list's and the title list's column weights, and summariesBM25
+// over document_summaries_fts with the summary list's, every column of
+// each index weighted, since a weight left out counts 1.
+var (
+	fieldsBM25 = bm25(fieldsFTS, fieldsTitleWeight, fieldsBookmarkTitlesWeight, fieldsFoldersWeight,
+		fieldsSiteWeight, fieldsAuthorWeight)
+	titlesBM25 = bm25(fieldsFTS, titlesTitleWeight, titlesBookmarkTitlesWeight, titlesFoldersWeight,
+		titlesSiteWeight, titlesAuthorWeight)
+	summariesBM25 = bm25(summaryFTS, summarySiteWeight, summaryAuthorWeight, summaryEntitiesWeight,
+		summaryAboutWeight, summaryDescriptionsWeight, summaryClaimsWeight)
+)
+
+// bm25 is bm25() over index with weights for its columns, in the order the
+// index declares them.
+func bm25(index string, weights ...float64) string {
+	ws := make([]string, len(weights))
+	for i, w := range weights {
+		ws[i] = formatWeight(w)
+	}
+	return "bm25(" + index + ", " + strings.Join(ws, ", ") + ")"
 }
 
 func formatWeight(w float64) string { return strconv.FormatFloat(w, 'f', -1, 64) }
 
-// fieldsQuery builds SearchFields' query (documentFieldsQuery).
+// fieldsQuery builds SearchFields' query (documentListQuery).
 func fieldsQuery(tenantID, query string, limit int, filters store.SearchFilters) (string, []any) {
-	return documentFieldsQuery(fieldsBM25, query, tenantID, limit, filters)
+	return documentListQuery(fieldsFTS, fieldsTable, fieldsBM25, query, tenantID, limit, filters)
 }
 
 // titlesQuery builds SearchTitles' query: query held to the title
-// columns, ranked by their bm25 alone (documentFieldsQuery).
+// columns, ranked by their bm25 alone (documentListQuery).
 func titlesQuery(tenantID, query string, limit int, filters store.SearchFilters) (string, []any) {
-	return documentFieldsQuery(titlesBM25, titlesColumns+" : ("+query+")", tenantID, limit, filters)
+	return documentListQuery(fieldsFTS, fieldsTable, titlesBM25, titlesColumns+" : ("+query+")", tenantID, limit,
+		filters)
 }
 
-// documentFieldsQuery builds a search of the documents' fields, ranked by
-// rank, a bm25() over document_fields_fts: it starts from the FTS MATCH
-// of match, reaches each hit's fields by rowid (document_fields.seq) and
-// its document by primary key for the tenant and the filters. No state is
-// left out: a document's fields describe what it was saved as, which
-// stays true whatever its fetch found. Equal scores are ordered by seq,
-// so the ranking is the same on every search.
-func documentFieldsQuery(rank, match, tenantID string, limit int, filters store.SearchFilters) (string, []any) {
+// summariesQuery builds SearchSummaries' query (documentListQuery).
+func summariesQuery(tenantID, query string, limit int, filters store.SearchFilters) (string, []any) {
+	return documentListQuery(summaryFTS, summaryTable, summariesBM25, query, tenantID, limit, filters)
+}
+
+// documentListQuery builds a search of index, an FTS index of the
+// documents over table, its content table, ranked by rank, a bm25() over
+// index: it starts from the FTS MATCH of match, reaches each hit's row by
+// rowid (the table's seq) and its document by primary key for the tenant
+// and the filters. No state is left out: a document's fields describe what
+// it was saved as, and its summary the page it read, which stays true
+// whatever its fetch found since. Equal scores are ordered by seq, so the
+// ranking is the same on every search.
+func documentListQuery(index, table, rank, match, tenantID string, limit int,
+	filters store.SearchFilters) (string, []any) {
 	filterSQL, filterArgs := buildFilterClause(filters)
 	q := `
 	SELECT f.document_id, ` + rank + ` AS score
-	FROM document_fields_fts
-	JOIN document_fields f ON f.seq = document_fields_fts.rowid
+	FROM ` + index + `
+	JOIN ` + table + ` f ON f.seq = ` + index + `.rowid
 	JOIN documents d       ON d.id = f.document_id
-	WHERE document_fields_fts MATCH ?
+	WHERE ` + index + ` MATCH ?
 	  AND ` + documentTenantSQL(filters) + filterSQL + `
 	ORDER BY score, f.seq
 	LIMIT ?`
@@ -140,7 +179,21 @@ func (x *DocumentIndex) SearchTitles(ctx context.Context, tenantID, query string
 	return hits, nil
 }
 
-// searchDocumentFields runs a documentFieldsQuery. bm25() is lower for a
+// SearchSummaries implements store.DocumentIndex.
+func (x *DocumentIndex) SearchSummaries(ctx context.Context, tenantID, query string, limit int,
+	f store.SearchFilters) ([]store.DocumentHit, error) {
+	if strings.TrimSpace(query) == "" || limit <= 0 {
+		return nil, nil
+	}
+	q, args := summariesQuery(tenantID, query, limit, f)
+	hits, err := x.searchDocumentFields(ctx, q, args)
+	if err != nil {
+		return nil, fmt.Errorf("search summaries: %w", err)
+	}
+	return hits, nil
+}
+
+// searchDocumentFields runs a documentListQuery. bm25() is lower for a
 // better match, so a hit's score is its negation, higher better.
 func (x *DocumentIndex) searchDocumentFields(ctx context.Context, q string, args []any) ([]store.DocumentHit, error) {
 	rows, err := x.db.QueryContext(ctx, q, args...)

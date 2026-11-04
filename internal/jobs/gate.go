@@ -77,6 +77,9 @@ type QueueGate struct {
 
 	update sync.Mutex // serializes Update
 	cur    atomic.Pointer[gateState]
+	// rest is until when the summary pass rests under the gentle throttle,
+	// in Unix nanoseconds (Rested); 0 for no rest.
+	rest atomic.Int64
 }
 
 // gateState is one version of the settings and the channel closed when
@@ -104,7 +107,9 @@ func NewQueueGate(ctx context.Context, settings store.QueueSettingsStore, pools 
 	return g, nil
 }
 
-// Admit implements Gate.
+// Admit implements Gate. Under the gentle throttle the summary pass also
+// rests after each job for as long as the job took (Rested): about half the
+// time writing, half not, which halves the heat it makes.
 func (g *QueueGate) Admit(kind store.JobKind, active int, now time.Time) Verdict {
 	st := g.cur.Load()
 	if v := st.verdict(now); !v.Open() {
@@ -113,7 +118,19 @@ func (g *QueueGate) Admit(kind store.JobKind, active int, now time.Time) Verdict
 	if limit, capped := st.settings.Throttle.Cap(kind); capped && active >= limit {
 		return Verdict{Closed: ReasonThrottled, Changed: st.changed}
 	}
+	if kind == store.JobKindSummarize && st.settings.Throttle == store.ThrottleGentle {
+		if until := time.Unix(0, g.rest.Load()); now.Before(until) {
+			return Verdict{Closed: ReasonThrottled, Until: until, Changed: st.changed}
+		}
+	}
 	return Verdict{}
+}
+
+// Rested records that a summarize job took took, ending at now: under the
+// gentle throttle the pass rests as long before its next job. It implements
+// Pacer.
+func (g *QueueGate) Rested(took time.Duration, now time.Time) {
+	g.rest.Store(now.Add(took).UnixNano())
 }
 
 // verdict decides what holds every kind back: a pause, then the schedule.
@@ -138,7 +155,7 @@ type QueueState struct {
 	// outside_schedule.
 	OpensAt time.Time
 	// Limits is how many jobs of each pool's kind may run at once while the
-	// queue is open: fetch, index, cluster, then cards.
+	// queue is open: fetch, index, cluster, cards, then summarize.
 	Limits []KindLimit
 }
 
@@ -173,6 +190,7 @@ func (g *QueueGate) state(st *gateState, now time.Time) QueueState {
 			{store.JobKindIndex, st.settings.Throttle.Limit(store.JobKindIndex, g.pools.Index)},
 			{store.JobKindCluster, st.settings.Throttle.Limit(store.JobKindCluster, clusterPoolSize)},
 			{store.JobKindCards, st.settings.Throttle.Limit(store.JobKindCards, cardsPoolSize)},
+			{store.JobKindSummarize, st.settings.Throttle.Limit(store.JobKindSummarize, summarizePoolSize)},
 		},
 	}
 }

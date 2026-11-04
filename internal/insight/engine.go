@@ -66,6 +66,11 @@ type Config struct {
 	// MapOff is insight.map: false. A rebuild then draws no map, and its
 	// run commits with none, as a run from before maps has.
 	MapOff bool
+	// Using, when set, is told of a rebuild's labeling phase while it may
+	// ask the LLM labeler, and returns the func that marks it ended: the
+	// daemon's summary pass yields to it, so the labels never wait behind
+	// a summary. nil tells nobody.
+	Using func() (end func())
 }
 
 // Engine rebuilds a tenant's interests: read the document vectors → prepare

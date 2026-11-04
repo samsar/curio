@@ -125,6 +125,19 @@ func fakeDaemon(t *testing.T, lastSearch *atomic.Value) http.Handler {
 	mux.HandleFunc("/v1/documents/doc-broken/content", func(w http.ResponseWriter, _ *http.Request) {
 		problem(t, w, http.StatusInternalServerError, "database is locked")
 	})
+	// doc-dead is dead, with the summary of the page it last read.
+	mux.HandleFunc("/v1/documents/doc-dead", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "doc-dead", "url": "https://example.com/dead", "title": "Gone", "content_type": "article",
+			"state": "dead", "summary": map[string]any{"kind": "article", "site": "Example Times, a made-up paper",
+				"about": "Why queues back up.", "entities": []string{"Zephyrine", "Kafka"}, "claims": []string{},
+				"descriptions": []string{"a queues piece"}, "model": "gemma4:26b", "prompt_version": "p1",
+				"extraction_id": "e1", "written_at": "2026-11-03T01:02:03Z", "current": true, "outdated": false},
+		})
+	})
+	mux.HandleFunc("/v1/documents/doc-dead/content", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("# Gone\n\nthe last page read"))
+	})
 	mux.HandleFunc("/v1/documents/doc-missing", func(w http.ResponseWriter, _ *http.Request) {
 		problem(t, w, http.StatusNotFound, `document "doc-missing" not found`)
 	})
@@ -566,6 +579,34 @@ func TestMCP_GetDocument(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Contains(t, textOf(res), "full markdown body")
+}
+
+// TestMCP_GetDocument_Summary: a document's summary comes with it, as
+// structured content and a short block before its markdown, a dead one's
+// too, saying it is dead; one without has neither.
+func TestMCP_GetDocument_Summary(t *testing.T) {
+	cs := connectMCP(t)
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "get_document", Arguments: map[string]any{"id": "doc-dead"},
+	})
+	require.NoError(t, err)
+	text := textOf(res)
+	assert.True(t, strings.HasPrefix(text, "Summary (article):\nWhy queues back up.\nExample Times, a made-up paper\n"+
+		"Names: Zephyrine, Kafka\n(the document is dead; the summary is of the page it last read)\n\n# Gone"), text)
+	raw, err := json.Marshal(res.StructuredContent)
+	require.NoError(t, err)
+	var out getDocOutput
+	require.NoError(t, json.Unmarshal(raw, &out))
+	require.NotNil(t, out.Summary)
+	assert.Equal(t, docSummary{Kind: "article", Site: "Example Times, a made-up paper", About: "Why queues back up.",
+		Entities: []string{"Zephyrine", "Kafka"}, Descriptions: []string{"a queues piece"}, Model: "gemma4:26b",
+		WrittenAt: time.Date(2026, 11, 3, 1, 2, 3, 0, time.UTC), Current: true}, *out.Summary)
+
+	plain, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "get_document", Arguments: map[string]any{"id": "doc-1"},
+	})
+	require.NoError(t, err)
+	assert.False(t, strings.HasPrefix(textOf(plain), "Summary"))
 }
 
 func TestMCP_GetDocument_Failures(t *testing.T) {

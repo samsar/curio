@@ -1,10 +1,13 @@
 // Package textutil holds small string helpers: truncation that respects
-// UTF-8 rune boundaries, and quoting for a POSIX shell.
+// UTF-8 rune boundaries, the check of a short text a model wrote, and
+// quoting for a POSIX shell.
 package textutil
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -45,6 +48,40 @@ func TruncateRunes(s string, n int) string {
 	}
 	return s
 }
+
+// TextProblem says what keeps t, a short text a model wrote (a plan's
+// rewrite or name, a summary's field), from being used, "" when nothing
+// does: more than maxBytes once trimmed, a control character, which no
+// such text needs and JSON writes six bytes long, or a format character
+// (Unicode's Cf: bidirectional overrides and isolates, zero-width spaces,
+// soft hyphens), which none needs either and which can make a line read
+// other than it is. The zero-width non-joiner and joiner are words' own
+// letters' business in Persian, Hindi and emoji sequences, so they stay.
+func TextProblem(t string, maxBytes int) string {
+	t = strings.TrimSpace(t)
+	switch {
+	case len(t) > maxBytes:
+		return fmt.Sprintf("one of %d bytes, at most %d", len(t), maxBytes)
+	case strings.ContainsFunc(t, unicode.IsControl):
+		return "one with a control character"
+	case strings.ContainsFunc(t, formatCharacter):
+		return "one with a format character"
+	}
+	return ""
+}
+
+// formatCharacter reports whether r is a format character TextProblem
+// refuses: Unicode's Cf but the zero-width non-joiner and joiner.
+func formatCharacter(r rune) bool {
+	return unicode.Is(unicode.Cf, r) && r != zeroWidthNonJoiner && r != zeroWidthJoiner
+}
+
+// The zero-width non-joiner and joiner, which shape Persian and Indic
+// words and join emoji.
+const (
+	zeroWidthNonJoiner = '\u200c'
+	zeroWidthJoiner    = '\u200d'
+)
 
 // shellSafe matches words a POSIX shell reads as themselves.
 var shellSafe = regexp.MustCompile(`^[A-Za-z0-9_@%+=:,./-]+$`)

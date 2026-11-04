@@ -982,7 +982,7 @@ func TestNewInsightEngine_LLMComesUpAfterStart(t *testing.T) {
 		chunks.dvs = append(chunks.dvs, store.DocVector{DocumentID: d.ID, Vector: []float32{1, 0, 0}})
 	}
 
-	eng, err := newInsightEngine(cfg, docs, chunks, insights, sqlitestore.NewJobs(db), nil, nil)
+	eng, err := newInsightEngine(cfg, docs, chunks, insights, sqlitestore.NewJobs(db), nil, nil, nil)
 	require.NoError(t, err)
 
 	// Ollama starts only now.
@@ -1060,7 +1060,7 @@ func TestNewInsightEngine_LabelsRole(t *testing.T) {
 	cfg.Insight.CenterVectors = false
 	docs, chunks, insights, queue := threeArticles(t)
 
-	eng, err := newInsightEngine(cfg, docs, chunks, insights, queue, nil, nil)
+	eng, err := newInsightEngine(cfg, docs, chunks, insights, queue, nil, nil, nil)
 	require.NoError(t, err)
 	label, source := rebuildLabel(t, eng, insights)
 	assert.Equal(t, "Reading List", label)
@@ -1086,11 +1086,11 @@ func TestNewInsightEngine_InsightOffWritesNothing(t *testing.T) {
 	cfg.Generation.BaseURL = srv.URL
 	docs, chunks, insights, queue := threeArticles(t)
 
-	eng, err := newInsightEngine(cfg, docs, chunks, insights, queue, nil, nil)
+	eng, err := newInsightEngine(cfg, docs, chunks, insights, queue, nil, nil, nil)
 	require.NoError(t, err)
 	_, source := rebuildLabel(t, eng, insights)
 	assert.Equal(t, store.LabelSourceTerms, source)
-	cfg.Search.Understand = false
+	cfg.Search.Understand, cfg.Summaries.Enabled = false, new(false)
 	for _, target := range pullTargets(cfg) {
 		assert.Equal(t, "embeddings", target.usedFor, "only the embedding model is pulled")
 	}
@@ -1100,32 +1100,50 @@ func TestNewInsightEngine_InsightOffWritesNothing(t *testing.T) {
 func TestPullTargets(t *testing.T) {
 	const local = "http://localhost:11434"
 	embeddings := pullTarget{baseURL: local, model: "qwen3-embedding:0.6b", usedFor: "embeddings", timeout: time.Minute}
-	writing := pullTarget{baseURL: local, model: "qwen3:4b-instruct", usedFor: "interest labels, search understanding",
-		timeout: 2 * time.Minute}
-	labels := pullTarget{baseURL: local, model: "qwen3:4b-instruct", usedFor: "interest labels", timeout: 2 * time.Minute}
+	writing := pullTarget{baseURL: local, model: "qwen3:4b-instruct",
+		usedFor: "interest labels, search understanding, document summaries", timeout: 2 * time.Minute}
+	labelsAndSummaries := pullTarget{baseURL: local, model: "qwen3:4b-instruct",
+		usedFor: "interest labels, document summaries", timeout: 2 * time.Minute}
 	for _, tc := range []struct {
 		name   string
 		mutate func(*config.Config)
 		want   []pullTarget
 	}{
-		{"the defaults: both roles on one model", func(*config.Config) {}, []pullTarget{embeddings, writing}},
+		{"the defaults: every role on one model", func(*config.Config) {}, []pullTarget{embeddings, writing}},
 		{"no embedding auto-pull", func(c *config.Config) { c.Embedding.AutoPull = false }, []pullTarget{writing}},
 		{"no generation auto-pull", func(c *config.Config) { c.Generation.AutoPull = false }, []pullTarget{embeddings}},
-		{"insight off: the planner pulls nothing alone", func(c *config.Config) { c.Insight.Enabled = false },
+		{"insight off: the planner and the summaries pull nothing alone", func(c *config.Config) {
+			c.Insight.Enabled = false
+		}, []pullTarget{embeddings}},
+		{"term labels: nothing pulled for the summaries", func(c *config.Config) { c.Insight.Labeling = "terms" },
 			[]pullTarget{embeddings}},
-		{"term labels", func(c *config.Config) { c.Insight.Labeling = "terms" }, []pullTarget{embeddings}},
-		{"no understanding", func(c *config.Config) { c.Search.Understand = false }, []pullTarget{embeddings, labels}},
+		{"no understanding", func(c *config.Config) { c.Search.Understand = false },
+			[]pullTarget{embeddings, labelsAndSummaries}},
+		{"labels alone", func(c *config.Config) { c.Search.Understand, c.Summaries.Enabled = false, new(false) },
+			[]pullTarget{embeddings, {baseURL: local, model: "qwen3:4b-instruct", usedFor: "interest labels",
+				timeout: 2 * time.Minute}}},
+		{"no summaries", func(c *config.Config) { c.Summaries.Enabled = new(false) }, []pullTarget{embeddings,
+			{baseURL: local, model: "qwen3:4b-instruct", usedFor: "interest labels, search understanding",
+				timeout: 2 * time.Minute}}},
+		{"summaries left to their model, off for qwen3:4b-instruct", func(c *config.Config) {
+			c.Summaries.Enabled = nil
+		}, []pullTarget{embeddings, {baseURL: local, model: "qwen3:4b-instruct",
+			usedFor: "interest labels, search understanding", timeout: 2 * time.Minute}}},
 		{"insight and understanding off", func(c *config.Config) {
 			c.Insight.Enabled, c.Search.Understand = false, false
 		}, []pullTarget{embeddings}},
 		{"the planner on its own model", func(c *config.Config) {
 			c.Generation.Roles = map[config.Role]config.ModelSpec{config.RolePlanner: {Model: "gemma4:26b"}}
-		}, []pullTarget{embeddings, labels}},
-		{"both roles on a model of their own", func(c *config.Config) {
-			c.Generation.Roles = map[config.Role]config.ModelSpec{config.RolePlanner: {Model: "gemma4:26b"},
-				config.RoleLabels: {Model: "gemma4:26b"}}
-		}, []pullTarget{embeddings, {baseURL: local, model: "gemma4:26b",
+		}, []pullTarget{embeddings, labelsAndSummaries}},
+		{"the summaries on their own model", func(c *config.Config) {
+			c.Generation.Roles = map[config.Role]config.ModelSpec{config.RoleSummaries: {Model: "gemma4:26b"}}
+		}, []pullTarget{embeddings, {baseURL: local, model: "qwen3:4b-instruct",
 			usedFor: "interest labels, search understanding", timeout: 2 * time.Minute}}},
+		{"every role on a model of their own", func(c *config.Config) {
+			c.Generation.Roles = map[config.Role]config.ModelSpec{config.RolePlanner: {Model: "gemma4:26b"},
+				config.RoleLabels: {Model: "gemma4:26b"}, config.RoleSummaries: {Model: "gemma4:26b"}}
+		}, []pullTarget{embeddings, {baseURL: local, model: "gemma4:26b",
+			usedFor: "interest labels, search understanding, document summaries", timeout: 2 * time.Minute}}},
 		{"labels on the embedding model", func(c *config.Config) {
 			c.Generation.Roles = map[config.Role]config.ModelSpec{config.RoleLabels: {Model: "qwen3-embedding:0.6b"}}
 		}, []pullTarget{{baseURL: local, model: "qwen3-embedding:0.6b", usedFor: "embeddings, interest labels",
@@ -1134,7 +1152,7 @@ func TestPullTargets(t *testing.T) {
 			c.Generation.BaseURL = local + "/"
 			c.Generation.Model = "qwen3-embedding:0.6b"
 		}, []pullTarget{{baseURL: local, model: "qwen3-embedding:0.6b",
-			usedFor: "embeddings, interest labels, search understanding", timeout: time.Minute}}},
+			usedFor: "embeddings, interest labels, search understanding, document summaries", timeout: time.Minute}}},
 		{"the labels role on its own server", func(c *config.Config) {
 			c.Generation.Roles = map[config.Role]config.ModelSpec{config.RoleLabels: {BaseURL: "http://127.0.0.1:11500/"}}
 		}, []pullTarget{embeddings, {baseURL: "http://127.0.0.1:11500", model: "qwen3:4b-instruct",
@@ -1142,6 +1160,8 @@ func TestPullTargets(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := config.Default()
+			// Turned on (they are off by default), unless the case says.
+			cfg.Summaries.Enabled = new(true)
 			tc.mutate(&cfg)
 			require.NoError(t, cfg.Validate())
 			assert.Equal(t, tc.want, pullTargets(cfg))
@@ -1150,17 +1170,25 @@ func TestPullTargets(t *testing.T) {
 }
 
 // TestGenerationRoles: healthz's roles are those in use, each with the
-// model it resolves to.
+// model it resolves to: the summaries' only while config.yaml turns them
+// on.
 func TestGenerationRoles(t *testing.T) {
 	cfg := config.Default()
 	assert.Equal(t, map[string]string{"labels": "qwen3:4b-instruct", "planner": "qwen3:4b-instruct"},
-		generationRoles(cfg))
+		generationRoles(cfg), "summaries off by default")
 	cfg.Generation.Roles = map[config.Role]config.ModelSpec{config.RoleLabels: {Model: "gemma4:12b"},
-		config.RolePlanner: {Model: "gemma4:26b"}}
-	assert.Equal(t, map[string]string{"labels": "gemma4:12b", "planner": "gemma4:26b"}, generationRoles(cfg))
+		config.RolePlanner: {Model: "gemma4:26b"}, config.RoleSummaries: {Model: "gemma4:26b-a4b-it-qat"}}
+	assert.Equal(t, map[string]string{"labels": "gemma4:12b", "planner": "gemma4:26b"}, generationRoles(cfg),
+		"off by default whatever their model")
+	cfg.Summaries.Enabled = new(true)
+	assert.Equal(t, map[string]string{"labels": "gemma4:12b", "planner": "gemma4:26b",
+		"summaries": "gemma4:26b-a4b-it-qat"}, generationRoles(cfg))
 	cfg.Insight.Labeling = "terms"
-	assert.Equal(t, map[string]string{"planner": "gemma4:26b"}, generationRoles(cfg))
+	assert.Equal(t, map[string]string{"planner": "gemma4:26b", "summaries": "gemma4:26b-a4b-it-qat"},
+		generationRoles(cfg))
 	cfg.Search.Understand = false
+	assert.Equal(t, map[string]string{"summaries": "gemma4:26b-a4b-it-qat"}, generationRoles(cfg))
+	cfg.Summaries.Enabled = new(false)
 	assert.Equal(t, map[string]string{}, generationRoles(cfg))
 }
 
@@ -1190,7 +1218,7 @@ func TestNewPlanner(t *testing.T) {
 	cfg.Generation.Roles = map[config.Role]config.ModelSpec{config.RolePlanner: {Model: "gemma4:26b",
 		BaseURL: srv.URL}}
 
-	p, err := newPlanner(context.Background(), cfg)
+	p, err := newPlanner(context.Background(), cfg, nil)
 	require.NoError(t, err)
 	out, err := p.Plan(context.Background(), "kafka")
 	require.NoError(t, err)
@@ -1959,5 +1987,61 @@ func TestNewDispatcher_YouTube(t *testing.T) {
 		if tc.bin != found {
 			assert.Equal(t, os.Getenv("PATH"), got[0]["path"], "the PATH searched")
 		}
+	}
+}
+
+// TestWritingRoles_ShareTheContextSize: the summaries' writer, the
+// planner and the labels ask their model for one context size: another
+// would make Ollama load the model again between their calls.
+func TestWritingRoles_ShareTheContextSize(t *testing.T) {
+	var mu sync.Mutex
+	seen := map[int]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/ps":
+			fmt.Fprint(w, `{"models":[{"name":"qwen3:4b-instruct"}]}`)
+		case "/api/tags":
+			fmt.Fprint(w, `{"models":[{"name":"qwen3:4b-instruct"}]}`)
+		case "/api/generate":
+			var req struct {
+				Options struct {
+					NumCtx int `json:"num_ctx"`
+				} `json:"options"`
+			}
+			assert.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			mu.Lock()
+			seen[req.Options.NumCtx]++
+			mu.Unlock()
+			fmt.Fprint(w, `{"response":"{}","done":true,"done_reason":"stop"}`)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	cfg := config.Default()
+	cfg.Generation.BaseURL = srv.URL
+	cfg.Insight.CenterVectors = false // the fixture's three vectors are one
+	cfg.Summaries.Enabled = new(true) // off by default
+
+	writer, err := newSummaryWriter(cfg)
+	require.NoError(t, err)
+	failed, err := writer.Check(context.Background())
+	require.NoError(t, err)
+	assert.NotEmpty(t, failed, "{} is no summary")
+	p, err := newPlanner(context.Background(), cfg, nil)
+	require.NoError(t, err)
+	failed, err = p.Check(context.Background())
+	require.NoError(t, err)
+	assert.NotEmpty(t, failed, "{} is no plan")
+	p.stop()
+	p.Wait()
+	docs, chunks, insights, queue := threeArticles(t)
+	eng, err := newInsightEngine(cfg, docs, chunks, insights, queue, nil, nil, nil)
+	require.NoError(t, err)
+	rebuildLabel(t, eng, insights)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, seen, 1, "one context size: %v", seen)
+	for numCtx := range seen {
+		assert.Equal(t, 8192, numCtx)
 	}
 }

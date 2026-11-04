@@ -152,6 +152,10 @@ type fakeOllama struct {
 	answer   func(question, today string) string
 	asked    []string // every question planned, the probes' included, in order
 	loads    int      // generate requests without a prompt
+	// summary answers a summary's prompt (a generate under the summaries'
+	// schema); summarized counts them.
+	summary    func(prompt string) string
+	summarized int
 }
 
 func newFakeOllama(t *testing.T) *fakeOllama {
@@ -244,8 +248,9 @@ const planModel = "test-plan:1"
 
 func (f *fakeOllama) generate(t *testing.T, w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Model  string  `json:"model"`
-		Prompt *string `json:"prompt"`
+		Model  string          `json:"model"`
+		Prompt *string         `json:"prompt"`
+		Format json.RawMessage `json:"format"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		t.Errorf("decode a generate request: %v", err)
@@ -260,6 +265,21 @@ func (f *fakeOllama) generate(t *testing.T, w http.ResponseWriter, r *http.Reque
 	if req.Prompt == nil {
 		f.loads++
 		fmt.Fprint(w, `{"response":"","done":true,"done_reason":"load"}`)
+		return
+	}
+	if bytes.Contains(req.Format, []byte(`"descriptions"`)) {
+		f.summarized++
+		if f.summary == nil {
+			t.Errorf("searcheval asked for a summary")
+			http.Error(w, "no writer here", http.StatusInternalServerError)
+			return
+		}
+		reply, err := json.Marshal(f.summary(*req.Prompt))
+		if err != nil {
+			t.Errorf("encode a summary: %v", err)
+		}
+		fmt.Fprintf(w, `{"response":%s,"done":true,"done_reason":"stop","prompt_eval_count":900,"eval_count":60}`,
+			reply)
 		return
 	}
 	_, question, _ := strings.Cut(*req.Prompt, "\nQuestion: ")
@@ -359,7 +379,8 @@ func writeConfig(t *testing.T, dir, baseURL, search string) string {
 	t.Helper()
 	path := filepath.Join(dir, "config.yaml")
 	cfg := fmt.Sprintf("embedding:\n  model: %s\n  dim: %d\n  base_url: %s\n  query_prefix: \"\"\n"+
-		"search:\n  fields_weight: 0\n  cards_weight: 0\n  title_weight: 0\n%s", testModel, testDim, baseURL, search)
+		"search:\n  fields_weight: 0\n  cards_weight: 0\n  title_weight: 0\n  summary_weight: 0\n%s", testModel, testDim,
+		baseURL, search)
 	require.NoError(t, os.WriteFile(path, []byte(cfg), 0o600))
 	return path
 }

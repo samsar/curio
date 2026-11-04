@@ -25,9 +25,9 @@ import (
 type planStore struct {
 	store.ChunkStore
 	store.DocumentIndex
-	texts                 []string
-	bm25, vector          map[string][]store.ChunkHit
-	fields, cards, titles map[string][]store.DocumentHit
+	texts                            []string
+	bm25, vector                     map[string][]store.ChunkHit
+	fields, cards, titles, summaries map[string][]store.DocumentHit
 
 	mu    sync.Mutex
 	reads map[string][]string // list → the texts it was read for, in no order
@@ -82,6 +82,13 @@ func (s *planStore) SearchTitles(_ context.Context, _, query string, _ int, _ st
 	t := s.keyword(query)
 	s.record("titles", t)
 	return s.titles[t], nil
+}
+
+func (s *planStore) SearchSummaries(_ context.Context, _, query string, _ int, _ store.SearchFilters) (
+	[]store.DocumentHit, error) {
+	t := s.keyword(query)
+	s.record("summaries", t)
+	return s.summaries[t], nil
 }
 
 func (*planStore) GetByIDs(_ context.Context, ids []string) ([]*store.Chunk, error) {
@@ -170,6 +177,50 @@ func TestEngine_RewriteFusion(t *testing.T) {
 	}
 	assert.Equal(t, 2, res.BM25Hits, "c1 and c3")
 	assert.Equal(t, 1, res.VectorHits, "c2, found by two lists, is one chunk")
+}
+
+// TestEngine_SummaryList: the question and each rewrite read the summary
+// list whole, at the list's weight times theirs, after the other document
+// lists; a name never reads it.
+func TestEngine_SummaryList(t *testing.T) {
+	s := newPlanStore()
+	s.summaries = map[string][]store.DocumentHit{question: docHits("C"), rewrite: docHits("E")}
+	cfg := defaultWeights
+	cfg.SummaryWeight = 1
+	res, err := New(s, idDocs{}, s, embedFunc(s.embed), cfg).Search(context.Background(),
+		Request{TenantID: "local", Query: question, Rewrites: []string{rewrite}, Names: []string{name}})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{question, rewrite}, s.reads["summaries"], "never the name")
+	scores := map[string]float64{}
+	for _, h := range res.Items {
+		scores[h.Document.ID] = h.Score
+	}
+	assert.Equal(t, rr(0.5, 1)+rr(1, 1)+rr(1, 1), scores["C"], "the rewrite's BM25 and titles, the question's summary")
+	assert.Equal(t, rr(0.5, 1), scores["E"], "the rewrite's summaries, at half")
+	assert.Equal(t, 2, res.SummaryHits, "C and E, words a summary holds")
+}
+
+// TestEngine_SummaryListOff: weighted 0, the summary list is never read,
+// and the ranking is the five lists' alone, score for score; weighted but
+// finding nothing, the same.
+func TestEngine_SummaryListOff(t *testing.T) {
+	req := Request{TenantID: "local", Query: question, Rewrites: []string{rewrite}, Names: []string{name}}
+	five := newPlanStore()
+	want, err := New(five, idDocs{}, five, embedFunc(five.embed), defaultWeights).Search(context.Background(), req)
+	require.NoError(t, err)
+	assert.Empty(t, five.reads["summaries"])
+	assert.Zero(t, want.SummaryHits)
+	empty := newPlanStore()
+	cfg := defaultWeights
+	cfg.SummaryWeight = 1
+	got, err := New(empty, idDocs{}, empty, embedFunc(empty.embed), cfg).Search(context.Background(), req)
+	require.NoError(t, err)
+	assert.NotEmpty(t, empty.reads["summaries"])
+	require.Len(t, got.Items, len(want.Items))
+	for i := range want.Items {
+		assert.Equal(t, want.Items[i].Document.ID, got.Items[i].Document.ID)
+		assert.Equal(t, want.Items[i].Score, got.Items[i].Score)
+	}
 }
 
 // TestEngine_NamesOnlyDocumentLists: a name never reaches the chunk lists,
@@ -418,23 +469,32 @@ func (p *boundedProbe) SearchTitles(ctx context.Context, tenantID, query string,
 	return p.planStore.SearchTitles(ctx, tenantID, query, limit, f)
 }
 
+func (p *boundedProbe) SearchSummaries(ctx context.Context, tenantID, query string, limit int,
+	f store.SearchFilters) ([]store.DocumentHit, error) {
+	p.enter()
+	return p.planStore.SearchSummaries(ctx, tenantID, query, limit, f)
+}
+
 func (p *boundedProbe) CountUndated(context.Context, string, store.SearchFilters) (int, error) {
 	p.enter()
 	return 0, nil
 }
 
-// TestEngine_ReadsBounded: a plan with 3 rewrites and 4 names makes 33
-// store reads, at most maxConcurrentReads of them at once, and the search
-// succeeds.
+// TestEngine_ReadsBounded: a plan with 3 rewrites and 4 names makes 37
+// store reads with the summary list on, at most maxConcurrentReads of them
+// at once, and the search succeeds.
 func TestEngine_ReadsBounded(t *testing.T) {
 	rewrites := []string{"striped horses", "equine camouflage", "savanna grazers"}
 	names := []string{"Okapi Field Guide", "Grevy Zebra", "Plains Zebra", "Mountain Zebra"}
 	p := &boundedProbe{t: t, wake: make(chan struct{}),
 		planStore: planStore{texts: slices.Concat([]string{question}, rewrites, names)}}
-	// The question and each rewrite read five lists, each name three, and
-	// the date filter its count of the undated.
-	p.total = 4*5 + 4*3 + 1
-	engine := New(p, idDocs{}, p, embedFunc(p.embed), defaultWeights)
+	// The question and each rewrite read six lists, each name three (the
+	// fields, the titles and the cards), and the date filter its count of
+	// the undated.
+	p.total = 4*6 + 4*3 + 1
+	cfg := defaultWeights
+	cfg.SummaryWeight = 0.25
+	engine := New(p, idDocs{}, p, embedFunc(p.embed), cfg)
 	_, err := engine.Search(context.Background(), Request{TenantID: "local", Query: question, Rewrites: rewrites,
 		Names: names, Filters: store.SearchFilters{SavedAfter: time.Date(2017, 1, 1, 0, 0, 0, 0, time.UTC)}})
 	require.NoError(t, err)

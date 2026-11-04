@@ -73,6 +73,10 @@ type Deps struct {
 	SavedDates      *SavedDateClassifier            // classifies an import's source, owing what fails, on healthz; Ready makes one when nil
 	Reembed         ReembedProgress                 // the re-embed for a new chunk context, whose rate /v1/stats and brake healthz report; nil reports none
 	Hold            EmbedderHoldState               // the hold over the index and cards jobs, on healthz and a document's jobs; nil holds nothing
+	Summaries       store.SummaryStore              // the documents' summaries, on a document and in /v1/stats; nil reports none
+	SummaryWriter   SummaryWriterState              // the summaries' writer, on healthz; nil reports summaries off
+	SummaryFeed     SummaryFeed                     // the summary pass, its rate in /v1/stats, its brake on healthz; nil reports none
+	Foreground      *jobs.Foreground                // the person's use of the models, marked around each search; nil marks none
 	TenantID        string                          // default store.LocalTenantID
 	Log             *slog.Logger
 }
@@ -225,6 +229,7 @@ func newRouter(deps Deps, origin localOrigin, pages dashboard) (chi.Router, erro
 			r.Post("/refetch-all", deps.handleRefetchAll)
 			r.Post("/{id}/reindex", deps.handleReindexDocument)
 			r.Post("/reindex-all", deps.handleReindexAll)
+			r.Post("/summarize-all", deps.handleSummarizeAll)
 		})
 		r.Get("/failures", deps.handleFailures)
 

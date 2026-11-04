@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"testing"
 
@@ -172,10 +173,14 @@ func TestValidate(t *testing.T) {
 		{"NaN title weight", func(c *Config) { c.Search.TitleWeight = math.NaN() }, "search.title_weight"},
 		{"negative title weight", func(c *Config) { c.Search.TitleWeight = -2 }, "search.title_weight"},
 		{"infinite title weight", func(c *Config) { c.Search.TitleWeight = math.Inf(1) }, "search.title_weight"},
+		{"NaN summary weight", func(c *Config) { c.Search.SummaryWeight = math.NaN() },
+			"search.summary_weight must be a finite number >= 0, got NaN"},
+		{"negative summary weight", func(c *Config) { c.Search.SummaryWeight = -1 }, "search.summary_weight"},
+		{"infinite summary weight", func(c *Config) { c.Search.SummaryWeight = math.Inf(1) }, "search.summary_weight"},
 		{"every weight zero", func(c *Config) {
 			c.Search.BM25Weight, c.Search.VectorWeight, c.Search.FieldsWeight, c.Search.CardsWeight = 0, 0, 0, 0
-			c.Search.TitleWeight = 0
-		}, "search.bm25_weight, vector_weight, fields_weight, cards_weight and title_weight must not all be 0"},
+			c.Search.TitleWeight, c.Search.SummaryWeight = 0, 0
+		}, "search.bm25_weight, vector_weight, fields_weight, cards_weight, title_weight and summary_weight must not all be 0"},
 		{"zero embed timeout", func(c *Config) { c.Search.EmbedTimeoutSeconds = 0 }, "search.embed_timeout_seconds"},
 		{"zero understand timeout", func(c *Config) { c.Search.UnderstandTimeoutSeconds = 0 },
 			"search.understand_timeout_seconds must be in [1, 23], got 0"},
@@ -514,17 +519,19 @@ func TestValidate_OneZeroWeightIsAllowed(t *testing.T) {
 		func(s *Search) { s.FieldsWeight = 1 },
 		func(s *Search) { s.CardsWeight = 1 },
 		func(s *Search) { s.TitleWeight = 1 },
+		func(s *Search) { s.SummaryWeight = 1 },
 	} {
 		cfg := Default()
 		cfg.Search.BM25Weight, cfg.Search.VectorWeight, cfg.Search.FieldsWeight, cfg.Search.CardsWeight = 0, 0, 0, 0
-		cfg.Search.TitleWeight = 0
+		cfg.Search.TitleWeight, cfg.Search.SummaryWeight = 0, 0
 		only(&cfg.Search)
 		assert.NoError(t, cfg.Validate(), "any one list alone ranks: %+v", cfg.Search)
 	}
 }
 
 // TestDefault_Roles: without generation.roles, every role writes with
-// generation's own settings, and both are in use.
+// generation's own settings; the labels and the planner are in use, and
+// the summaries only once summaries.enabled is true, whatever the model.
 func TestDefault_Roles(t *testing.T) {
 	d := Default()
 	assert.Nil(t, d.Generation.Roles)
@@ -532,10 +539,16 @@ func TestDefault_Roles(t *testing.T) {
 		TimeoutSeconds: 120}
 	assert.Equal(t, want, d.Generation.Role(RoleLabels))
 	assert.Equal(t, want, d.Generation.Role(RolePlanner))
+	assert.Equal(t, want, d.Generation.Role(RoleSummaries))
 	assert.Equal(t, []Role{RoleLabels, RolePlanner}, d.RolesInUse())
-	assert.Equal(t, []Role{RoleLabels, RolePlanner}, Roles())
+	d.Generation.Model = "gemma4:26b"
+	assert.Equal(t, []Role{RoleLabels, RolePlanner}, d.RolesInUse(), "off by default for every model")
+	d.Summaries.Enabled = new(true)
+	assert.Equal(t, []Role{RoleLabels, RolePlanner, RoleSummaries}, d.RolesInUse())
+	assert.Equal(t, []Role{RoleLabels, RolePlanner, RoleSummaries}, Roles())
 	assert.Equal(t, "interest labels", RoleLabels.UsedFor())
 	assert.Equal(t, "search understanding", RolePlanner.UsedFor())
+	assert.Equal(t, "document summaries", RoleSummaries.UsedFor())
 	assert.Empty(t, Role("lables").UsedFor())
 }
 
@@ -578,10 +591,12 @@ func TestLoad_A26EmbedTimeout(t *testing.T) {
 }
 
 // TestPullsAlone: the daemon pulls the labels' model on its own, and the
-// planner's only with another role's pull of the same model.
+// planner's and the summaries' only with another role's pull of the same
+// model.
 func TestPullsAlone(t *testing.T) {
 	assert.True(t, RoleLabels.PullsAlone())
 	assert.False(t, RolePlanner.PullsAlone())
+	assert.False(t, RoleSummaries.PullsAlone())
 	assert.False(t, Role("lables").PullsAlone())
 }
 
@@ -604,7 +619,94 @@ func TestSharesModel(t *testing.T) {
 
 	cfg = Default()
 	cfg.Insight.Labeling = "terms"
-	assert.False(t, cfg.SharesModel(RolePlanner), "labels not in use")
+	cfg.Summaries.Enabled = new(true)
+	assert.True(t, cfg.SharesModel(RolePlanner), "labels not in use, the summaries are")
+	cfg.Summaries.Enabled = new(false)
+	assert.False(t, cfg.SharesModel(RolePlanner), "neither labels nor summaries in use")
+}
+
+// TestSharesModelWith: a role shares its model with one other, named,
+// only while that role is in use and writes with the same model there.
+func TestSharesModelWith(t *testing.T) {
+	cfg := Default()
+	assert.True(t, cfg.SharesModelWith(RoleSummaries, RolePlanner), "whether or not the summaries are in use")
+	assert.False(t, cfg.SharesModelWith(RoleSummaries, RoleSummaries), "never with itself")
+	cfg.Search.Understand = false
+	assert.False(t, cfg.SharesModelWith(RoleSummaries, RolePlanner), "the planner not in use")
+	assert.True(t, cfg.SharesModelWith(RoleSummaries, RoleLabels))
+	cfg = Default()
+	cfg.Generation.Roles = map[Role]ModelSpec{RolePlanner: {Model: "gemma4:26b"}}
+	assert.False(t, cfg.SharesModelWith(RoleSummaries, RolePlanner), "a model of its own")
+}
+
+// TestUnnamed: a role's requests go off this machine, or to another
+// provider, unnamed only when it inherits that from generation; the
+// provider is said first.
+func TestUnnamed(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		g          Generation
+		key, value string
+	}{
+		{"local Ollama", Default().Generation, "", ""},
+		{"another server, inherited", Generation{Provider: ProviderOllama, BaseURL: "http://gpu-box.lan:11434"},
+			KeyBaseURL, "http://gpu-box.lan:11434"},
+		{"another server, named", Generation{Provider: ProviderOllama, BaseURL: "http://gpu-box.lan:11434",
+			Roles: map[Role]ModelSpec{RoleSummaries: {BaseURL: "http://gpu-box.lan:11434"}}}, "", ""},
+		{"named for another role", Generation{Provider: ProviderOllama, BaseURL: "http://gpu-box.lan:11434",
+			Roles: map[Role]ModelSpec{RoleLabels: {BaseURL: "http://gpu-box.lan:11434"}}},
+			KeyBaseURL, "http://gpu-box.lan:11434"},
+		{"another provider, inherited", Generation{Provider: "openai", BaseURL: "https://api.example.com"},
+			KeyProvider, "openai"},
+		{"another provider, named, its server inherited", Generation{Provider: "openai",
+			BaseURL: "https://api.example.com", Roles: map[Role]ModelSpec{RoleSummaries: {Provider: "openai"}}},
+			KeyBaseURL, "https://api.example.com"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			key, value := tc.g.Unnamed(RoleSummaries)
+			assert.Equal(t, tc.key, key)
+			assert.Equal(t, tc.value, value)
+		})
+	}
+}
+
+// TestLoad_Summaries: summaries are written only when summaries.enabled
+// is true; left out, as a 2.7 config.yaml leaves it, or false, they are
+// off, whatever the model, and the role isn't in use. The section takes no
+// other key, and enabled only a boolean.
+func TestLoad_Summaries(t *testing.T) {
+	assert.Nil(t, Default().Summaries.Enabled, "off by default")
+	for _, tc := range []struct {
+		name, yaml string
+		on         bool
+	}{
+		{"a 2.7 config.yaml with gemma4:26b", "generation:\n  model: gemma4:26b\n", false},
+		{"a 2.7 config.yaml with qwen3:4b-instruct", "generation:\n  model: qwen3:4b-instruct\n", false},
+		{"no config.yaml keys", "", false},
+		{"an unmeasured model", "generation:\n  model: elsewhere:7b\n", false},
+		{"true with a model that meets the bars", "generation:\n  model: gemma4:26b\nsummaries:\n  enabled: true\n",
+			true},
+		{"true with one below them", "generation:\n  model: gemma4:12b\nsummaries:\n  enabled: true\n", true},
+		{"false", "generation:\n  model: gemma4:26b\nsummaries:\n  enabled: false\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := Load(writeConfig(t, tc.yaml))
+			require.NoError(t, err)
+			assert.Equal(t, tc.on, got.SummariesOn())
+			assert.Equal(t, tc.on, slices.Contains(got.RolesInUse(), RoleSummaries))
+		})
+	}
+
+	_, err := Load(writeConfig(t, "summaries:\n  write: false\n"))
+	require.ErrorContains(t, err, "field write not found")
+	_, err = Load(writeConfig(t, "summaries:\n  enabled: sometimes\n"))
+	require.Error(t, err, "a boolean or nothing")
+
+	got, err := Load(writeConfig(t, "search:\n  summary_weight: 0.5\ngeneration:\n  roles:\n    summaries:\n"+
+		"      model: gemma4:12b\n"))
+	require.NoError(t, err)
+	assert.Equal(t, 0.5, got.Search.SummaryWeight)
+	assert.Equal(t, "gemma4:12b", got.Generation.Role(RoleSummaries).Model)
 }
 
 // TestOnThisMachine: a model server on loopback, at the unspecified
@@ -660,8 +762,8 @@ func TestLoad_Roles(t *testing.T) {
 }
 
 // TestRolesInUse: labels is in use only while insight is on and labels
-// with an LLM, and the planner only while search understands questions,
-// whatever insight says.
+// with an LLM, the planner only while search understands questions,
+// whatever insight says, and the summaries only while they are turned on.
 func TestRolesInUse(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -670,14 +772,16 @@ func TestRolesInUse(t *testing.T) {
 		understand bool
 		want       []Role
 	}{
-		{"llm", true, "llm", true, []Role{RoleLabels, RolePlanner}},
-		{"llm, no understanding", true, "llm", false, []Role{RoleLabels}},
-		{"insight off", false, "llm", true, []Role{RolePlanner}},
-		{"term labels", true, "terms", true, []Role{RolePlanner}},
-		{"no labels, no understanding", true, "off", false, nil},
+		{"llm", true, "llm", true, []Role{RoleLabels, RolePlanner, RoleSummaries}},
+		{"llm, no understanding", true, "llm", false, []Role{RoleLabels, RoleSummaries}},
+		{"insight off", false, "llm", true, []Role{RolePlanner, RoleSummaries}},
+		{"term labels", true, "terms", true, []Role{RolePlanner, RoleSummaries}},
+		{"no labels, no understanding", true, "off", false, []Role{RoleSummaries}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := Default()
+			cfg.Generation.Model = "gemma4:26b"
+			cfg.Summaries.Enabled = new(true)
 			cfg.Insight.Enabled, cfg.Insight.Labeling = tc.enabled, tc.label
 			cfg.Search.Understand = tc.understand
 			assert.Equal(t, tc.want, cfg.RolesInUse())
@@ -693,7 +797,7 @@ func TestLoad_RoleErrors(t *testing.T) {
 		name, yaml, want string
 	}{
 		{"an unknown role", "generation:\n  roles:\n    lables:\n      model: m:1\n",
-			`generation.roles: unknown role "lables"; the roles are: labels, planner`},
+			`generation.roles: unknown role "lables"; the roles are: labels, planner, summaries`},
 		{"unknown roles, the first in order", "generation:\n  roles:\n    zeta: {}\n    alpha: {}\n",
 			`unknown role "alpha"`},
 		{"another provider", "generation:\n  roles:\n    labels:\n      provider: openai\n",
@@ -705,6 +809,8 @@ func TestLoad_RoleErrors(t *testing.T) {
 		{"an unknown key", "generation:\n  roles:\n    labels:\n      models: m:1\n", "field models not found"},
 		{"the planner's checked too", "generation:\n  roles:\n    planner:\n      timeout_seconds: -2\n",
 			"generation.roles.planner.timeout_seconds must be positive, got -2"},
+		{"the summaries' checked too", "generation:\n  roles:\n    summaries:\n      model: \"\"\n      provider: x\n",
+			`generation.roles.summaries.provider "x" is not supported`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := Load(writeConfig(t, tc.yaml))

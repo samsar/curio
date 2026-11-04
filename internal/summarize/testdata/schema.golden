@@ -1,0 +1,14 @@
+{
+  "type": "object",
+  "properties": {
+    "kind": {"type": "string", "enum": ["home","article","profile","repository","code","video","paper","product","thread","documentation","not_the_page","other"]},
+    "site": {"type": "string", "maxLength": 160},
+    "author": {"type": "string", "maxLength": 160},
+    "about": {"type": "string", "maxLength": 240},
+    "entities": {"type": "array", "items": {"type": "string", "maxLength": 60}, "maxItems": 12},
+    "claims": {"type": "array", "items": {"type": "string", "maxLength": 160}, "maxItems": 4},
+    "descriptions": {"type": "array", "items": {"type": "string", "maxLength": 120}, "maxItems": 4}
+  },
+  "required": ["kind", "site", "author", "about", "entities", "claims", "descriptions"],
+  "additionalProperties": false
+}

@@ -27,6 +27,7 @@ import (
 	"github.com/samsar/curio/internal/ollama"
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/summarize"
 	"github.com/samsar/curio/internal/understand"
 )
 
@@ -297,6 +298,12 @@ type exchange struct {
 func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 	// Drifted, both parts of the build changed and a sample showed it.
 	monitor := &driftMonitor{report: drifted(time.Now())}
+	summaryWriter := &writerAt{state: summarize.State{On: true, Model: "gemma4:26b", PromptVersion: "p1",
+		Check: summarize.CheckUnfit, CheckedAt: time.Now(), Unfit: `gemma4:26b didn't pass the check "an article"`,
+		CheckRetryAt: time.Now(), EvictionHoldUntil: time.Now().Add(15 * time.Minute),
+		OffByDefault: true,
+		Outage:       summarize.Outage{Since: time.Now(), Err: "ollama unreachable: connection refused"},
+		Failure:      summarize.Failure{Cause: "unreachable", At: time.Now(), Err: "connection refused", DocumentID: "d1"}}}
 	s := newStartingTestServer(t, func(d *Deps) {
 		// A query mentioning "offline" can't be embedded, so its search
 		// degrades to keyword results with a warning.
@@ -347,6 +354,14 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 			Brake: jobs.ReembedBrake{Until: time.Now().Add(15 * time.Minute), Failures: 3,
 				Documents: []string{"d1", "d2", "d3"}, Err: "HTTP 500: boom"}}}
 		d.Hold = holdAt{jobs.HoldState{Held: true, Since: time.Now(), Err: "ollama unreachable: connection refused"}}
+		// The summaries' writer with every field of its state set, the pass
+		// measured and braked, and a search a moment ago it yields to.
+		d.SummaryWriter = summaryWriter
+		d.SummaryFeed = &summaryFeedAt{progress: jobs.SummaryProgress{PerMinute: 7.5, Brake: jobs.Brake{
+			Until: now.Add(15 * time.Minute), Failures: 3, Documents: []string{"d1", "d2", "d3"}, Err: "HTTP 500"}},
+			counts: store.SummaryCounts{Written: 2, ToWrite: 30, Outdated: 1, Failed: 1, NotThePage: 1}}
+		d.Foreground = jobs.NewForeground(time.Hour)
+		d.Foreground.Begin()()
 		// Paused Jina, with every optional field set.
 		d.Upstreams = func() []fetcher.UpstreamHealth {
 			now := time.Now()
@@ -516,6 +531,8 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 		{"POST /v1/documents/refetch-all", post("/v1/documents/refetch-all?state=failed"), http.StatusAccepted},
 		{"POST /v1/documents/{id}/reindex", post("/v1/documents/" + f.fetched + "/reindex"), http.StatusAccepted},
 		{"POST /v1/documents/reindex-all", post("/v1/documents/reindex-all"), http.StatusAccepted},
+		{"POST /v1/documents/summarize-all", post("/v1/documents/summarize-all?scope=all"), http.StatusAccepted},
+		{"POST /v1/documents/summarize-all", post("/v1/documents/summarize-all?scope=some"), http.StatusBadRequest},
 		{"DELETE /v1/jobs", request{method: http.MethodDelete, path: "/v1/jobs?status=failed"}, http.StatusOK},
 
 		{"GET /v1/queue", get("/v1/queue"), http.StatusOK},
@@ -530,6 +547,13 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 	// A drift no sample could verify.
 	monitor.set(driftedUnverified(time.Now()))
 	run([]exchange{{"GET /v1/healthz", get("/v1/healthz"), http.StatusOK}})
+
+	// Summaries off: healthz says why, and no summary is owed.
+	summaryWriter.state = summarize.State{Reason: summarize.OffReason}
+	run([]exchange{
+		{"GET /v1/healthz", get("/v1/healthz"), http.StatusOK},
+		{"POST /v1/documents/summarize-all", post("/v1/documents/summarize-all"), http.StatusConflict},
+	})
 
 	// A rebuild whose map failed, then one that drew its map.
 	seedFailedMap(t, s, f)
@@ -750,6 +774,17 @@ func seedContractFixtures(t *testing.T, s *testServer) contractFixtures {
 		Source: store.SourceChrome, SavedAt: time.Now().UTC().Add(-2 * time.Hour)})
 	require.NoError(t, err)
 
+	// A's summary, written by another prompt than the writer's now, and a
+	// failure of the failed document's.
+	require.NoError(t, s.deps.Summaries.PutSummary(ctx, "local", store.Summary{DocumentID: a.ID,
+		ExtractionID: aExt.ID, Kind: store.SummaryKindArticle, Site: "Example Times, a made-up newspaper",
+		Author: "Ada Example", About: "How Kafka partitions spread a topic.", Entities: []string{"Kafka"},
+		Claims: []string{"Partitions scale reads."}, Descriptions: []string{"that piece on kafka partitions"},
+		SummaryWriter: store.SummaryWriter{Model: "gemma4:26b", PromptVersion: "p0"}, InputHash: "h"}))
+	require.NoError(t, s.deps.Summaries.RecordSummaryFailure(ctx, "local", failed.ID, store.SummaryFailure{
+		ExtractionID: "e1", SummaryWriter: store.SummaryWriter{Model: "gemma4:26b", PromptVersion: "p1"},
+		Error: "the model's summary couldn't be used: its kind isn't one of the summary kinds"}))
+
 	return contractFixtures{fetched: a.ID, failed: failed.ID, dead: dead.ID, bookmark: bookmark.ID,
 		failedJob: job.ID, titled: a, named: failed, untitled: untitled, plain: b}
 }
@@ -772,7 +807,8 @@ func seedInterestFixtures(t *testing.T, s *testServer, f contractFixtures) event
 	now := time.Now()
 	s.interests.set(insight.Snapshot{State: insight.StateFailing, LastRebuildAt: now.Add(-time.Hour),
 		LastKind: store.RunKindWarm, LastTrigger: store.RunTriggerAuto, Changed: 271, RebuildAt: 263,
-		DueSince: now.Add(-20 * time.Minute), FreshOwed: string(store.FreshReindex), HeldReason: "the embeddings drifted",
+		DueSince: now.Add(-20 * time.Minute), WaitingFor: insight.WaitingReembedding,
+		FreshOwed: string(store.FreshReindex), HeldReason: "the embeddings drifted",
 		RetryAt: now.Add(15 * time.Minute), LastError: "ollama unreachable: connection refused",
 		Map: insight.MapState{Status: store.MapFailed, Kind: store.RunKindWarm, Took: 2 * time.Minute,
 			Error: "the map took longer than 2m0s"},

@@ -22,6 +22,7 @@ func ConfigFrom(c config.Config) Config {
 		FieldsWeight:  c.Search.FieldsWeight,
 		CardsWeight:   c.Search.CardsWeight,
 		TitleWeight:   c.Search.TitleWeight,
+		SummaryWeight: c.Search.SummaryWeight,
 		RewriteWeight: c.Search.RewriteWeight,
 		NameWeight:    c.Search.NameWeight,
 		RRFK:          c.Search.RRFK,

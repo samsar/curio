@@ -111,6 +111,16 @@ var variants = []variant{
 		config: only(0, 0, 0, 0, 1),
 	},
 	{
+		name: "summaries",
+		description: "the summary list alone: BM25 over the summaries the model wrote, which never embeds the " +
+			"query",
+		config: func(c config.Config) search.Config {
+			cfg := only(0, 0, 0, 0, 0)(c)
+			cfg.SummaryWeight = 1
+			return cfg
+		},
+	},
+	{
 		name: "planned",
 		description: "the daemon's understood search: each query's plan from the planner config.yaml configures, " +
 			"its filters, rewrites and names, in place of the file's filters",
@@ -138,12 +148,12 @@ var variants = []variant{
 }
 
 // only is the production configuration with the five lists weighted bm25,
-// vector, fields, cards and titles.
+// vector, fields, cards and titles, and the summary list off.
 func only(bm25, vector, fields, cards, titles float64) func(config.Config) search.Config {
 	return func(c config.Config) search.Config {
 		cfg := search.ConfigFrom(c)
 		cfg.BM25Weight, cfg.VectorWeight, cfg.FieldsWeight, cfg.CardsWeight = bm25, vector, fields, cards
-		cfg.TitleWeight = titles
+		cfg.TitleWeight, cfg.SummaryWeight = titles, 0
 		return cfg
 	}
 }
@@ -161,7 +171,7 @@ func (v variant) build(e env) ranker {
 func (v variant) reach(c config.Config) reach {
 	cfg := v.config(c)
 	return reach{chunks: cfg.BM25Weight > 0 || cfg.VectorWeight > 0,
-		documents: cfg.FieldsWeight > 0 || cfg.CardsWeight > 0 || cfg.TitleWeight > 0}
+		documents: cfg.FieldsWeight > 0 || cfg.CardsWeight > 0 || cfg.TitleWeight > 0 || cfg.SummaryWeight > 0}
 }
 
 // variantNames are the registered variants' names, in order.
@@ -217,6 +227,7 @@ func (r engineRanker) search(ctx context.Context, req search.Request) (ranking, 
 		{"titles", res.Timings.Titles},
 		{"vector", res.Timings.Vector},
 		{"cards", res.Timings.Cards},
+		{"summaries", res.Timings.Summaries},
 		{"undated", res.Timings.Undated},
 		{"fuse", res.Timings.Fuse},
 		{"hydrate", res.Timings.Hydrate},

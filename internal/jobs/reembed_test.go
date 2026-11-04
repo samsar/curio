@@ -934,7 +934,7 @@ func TestReembed_FailureOfEveryDocument(t *testing.T) {
 // TestReembed_Brake: the brake goes on once BrakeAfter documents' re-embeds
 // failed for the first time with none re-embedded since, never for one
 // document failing again and again, with one WARN, naming the first
-// reembedBrakeNamed documents; it stops the feed until its time passes,
+// brakeNamed documents; it stops the feed until its time passes,
 // which turns it off with one INFO, also when read, and a first failure
 // after that puts it straight back on for twice as long, up to BrakeMax,
 // where a document that failed before doesn't. A document re-embedded

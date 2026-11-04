@@ -176,6 +176,9 @@ func importNotes(e Estimate, rate float64, pages []string, cfg config.Config, co
 	} else {
 		notes = append(notes, "  indexing: "+e.Indexing())
 	}
+	if line := summariesNote(e.Pages, cfg); line != "" {
+		notes = append(notes, line)
+	}
 	if hosts := dominantHosts(pages, cfg.Daemon.FetchWorkers); len(hosts) > 0 {
 		named := make([]string, len(hosts))
 		for i, h := range hosts {
@@ -202,4 +205,28 @@ func importNotes(e Estimate, rate float64, pages []string, cfg config.Config, co
 	return append(notes,
 		"While it indexes, Ollama keeps the GPU busy: `curio throttle gentle` eases it.",
 		"Closing the terminal or restarting the Mac is fine: "+restart+". A sleeping Mac pauses the import.")
+}
+
+// summariesNote is the import's line about the summary pass that follows
+// it: pages pages at the summaries' model's measured time a page at
+// normal throttle, which searches pause; empty while summaries are off.
+func summariesNote(pages int, cfg config.Config) string {
+	if !cfg.SummariesOn() {
+		return ""
+	}
+	model := cfg.Generation.Role(config.RoleSummaries).Model
+	c, ok := config.SummaryCostOf(model)
+	if !ok {
+		return fmt.Sprintf("  summaries: written after, a page at a time with %s (its time a page isn't measured)",
+			model)
+	}
+	return fmt.Sprintf("  summaries: about %s after, a page at a time with %s (about %.0f s a page at normal "+
+		"throttle, as measured on a 64 GB M4 Max; searches pause it)", formatDuration(summaryPass(c, pages)), model,
+		c.SecondsPerPage)
+}
+
+// summaryPass is how long c's model takes to summarize pages pages at
+// normal throttle, rounded up to the minute.
+func summaryPass(c config.SummaryCost, pages int) time.Duration {
+	return minutesUp(float64(pages) * c.SecondsPerPage / 60)
 }

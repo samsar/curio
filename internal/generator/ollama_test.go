@@ -204,6 +204,47 @@ func TestGenerateJSON_Replies(t *testing.T) {
 	})
 }
 
+// TestUsage: a call given Usage gets what Ollama reports it cost, for a
+// reply it can't use too; one without is answered as before.
+func TestUsage(t *testing.T) {
+	const costs = `"prompt_eval_count":2780,"eval_count":172,"load_duration":5000000,` +
+		`"prompt_eval_duration":1900000000,"eval_duration":2100000000`
+	want := Usage{PromptTokens: 2780, OutputTokens: 172, Load: 5 * time.Millisecond,
+		PromptEval: 1900 * time.Millisecond, Eval: 2100 * time.Millisecond}
+	for _, tc := range []struct {
+		name, body string
+		call       func(*Ollama, Options) error
+	}{
+		{"GenerateJSON", `{"response":"{}","done":true,"done_reason":"stop",` + costs + `}`, func(g *Ollama, o Options) error {
+			_, err := g.GenerateJSON(context.Background(), "p", json.RawMessage(planSchema), o)
+			return err
+		}},
+		{"GenerateJSON cut off", `{"response":"{","done":true,"done_reason":"length",` + costs + `}`,
+			func(g *Ollama, o Options) error {
+				_, err := g.GenerateJSON(context.Background(), "p", json.RawMessage(planSchema), o)
+				if errors.Is(err, ErrTruncated) {
+					return nil
+				}
+				return err
+			}},
+		{"Generate", `{"response":"a label","done":true,` + costs + `}`, func(g *Ollama, o Options) error {
+			_, err := g.Generate(context.Background(), "p", o)
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeOllama(t, func(w http.ResponseWriter, _ *http.Request, _ int, _ <-chan struct{}) {
+				fmt.Fprint(w, tc.body)
+			})
+			g := newGen(t, OllamaOptions{BaseURL: f.url})
+			var got Usage
+			require.NoError(t, tc.call(g, Options{Usage: &got}))
+			assert.Equal(t, want, got)
+			require.NoError(t, tc.call(g, Options{}), "no Usage, no change")
+		})
+	}
+}
+
 // TestGenerateJSON_Failures: a missing model is ErrModelNotLoaded at once,
 // and a 5xx is retried as Generate retries it.
 func TestGenerateJSON_Failures(t *testing.T) {

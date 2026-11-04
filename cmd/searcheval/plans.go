@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -13,7 +12,6 @@ import (
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/eval"
 	"github.com/samsar/curio/internal/generator"
-	"github.com/samsar/curio/internal/ollama"
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/understand"
 )
@@ -198,7 +196,7 @@ func planQueries(ctx context.Context, s plannerSetup, qs *eval.QuerySet) ([]quer
 	if _, structured := gen.(generator.JSONGenerator); !structured || !ok {
 		return nil, nil, fmt.Errorf("the planner's provider %s can't answer in JSON or load its model", opts.Model.Provider)
 	}
-	if err := pingPlanner(ctx, gen, opts.Model); err != nil {
+	if err := pingModel(ctx, gen, opts.Model, "planner's"); err != nil {
 		return nil, nil, err
 	}
 	rep := &plannerReport{Model: opts.Model.Model, PromptVersion: understand.PromptVersion,
@@ -242,21 +240,6 @@ func planQueries(ctx context.Context, s plannerSetup, qs *eval.QuerySet) ([]quer
 		plans[i] = queryPlan{status: out.Status, plan: out.Plan, dropped: out.Dropped, took: out.Took}
 	}
 	return plans, rep, nil
-}
-
-// pingPlanner checks that Ollama has the planner's model; it never pulls
-// one.
-func pingPlanner(ctx context.Context, gen generator.Generator, spec config.ModelSpec) error {
-	pctx, cancel := context.WithTimeout(ctx, pingTimeout)
-	defer cancel()
-	switch err := gen.Ping(pctx); {
-	case errors.Is(err, ollama.ErrModelNotLoaded):
-		return fmt.Errorf("the Ollama at %s doesn't have the planner's model %s, and searcheval never pulls a "+
-			"model: %w", spec.BaseURL, spec.Model, err)
-	case err != nil:
-		return fmt.Errorf("ask the Ollama at %s for the planner's model %s: %w", spec.BaseURL, spec.Model, err)
-	}
-	return nil
 }
 
 // parseToday reads -today, a day in the local zone, as its noon: the

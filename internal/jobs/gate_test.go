@@ -248,11 +248,11 @@ func TestQueueGate_Throttle(t *testing.T) {
 }
 
 func TestQueueGate_State(t *testing.T) {
-	// The cluster and cards pools have one goroutine, which no throttle
-	// caps.
+	// The cluster, cards and summarize pools have one goroutine, which no
+	// throttle caps.
 	limits := func(fetch, index, cluster int) []KindLimit {
 		return []KindLimit{{store.JobKindFetch, fetch}, {store.JobKindIndex, index}, {store.JobKindCluster, cluster},
-			{store.JobKindCards, 1}}
+			{store.JobKindCards, 1}, {store.JobKindSummarize, 1}}
 	}
 	schedule := window(t, "22:00-07:00")
 	cases := []struct {

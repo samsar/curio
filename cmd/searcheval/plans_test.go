@@ -30,7 +30,7 @@ func writePlannedConfig(t *testing.T, dir, baseURL string) string {
 	path := filepath.Join(dir, "planned.yaml")
 	cfg := fmt.Sprintf("embedding:\n  model: %s\n  dim: %d\n  base_url: %s\n  query_prefix: \"\"\n"+
 		"generation:\n  model: %s\n  base_url: %s\n"+
-		"search:\n  vector_weight: 0\n  fields_weight: 1\n  cards_weight: 0\n  title_weight: 0\n"+
+		"search:\n  vector_weight: 0\n  fields_weight: 1\n  cards_weight: 0\n  title_weight: 0\n  summary_weight: 0\n"+
 		"  rewrite_weight: 0.5\n  name_weight: 1\n", testModel, testDim, baseURL, planModel, baseURL)
 	require.NoError(t, os.WriteFile(path, []byte(cfg), 0o600))
 	return path
