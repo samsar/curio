@@ -646,9 +646,9 @@ type SearchResults struct {
 	Capped bool
 	// WordHits is how many matches by the query's words the ranking was
 	// built from, over all its pages: the passages BM25 found and the
-	// documents the fields and title lists found (POST /v1/search's
-	// bm25_hits, fields_hits and title_hits). None, and the ranking is the
-	// documents nearest in meaning alone.
+	// documents the fields, title and summary lists found (POST
+	// /v1/search's bm25_hits, fields_hits, title_hits and summary_hits).
+	// None, and the ranking is the documents nearest in meaning alone.
 	WordHits int
 	Hits     []SearchHit // the page's
 }
@@ -671,11 +671,11 @@ func (r SearchResults) ByMeaning() bool {
 
 // Wordless reports whether nothing in the search's ranking matched the
 // query's words, in a passage, a title, a bookmark's title or folder, a
-// site or an author, so that it holds only what is nearest in meaning:
-// what a query of words the library doesn't hold, or of nonsense, gets,
-// since the vector search ranks every document by its distance. It is the
-// ranking's, the same on every page. The page then says so, and shows the
-// nearest few first.
+// site, an author or a summary, so that it holds only what is nearest in
+// meaning: what a query of words the library doesn't hold, or of
+// nonsense, gets, since the vector search ranks every document by its
+// distance. It is the ranking's, the same on every page. The page then
+// says so, and shows the nearest few first.
 func (r SearchResults) Wordless() bool { return !r.Degraded && r.Total > 0 && r.WordHits == 0 }
 
 // Count is how many documents match, as the results' head counts them:

@@ -605,6 +605,46 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         default: { $ref: "#/components/responses/Problem" }
 
+  /v1/documents/summarize-all:
+    parameters:
+      - in: query
+        name: scope
+        description: >
+          Which summaries to owe a rewrite: outdated (the default), those
+          another model or prompt wrote than the summaries role's now; or
+          all, every one, and every page whose summary failed for good,
+          whose failure it clears so the page is tried again. Only fetched
+          documents' summaries are owed: the pass writes no other.
+        schema: { type: string, enum: [outdated, all] }
+    post:
+      tags: [documents]
+      operationId: summarizeAllDocuments
+      summary: Owe the documents' summaries a rewrite, which the summary pass writes
+      description: >
+        A summary another model or prompt wrote is counted outdated and kept
+        until it is owed: a release that changes the prompt never starts the
+        whole pass again unasked. This marks the summaries in scope owed and
+        kicks the pass, which writes them in its order (newest indexed
+        first) under the queue's gate, one page at a time. There is no
+        parent job to poll: /v1/stats' summaries count them as to_write.
+      responses:
+        "202":
+          description: Summaries owed a rewrite
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  summaries_owed: { type: integer, description: "How many fetched documents' summaries this marked owed, with scope all the pages whose summary failed for good among them" }
+                required: [summaries_owed]
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "409":
+          description: Summaries are off (summaries.enabled false, or left out, which is off by default); nothing is owed.
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
+
   /v1/failures:
     get:
       tags: [documents]
@@ -1193,8 +1233,10 @@ components:
           description: >
             Each writing role the daemon uses (labels: interest and area
             labels, while insight is on and labels with an LLM; planner:
-            search understanding, while search.understand is on) and the
-            model it writes with: generation.roles' model for the role, or
+            search understanding, while search.understand is on; summaries:
+            document summaries, while they are written: summaries.enabled
+            true, since they are off by default) and the model
+            it writes with: generation.roles' model for the role, or
             generation.model. Empty when no role is in use. It takes a
             restart to change.
           additionalProperties: { type: string }
@@ -1227,7 +1269,110 @@ components:
         embedder_hold: { $ref: "#/components/schemas/EmbedderHold" }
         reembed_brake: { $ref: "#/components/schemas/ReembedBrake" }
         understanding: { $ref: "#/components/schemas/UnderstandingHealth" }
-      required: [status, pid, home, version, schema_version, embedding_model, embedding_dim, generation_model, generation_roles, ollama_reachable, upstreams, github_token, interests, document_fields, saved_dates, understanding]
+        summaries: { $ref: "#/components/schemas/SummariesHealth" }
+      required: [status, pid, home, version, schema_version, embedding_model, embedding_dim, generation_model, generation_roles, ollama_reachable, upstreams, github_token, interests, document_fields, saved_dates, understanding, summaries]
+
+    SummariesHealth:
+      description: >
+        What the daemon's summaries writer knows of its model, read from its
+        memory alone: healthz never asks the model. Status stays ok whatever
+        it says.
+      type: object
+      properties:
+        "on":
+          type: boolean
+          description: >
+            Whether summaries are written: only when config.yaml sets
+            summaries.enabled true; left out, they are off for every model
+            (off_by_default).
+        off_by_default:
+          type: boolean
+          description: >
+            True, and present only then, while summaries are off because
+            config.yaml leaves summaries.enabled out; reason says so, with
+            how to turn them on (summaries.enabled: true, then a restart).
+        model: { type: string, description: "The summaries role's model" }
+        prompt_version: { type: string, description: "The SHA-256 of the prompt, schema and input rules summaries are written with now" }
+        reason:
+          type: string
+          description: >
+            Why no page is summarized at all, present only then: summaries
+            are off, by config.yaml or by default (off_by_default); the
+            provider can't answer in JSON; or pages
+            would leave this machine (generation.base_url off loopback, or
+            another provider) for a server the summaries role doesn't name
+            (generation.roles.summaries).
+        check:
+          type: string
+          enum: [unchecked, fit, unfit]
+          description: >
+            The fitness check's verdict on the model, run before its first
+            summary and kept until the daemon restarts.
+        checked_at: { type: string, format: date-time, description: "When the verdict was reached" }
+        unfit: { type: string, description: "Why the model is unfit, and the fix; present only then" }
+        check_retry_at:
+          type: string
+          format: date-time
+          description: >
+            Present only while the model is unchecked, its last check
+            reached no verdict for a reason of the model's (it answered a
+            probe with an error, or too slowly, or a load of the model
+            failed so; last_failure's cause is then check), and the time is
+            ahead: when the check runs again, a minute after the first,
+            twice the wait after each further one, at most 15 minutes. The
+            pass keeps one job meanwhile, which runs no sooner; past the
+            time (a pause holding that job), it is absent until a verdict.
+        outage:
+          type: object
+          description: >
+            Present only while the summaries' model doesn't answer (Ollama
+            down, the model not pulled, the caller refused) and pages wait:
+            the pass keeps one job, deferred, until it answers; for a model
+            not pulled, none, the daemon asking Ollama's model list every 5
+            minutes until it is.
+          properties:
+            since: { type: string, format: date-time }
+            error: { type: string }
+          required: [since, error]
+        eviction_hold_until:
+          type: string
+          format: date-time
+          description: >
+            Present only while the pass is held because Ollama unloaded the
+            summaries' model within its keep-alive twice within an hour, for
+            other models: the pass keeps no job and asks the model nothing
+            until then. A hold lasts 15 minutes, twice as long each time it
+            holds again within an hour of the last hold's end, at most 4
+            hours.
+        brake:
+          $ref: "#/components/schemas/ReembedBrake"
+          description: >
+            Present only while the summary pass is stopped after three
+            pages' summaries failed in a row, each for the first time, with
+            none written in between; as the re-embed's brake.
+        yielding_until:
+          type: string
+          format: date-time
+          description: >
+            Present only while the pass yields to the person's use of the
+            models (a search, a plan, a rebuild's labels): when it may next
+            make a call, a minute after the last use ended.
+        last_failure:
+          type: object
+          description: The writer's last failure since the daemon started.
+          properties:
+            cause:
+              type: string
+              description: >
+                What failed, as the daemon's log names it: unreachable,
+                missing, unauthorized, timeout, unavailable,
+                unavailable:loaded, unavailable:load, invalid:<rule>,
+                bad_request, check, unfit or evicted.
+            at: { type: string, format: date-time }
+            error: { type: string }
+            document_id: { type: string }
+          required: [cause, at]
+      required: ["on"]
 
     UnderstandingHealth:
       description: >
@@ -1597,6 +1742,27 @@ components:
               type: integer
               description: How long the chunks left take at that rate; absent with it.
           required: [documents, chunks]
+        summaries:
+          type: object
+          description: >
+            The fetched documents with a current extraction by their summary
+            under the summaries role's model and prompt now; present while
+            summaries are on. Their sum is those documents. Counting reads
+            every such document, so the daemon counts them again at most
+            every 10 seconds unless the pass hears of a change first (an
+            index or summarize job ending, a summary written or failed, a
+            rewrite asked for); a change it doesn't hear of, a document
+            deleted, shows within those 10 seconds.
+          properties:
+            written: { type: integer, description: "A summary of the current extraction by the writer now" }
+            to_write: { type: integer, description: "None yet, one of an older extraction, or one owed a rewrite" }
+            outdated: { type: integer, description: "A summary of the current extraction by another model or prompt, kept until owed (POST /v1/documents/summarize-all)" }
+            failed: { type: integer, description: "Failed for good under the current extraction, model and prompt" }
+            not_the_page: { type: integer, description: "Written, of a page that wasn't the one saved (a sign-in wall, an error page)" }
+            counted_at: { type: string, format: date-time, description: "When these counts were read" }
+            per_minute: { type: number, description: "Summaries written a minute over the last 10 minutes; absent until measured" }
+            eta_seconds: { type: integer, description: "How long the pages to write take at that rate; absent with it" }
+          required: [written, to_write, outdated, failed, not_the_page, counted_at]
       required: [version, bookmarks_total, documents_total, cards_stale]
 
     Metrics:
@@ -1789,9 +1955,54 @@ components:
         state:              { $ref: "#/components/schemas/DocState" }
         failure_cause:      { $ref: "#/components/schemas/FailureCause" }
         current_extraction: { $ref: "#/components/schemas/Extraction" }
+        summary:            { $ref: "#/components/schemas/DocumentSummary" }
+        summary_failure:    { $ref: "#/components/schemas/SummaryFailure" }
         created_at:         { type: string, format: date-time }
         updated_at:         { type: string, format: date-time }
       required: [id, url, content_type, state, created_at, updated_at]
+
+    DocumentSummary:
+      type: object
+      description: >
+        The document's summary, as the summaries role's model wrote it from
+        the page's text: on GET /v1/documents/{id} and /lookup, absent when
+        none was written. A failed or dead document keeps the summary of
+        its last extraction.
+      properties:
+        kind:
+          type: string
+          description: >
+            What the page is: home, article, profile, repository, code,
+            video, paper, product, thread, documentation, not_the_page (a
+            sign-in wall, an error or CAPTCHA page, an empty page: every
+            text is empty) or other. Clients read a kind they don't know as
+            other.
+        site: { type: string, description: "The site in plain words" }
+        author: { type: string, description: "Who made the page, in plain words" }
+        about: { type: string, description: "One sentence on what the page is about" }
+        entities: { type: array, items: { type: string }, description: "The names the page holds" }
+        claims: { type: array, items: { type: string }, description: "The page's main claims" }
+        descriptions: { type: array, items: { type: string }, description: "How someone might describe it later" }
+        model: { type: string }
+        prompt_version: { type: string }
+        extraction_id: { type: string, description: "The extraction the summary read" }
+        written_at: { type: string, format: date-time }
+        current: { type: boolean, description: "It read the extraction now current" }
+        outdated: { type: boolean, description: "Another model or prompt than the writer's now wrote it" }
+      required: [kind, entities, claims, descriptions, model, prompt_version, extraction_id, written_at, current, outdated]
+
+    SummaryFailure:
+      type: object
+      description: >
+        The document's last summary that failed for good: the pass doesn't
+        try it again for 7 days, unless its extraction, the model or the
+        prompt changes, or summarize-all with scope all (`curio summarize
+        --all`) clears it. Absent when none failed since the last written.
+      properties:
+        at: { type: string, format: date-time }
+        error: { type: string }
+        extraction_id: { type: string }
+      required: [at, error, extraction_id]
 
     Extraction:
       type: object
@@ -2119,6 +2330,7 @@ components:
         vector_hits: { type: integer, description: "How many distinct chunks the vector index returned before fusion, over the query's and its rewrites' lists (0 when degraded, and with search.vector_weight 0, which skips the vector search)" }
         fields_hits: { type: integer, description: "How many distinct documents the fields list matched by the query's words (title, bookmark titles and folders, site, author), over every query of the search, each list read at most 200 deep (0 with search.fields_weight 0, which skips it)" }
         title_hits:  { type: integer, description: "How many distinct documents the title list matched (every term in a title or a bookmark's title; only for two terms or more), over every query of the search, each list read at most 200 deep (0 with search.title_weight 0, which skips it)" }
+        summary_hits: { type: integer, description: "How many distinct documents the summary list matched by the query's words (what a document's summary says of its site, author, subject, names, descriptions and claims), over every query of the search, each list read at most 200 deep (0 with search.summary_weight 0, which skips it)" }
         total:
           type: integer
           description: >
@@ -2139,7 +2351,7 @@ components:
           description: >
             Present and true when semantic search was unavailable and items
             are keyword-only results: BM25 over the chunks and, when they
-            are weighted, the fields and title lists.
+            are weighted, the fields, title and summary lists.
         warnings:
           type: array
           items: { type: string }
@@ -2160,7 +2372,7 @@ components:
         items:
           type: array
           items: { $ref: "#/components/schemas/SearchHit" }
-      required: [query, took_ms, bm25_hits, vector_hits, fields_hits, title_hits, total, capped, items]
+      required: [query, took_ms, bm25_hits, vector_hits, fields_hits, title_hits, summary_hits, total, capped, items]
 
     # ---------- insight ----------
 
@@ -2324,6 +2536,15 @@ components:
             last rebuild's documents, at least 5; before the first, the 20
             fetched documents it waits for.
         due_since:   { type: string, format: date-time, description: "When the rebuild became due, while it is" }
+        waiting_for:
+          type: string
+          enum: [reembedding, embedding_check, settle]
+          description: >
+            What the rebuild that is due waits for before it is queued, only
+            with state due: the re-embedding (index jobs pending or running,
+            with fresh_owed reindex), the first embedding check since the
+            daemon started, or the library to settle (nothing indexed for a
+            while). Absent from a daemon from before it.
         fresh_owed:
           type: string
           enum: [reindex, manual, params]

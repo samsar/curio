@@ -148,6 +148,7 @@ func renderDocShow(w io.Writer, d *client.Document) {
 			fmt.Fprintf(w, "  err:          %s\n", *e.ErrorMessage)
 		}
 	}
+	renderDocumentSummary(w, d)
 }
 
 func renderDocList(w io.Writer, resp *client.DocumentList) {

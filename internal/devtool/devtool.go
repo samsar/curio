@@ -50,6 +50,7 @@ type Copy struct {
 	Chunks      store.ChunkStore
 	Index       store.DocumentIndex
 	Insights    store.InsightStore
+	Summaries   store.SummaryStore
 
 	db *sqlite.DB
 }
@@ -104,7 +105,8 @@ func migrate(ctx context.Context, path string, db *sqlite.DB) (*Copy, error) {
 	return &Copy{Path: path, Schema: schema, Width: width, Fields: fields, SavedDates: saved,
 		Documents: sqlite.NewDocuments(db), Extractions: sqlite.NewExtractions(db),
 		Bookmarks: sqlite.NewBookmarks(db), Chunks: sqlite.NewChunks(db, width),
-		Index: sqlite.NewDocumentIndex(db, width), Insights: sqlite.NewInsights(db), db: db}, nil
+		Index: sqlite.NewDocumentIndex(db, width), Insights: sqlite.NewInsights(db), Summaries: sqlite.NewSummaries(db),
+		db: db}, nil
 }
 
 // Close closes the database.

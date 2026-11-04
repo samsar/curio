@@ -172,6 +172,7 @@ func start(t testing.TB, pages api.UIOptions, opts ...func(*api.Deps)) *Server {
 		Search: search.New(chunks, docs, index, emb, search.Config{RewriteWeight: 0.5, NameWeight: 1,
 			Log: quiet}),
 		Insights:       sqlite.NewInsights(db),
+		Summaries:      sqlite.NewSummaries(db),
 		InsightEnabled: true,
 		Interests:      scheduler,
 		Gate:           gate,
@@ -225,12 +226,13 @@ func closeClientConns() {
 }
 
 // DocumentLists is an option for Start that searches with the document
-// lists on: the fields, the cards and the titles, each weighted 1 beside
-// the chunk lists, so a document can be found by what it was saved as.
+// lists on: the fields, the cards, the titles and the summaries, each
+// weighted 1 beside the chunk lists, so a document can be found by what it
+// was saved as and by what its summary says.
 func DocumentLists(d *api.Deps) {
 	d.Search = search.New(d.Chunks, d.Documents, d.Index, Embedder{Dim: config.Default().Embedding.Dim},
 		search.Config{BM25Weight: 1, VectorWeight: 1, FieldsWeight: 1, CardsWeight: 1, TitleWeight: 1,
-			RewriteWeight: 0.5, NameWeight: 1, Log: d.Log})
+			SummaryWeight: 1, RewriteWeight: 0.5, NameWeight: 1, Log: d.Log})
 }
 
 // Planner is a planner whose outcome and state a test sets, and which

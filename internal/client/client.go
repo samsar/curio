@@ -80,6 +80,46 @@ type Health struct {
 	// Understanding is what the daemon's planner knows of its model; nil
 	// from a daemon that predates saying so.
 	Understanding *UnderstandingHealth `json:"understanding,omitempty"`
+	// Summaries is what the daemon's summaries writer knows of its model;
+	// nil from a daemon that predates summaries.
+	Summaries *SummariesHealth `json:"summaries,omitempty"`
+}
+
+// SummariesHealth mirrors api.SummariesHealth: whether summaries are on,
+// and whether they are off by default, the writer's model and prompt, why
+// no page is summarized at all, the fitness check's verdict and when a
+// check that reached none runs again, the outage while its model doesn't
+// answer, the eviction hold, the pass's brake, until when it yields to
+// searches, and the last failure.
+type SummariesHealth struct {
+	On                bool                  `json:"on"`
+	OffByDefault      bool                  `json:"off_by_default,omitempty"`
+	Model             string                `json:"model,omitempty"`
+	PromptVersion     string                `json:"prompt_version,omitempty"`
+	Reason            string                `json:"reason,omitempty"`
+	Check             string                `json:"check,omitempty"`
+	CheckedAt         time.Time             `json:"checked_at,omitzero"`
+	Unfit             string                `json:"unfit,omitempty"`
+	CheckRetryAt      time.Time             `json:"check_retry_at,omitzero"`
+	Outage            *SummaryOutage        `json:"outage,omitempty"`
+	EvictionHoldUntil time.Time             `json:"eviction_hold_until,omitzero"`
+	Brake             *ReembedBrake         `json:"brake,omitempty"`
+	YieldingUntil     time.Time             `json:"yielding_until,omitzero"`
+	LastFailure       *SummaryWriterFailure `json:"last_failure,omitempty"`
+}
+
+// SummaryOutage mirrors api.SummaryOutage.
+type SummaryOutage struct {
+	Since time.Time `json:"since"`
+	Error string    `json:"error"`
+}
+
+// SummaryWriterFailure mirrors api.SummaryWriterFailure.
+type SummaryWriterFailure struct {
+	Cause      string    `json:"cause"`
+	At         time.Time `json:"at"`
+	Error      string    `json:"error,omitempty"`
+	DocumentID string    `json:"document_id,omitempty"`
 }
 
 // UnderstandingHealth mirrors api.UnderstandingHealth: whether search
@@ -259,8 +299,9 @@ func (c *Client) Healthz(ctx context.Context) (*Health, error) {
 }
 
 // Stats mirrors api.Stats. CardsStale is 0 from a daemon that predates
-// counting the cards left to embed, and Reembed nil from one that predates
-// chunk context.
+// counting the cards left to embed, Reembed nil from one that predates
+// chunk context, and Summaries nil while summaries are off or from a
+// daemon that predates them.
 type Stats struct {
 	Version          string         `json:"version"`
 	BookmarksTotal   int            `json:"bookmarks_total"`
@@ -269,6 +310,19 @@ type Stats struct {
 	JobsByStatus     map[string]int `json:"jobs_by_status,omitempty"`
 	CardsStale       int            `json:"cards_stale"`
 	Reembed          *ReembedStats  `json:"reembed,omitempty"`
+	Summaries        *SummaryStats  `json:"summaries,omitempty"`
+}
+
+// SummaryStats mirrors api.SummaryStats.
+type SummaryStats struct {
+	Written    int       `json:"written"`
+	ToWrite    int       `json:"to_write"`
+	Outdated   int       `json:"outdated"`
+	Failed     int       `json:"failed"`
+	NotThePage int       `json:"not_the_page"`
+	CountedAt  time.Time `json:"counted_at"`
+	PerMinute  float64   `json:"per_minute,omitempty"`
+	ETASeconds int64     `json:"eta_seconds,omitempty"`
 }
 
 // ReembedStats mirrors api.ReembedStats.
@@ -450,8 +504,37 @@ type Document struct {
 	State             string      `json:"state"`
 	FailureCause      string      `json:"failure_cause,omitempty"` // why a failed or dead document failed
 	CurrentExtraction *Extraction `json:"current_extraction,omitempty"`
-	CreatedAt         time.Time   `json:"created_at"`
-	UpdatedAt         time.Time   `json:"updated_at"`
+	// Summary and SummaryFailure are the document's summary and its last
+	// failure for good; nil when it has none, or from a daemon that
+	// predates summaries.
+	Summary        *DocumentSummary `json:"summary,omitempty"`
+	SummaryFailure *SummaryFailure  `json:"summary_failure,omitempty"`
+	CreatedAt      time.Time        `json:"created_at"`
+	UpdatedAt      time.Time        `json:"updated_at"`
+}
+
+// DocumentSummary mirrors api.SummaryResponse.
+type DocumentSummary struct {
+	Kind          string    `json:"kind"`
+	Site          string    `json:"site,omitempty"`
+	Author        string    `json:"author,omitempty"`
+	About         string    `json:"about,omitempty"`
+	Entities      []string  `json:"entities"`
+	Claims        []string  `json:"claims"`
+	Descriptions  []string  `json:"descriptions"`
+	Model         string    `json:"model"`
+	PromptVersion string    `json:"prompt_version"`
+	ExtractionID  string    `json:"extraction_id"`
+	WrittenAt     time.Time `json:"written_at"`
+	Current       bool      `json:"current"`
+	Outdated      bool      `json:"outdated"`
+}
+
+// SummaryFailure mirrors api.SummaryFailureResponse.
+type SummaryFailure struct {
+	At           time.Time `json:"at"`
+	Error        string    `json:"error"`
+	ExtractionID string    `json:"extraction_id"`
 }
 
 // Extraction mirrors api.ExtractionResponse. MarkdownPath is the absolute
@@ -697,6 +780,22 @@ func (c *Client) RefetchAll(ctx context.Context, opts RefetchAllOpts) (*RefetchA
 	}
 	var out RefetchAllResponse
 	if err := c.do(ctx, http.MethodPost, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// SummarizeAllResponse is the body of POST /v1/documents/summarize-all.
+type SummarizeAllResponse struct {
+	SummariesOwed int `json:"summaries_owed"`
+}
+
+// SummarizeAll owes a rewrite to the summaries in scope (outdated or
+// all), which the daemon's summary pass then writes.
+func (c *Client) SummarizeAll(ctx context.Context, scope string) (*SummarizeAllResponse, error) {
+	var out SummarizeAllResponse
+	if err := c.do(ctx, http.MethodPost, "/v1/documents/summarize-all?scope="+url.QueryEscape(scope), nil,
+		&out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -977,6 +1076,17 @@ const (
 	FreshParams = "params"
 )
 
+// What a due rebuild waits for (InterestsState.WaitingFor).
+const (
+	// WaitingReembedding: a re-embedding's index jobs to drain.
+	WaitingReembedding = "reembedding"
+	// WaitingEmbeddingCheck: the first embedding check since the daemon
+	// started.
+	WaitingEmbeddingCheck = "embedding_check"
+	// WaitingSettle: the library to settle.
+	WaitingSettle = "settle"
+)
+
 // InterestsState mirrors api.InterestsState: where automatic rebuilds of
 // the interests stand. Unset times are zero.
 type InterestsState struct {
@@ -987,10 +1097,14 @@ type InterestsState struct {
 	ChangedDocuments int       `json:"changed_documents,omitempty"`
 	RebuildAt        int       `json:"rebuild_at,omitempty"`
 	DueSince         time.Time `json:"due_since,omitzero"`
-	FreshOwed        string    `json:"fresh_owed,omitempty"`
-	HeldReason       string    `json:"held_reason,omitempty"`
-	RetryAt          time.Time `json:"retry_at,omitzero"`
-	LastError        string    `json:"last_error,omitempty"`
+	// WaitingFor is what a due rebuild waits for (WaitingReembedding and
+	// the others); empty in any other state, and from a daemon that
+	// predates saying so.
+	WaitingFor string    `json:"waiting_for,omitempty"`
+	FreshOwed  string    `json:"fresh_owed,omitempty"`
+	HeldReason string    `json:"held_reason,omitempty"`
+	RetryAt    time.Time `json:"retry_at,omitzero"`
+	LastError  string    `json:"last_error,omitempty"`
 	// Map is nil from a daemon that predates it, and whenever it says
 	// nothing of the map.
 	Map *InterestsMap `json:"map,omitempty"`

@@ -83,3 +83,27 @@ func TestShellJoin(t *testing.T) {
 	assert.Equal(t, "/opt/homebrew/bin/brew install ollama", ShellJoin([]string{"/opt/homebrew/bin/brew", "install", "ollama"}))
 	assert.Equal(t, "/usr/bin/open -a 'Ollama App'", ShellJoin([]string{"/usr/bin/open", "-a", "Ollama App"}))
 }
+
+// TestTextProblem: a text over its cap once trimmed, or holding a control
+// or format character, is refused, saying which; the zero-width joiners
+// that shape words stay.
+func TestTextProblem(t *testing.T) {
+	for _, tc := range []struct {
+		text     string
+		maxBytes int
+		want     string
+	}{
+		{"kafka streams", 100, ""},
+		{"  ten bytes!  ", 10, ""},
+		{"eleven bytes", 10, "one of 12 bytes, at most 10"},
+		{"line\nbreak", 100, "one with a control character"},
+		{"tab\there", 100, "one with a control character"},
+		{"right\u202eto left", 100, "one with a format character"},
+		{"zero\u200bwidth", 100, "one with a format character"},
+		{"soft\u00adhyphen", 100, "one with a format character"},
+		{"می\u200cخواهم", 100, ""},
+		{"👩\u200d💻", 100, ""},
+	} {
+		assert.Equal(t, tc.want, TextProblem(tc.text, tc.maxBytes), "%q", tc.text)
+	}
+}

@@ -61,8 +61,9 @@ const (
 	Announce
 	// Offer asks one yes-or-no question, yes by default, and a no skips
 	// the fix, saying what it leaves (Fix.Declined), instead of stopping
-	// the run: pulling a model only search understanding uses, without
-	// which searches use their words.
+	// the run: pulling a model only roles that don't pull alone write with
+	// (search understanding, whose searches use their words without it,
+	// and document summaries, which wait for it).
 	Offer
 )
 

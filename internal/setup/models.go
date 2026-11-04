@@ -9,6 +9,7 @@ import (
 
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/ollama"
+	"github.com/samsar/curio/internal/summarize"
 	"github.com/samsar/curio/internal/understand"
 )
 
@@ -23,14 +24,26 @@ const (
 	fromDaemonDefault                   // config.yaml sets none, so the daemon's default
 )
 
-// wanted is a model and the Ollama that serves it. An optional one is
-// wanted only by roles that don't pull alone (config.Role.PullsAlone):
-// search understanding, whose searches use their words without it, so
+// wanted is a model and the Ollama that serves it, and the roles that
+// write with it. An optional one is wanted only by roles that don't pull
+// alone (config.Role.PullsAlone): search understanding, whose searches use
+// their words without it, and document summaries, which wait for it; so
 // curio up offers it and a no leaves it out.
 type wanted struct {
 	Model
 	baseURL  string
 	optional bool
+	roles    []config.Role
+}
+
+// withholders say, for each role whose requests carry the user's own
+// content, why none may go where its model runs ("" when they may): the
+// questions a search sends the planner, the pages the summaries send
+// theirs. A withheld role's model would write nothing, so it is neither
+// pulled nor offered.
+var withholders = map[config.Role]func(config.Config) string{
+	config.RolePlanner:   func(c config.Config) string { return understand.OptionsFrom(c).Withheld },
+	config.RoleSummaries: func(c config.Config) string { return summarize.OptionsFrom(c).Withheld },
 }
 
 // picks are the models the home needs: the embedding model always, and
@@ -101,16 +114,22 @@ func (w *world) pick(ctx context.Context, hs homeState) (picks, error) {
 	if len(roles) == 0 {
 		p.notes = append(p.notes, "no writing model is pulled: no role writes with one "+
 			"(interest labels are off with insight.enabled false or insight.labeling not llm, "+
-			"search understanding with search.understand false)")
+			"search understanding with search.understand false, document summaries unless summaries.enabled is true)")
 		return p, nil
 	}
-	if withheld := understand.OptionsFrom(cfg).Withheld; withheld != "" && slices.Contains(roles, config.RolePlanner) {
-		// Its model would write nothing: no question goes to it.
-		roles = slices.DeleteFunc(roles, func(r config.Role) bool { return r == config.RolePlanner })
-		p.notes = append(p.notes, "search understanding's model isn't pulled: "+withheld)
-		if len(roles) == 0 {
-			return p, nil
+	roles = slices.DeleteFunc(roles, func(r config.Role) bool {
+		withheld := withholders[r]
+		if withheld == nil {
+			return false
 		}
+		reason := withheld(cfg)
+		if reason != "" {
+			p.notes = append(p.notes, possessive(r.UsedFor())+" model isn't pulled: "+reason)
+		}
+		return reason != ""
+	})
+	if len(roles) == 0 {
+		return p, nil
 	}
 	var inheriting []config.Role
 	for _, r := range roles {
@@ -119,7 +138,7 @@ func (w *world) pick(ctx context.Context, hs homeState) (picks, error) {
 			inheriting = append(inheriting, r)
 			continue
 		}
-		p.addWriting(wanted{knownModel(own), cfg.Generation.Role(r).BaseURL, !r.PullsAlone()})
+		p.addWriting(wanted{knownModel(own), cfg.Generation.Role(r).BaseURL, !r.PullsAlone(), []config.Role{r}})
 		p.notes = append(p.notes, fmt.Sprintf("keeping generation.roles.%s.model: %s from config.yaml", r, own))
 	}
 	if len(inheriting) == 0 {
@@ -136,16 +155,17 @@ func (w *world) pick(ctx context.Context, hs homeState) (picks, error) {
 	}
 	p.generation = &wanted{Model: knownModel(model), baseURL: cfg.Generation.BaseURL}
 	for _, r := range inheriting {
-		p.addWriting(wanted{p.generation.Model, cfg.Generation.Role(r).BaseURL, !r.PullsAlone()})
+		p.addWriting(wanted{p.generation.Model, cfg.Generation.Role(r).BaseURL, !r.PullsAlone(), []config.Role{r}})
 	}
 	return p, nil
 }
 
 // addWriting adds m to the writing models unless it is there already,
-// then required if either wants it so.
+// then required if either wants it so, written with by both's roles.
 func (p *picks) addWriting(m wanted) {
 	if i := slices.IndexFunc(p.writing, m.same); i >= 0 {
 		p.writing[i].optional = p.writing[i].optional && m.optional
+		p.writing[i].roles = append(p.writing[i].roles, m.roles...)
 		return
 	}
 	p.writing = append(p.writing, m)
@@ -261,25 +281,68 @@ func (w *world) checkModels(ctx context.Context) Result {
 func required(m wanted) bool { return !m.optional }
 
 // offerOptional is the models' check when only optional models are
-// missing, those only search understanding writes with: a warning, never
-// a failure, since searches use their words without them, with a pull
-// offered that a no skips (Offer), and nothing offered when the disk
-// can't take them.
+// missing, those only roles that don't pull alone write with: a warning,
+// never a failure, since each of those roles does without (withoutModel),
+// with a pull offered that a no skips (Offer), and nothing offered when
+// the disk can't take them. Each line names the roles that use them.
 func (w *world) offerOptional(ctx context.Context, missing []wanted, res Result) Result {
-	without := fmt.Sprintf("%s isn't pulled, and only search understanding writes with it: searches use their "+
-		"words until it is", names(missing))
+	var roles []config.Role
+	for _, m := range missing {
+		for _, r := range m.roles {
+			if !slices.Contains(roles, r) {
+				roles = append(roles, r)
+			}
+		}
+	}
+	slices.SortFunc(roles, func(a, b config.Role) int {
+		return slices.Index(config.Roles(), a) - slices.Index(config.Roles(), b)
+	})
+	uses, without, off := make([]string, 0, len(roles)), make([]string, 0, len(roles)), make([]string, 0, len(roles))
+	for _, r := range roles {
+		d := withoutModel[r]
+		uses, without, off = append(uses, d.uses), append(without, d.without), append(off, d.off)
+	}
+	// "would write" agrees with a role's name in either number.
+	it, they, is := "it", "it", "is"
+	if len(missing) > 1 {
+		it, they, is = "them", "they", "are"
+	}
+	detail := fmt.Sprintf("%s %sn't pulled, and only %s would write with %s: %s until %s %s", names(missing), is,
+		joinAnd(uses), it, joinAnd(without), they, is)
 	machine, _ := w.probeMachine(ctx) // the machine check reports a failed probe; its volumes are then unknown
 	if short := diskShortage(machine, models(missing)); short != "" {
-		res.Status, res.Detail = Warn, without
+		res.Status, res.Detail = Warn, detail
 		res.Hint = "not enough disk space to pull it: " + short + "; free up space and run curio up again"
 		return res
 	}
-	res.Status, res.Detail = Warn, without
-	res.Fix = &Fix{Summary: "pull " + sized(missing) + " for search understanding", Consent: Offer,
-		Declined: fmt.Sprintf("not pulling %s: searches use their words; run curio up again to pull it, or set "+
-			"search.understand: false to stop understanding questions", names(missing))}
+	res.Status, res.Detail = Warn, detail
+	res.Fix = &Fix{Summary: "pull " + sized(missing) + " for " + joinAnd(uses), Consent: Offer,
+		Declined: fmt.Sprintf("not pulling %s: %s; run curio up again to pull it, or set %s", names(missing),
+			joinAnd(without), joinAnd(off))}
 	return res
 }
+
+// withoutModel says, for each role that doesn't pull its model alone, what
+// it writes, what goes without it while its model isn't pulled, and the
+// key and phrase that turn it off. Every such role has a row
+// (TestWithoutModel_EveryRoleThatDoesWithout).
+var withoutModel = map[config.Role]struct{ uses, without, off string }{
+	config.RolePlanner: {"search understanding", "searches use their words",
+		"search.understand: false to stop understanding questions"},
+	config.RoleSummaries: {"document summaries", "pages get no summary", "summaries.enabled: false to write none"},
+}
+
+// possessive is name's possessive: "search understanding's", "document
+// summaries'".
+func possessive(name string) string {
+	if strings.HasSuffix(name, "s") {
+		return name + "'"
+	}
+	return name + "'s"
+}
+
+// joinAnd joins items with " and ".
+func joinAnd(items []string) string { return strings.Join(items, " and ") }
 
 // modelsStep picks the models and pulls the missing ones, with progress.
 type modelsStep struct{ w *world }

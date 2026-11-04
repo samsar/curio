@@ -27,13 +27,14 @@ const reportFormat = 1
 // config and query file can differ in. It never holds a comparison with
 // its baseline, so any report can be the next run's baseline.
 type report struct {
-	Format      int             `json:"format"`
-	GeneratedAt time.Time       `json:"generated_at"`
-	Provenance  provenance      `json:"provenance"`
-	Library     libraryReport   `json:"library"`
-	Planner     *plannerReport  `json:"planner,omitempty"` // the planner, when a planned variant planned
-	Reindex     *reindexReport  `json:"reindex,omitempty"` // with -reindex
-	Variants    []variantReport `json:"variants"`
+	Format      int              `json:"format"`
+	GeneratedAt time.Time        `json:"generated_at"`
+	Provenance  provenance       `json:"provenance"`
+	Library     libraryReport    `json:"library"`
+	Planner     *plannerReport   `json:"planner,omitempty"`   // the planner, when a planned variant planned
+	Reindex     *reindexReport   `json:"reindex,omitempty"`   // with -reindex
+	Summaries   *summariesReport `json:"summaries,omitempty"` // with -summarize or -summaries
+	Variants    []variantReport  `json:"variants"`
 }
 
 // provenance is what the run measured: which curio, copy, query file and
@@ -72,6 +73,7 @@ type searchProvenance struct {
 	FieldsWeight        float64 `json:"fields_weight"`
 	CardsWeight         float64 `json:"cards_weight"`
 	TitleWeight         float64 `json:"title_weight"`
+	SummaryWeight       float64 `json:"summary_weight"`
 	RRFK                int     `json:"rrf_k"`
 	Collapse            string  `json:"collapse"`
 	EmbedTimeoutSeconds int     `json:"embed_timeout_seconds"`
@@ -193,7 +195,8 @@ func newReport(opts options, cfg config.Config, lib *devtool.Copy, qf queryFile,
 			Dim: cfg.Embedding.Dim, BaseURL: cfg.Embedding.BaseURL, QueryPrefix: cfg.Embedding.QueryPrefix},
 		Search: searchProvenance{BM25Weight: cfg.Search.BM25Weight, VectorWeight: cfg.Search.VectorWeight,
 			FieldsWeight: cfg.Search.FieldsWeight, CardsWeight: cfg.Search.CardsWeight,
-			TitleWeight: cfg.Search.TitleWeight, RRFK: cfg.Search.RRFK, Collapse: cfg.Search.Collapse,
+			TitleWeight: cfg.Search.TitleWeight, SummaryWeight: cfg.Search.SummaryWeight, RRFK: cfg.Search.RRFK,
+			Collapse:            cfg.Search.Collapse,
 			EmbedTimeoutSeconds: cfg.Search.EmbedTimeoutSeconds},
 		K: store.MaxSearchK, Variants: names, Baseline: opts.baseline,
 	}, Library: libraryReport{
@@ -312,6 +315,9 @@ func (r *report) text(b *bytes.Buffer, base *baseline) {
 			"chunks_vec in %d vec0 chunks before, %d after\n", x.Documents, x.Chunks, x.TookMS/1000, x.ChunksPerSecond,
 			x.ContextVersion, x.VectorBlocksBefore, x.VectorBlocksAfter)
 	}
+	if r.Summaries != nil {
+		b.WriteString(r.Summaries.text())
+	}
 	fmt.Fprintf(b, "Searched with %s: %s; k %d; variants %s\n", configName(p.Config), searchSettings(p),
 		p.K, strings.Join(p.Variants, ", "))
 	r.writePlanner(b)
@@ -400,8 +406,9 @@ func (r *report) queryCount() int {
 func searchSettings(p provenance) string {
 	s := p.Search
 	return fmt.Sprintf("embedding %s; bm25_weight %g, vector_weight %g, fields_weight %g, cards_weight %g, "+
-		"title_weight %g, rrf_k %d, collapse %s, embed_timeout_seconds %d", p.Embedding.Model, s.BM25Weight,
-		s.VectorWeight, s.FieldsWeight, s.CardsWeight, s.TitleWeight, s.RRFK, s.Collapse, s.EmbedTimeoutSeconds)
+		"title_weight %g, summary_weight %g, rrf_k %d, collapse %s, embed_timeout_seconds %d", p.Embedding.Model,
+		s.BM25Weight, s.VectorWeight, s.FieldsWeight, s.CardsWeight, s.TitleWeight, s.SummaryWeight, s.RRFK,
+		s.Collapse, s.EmbedTimeoutSeconds)
 }
 
 // shortHash is a SHA-256's first 12 hex digits.

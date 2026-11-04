@@ -43,3 +43,19 @@ func TestSchedulerConfig_E2E(t *testing.T) {
 	_, err = schedulerConfig()
 	require.ErrorContains(t, err, e2eTimingEnv)
 }
+
+// TestParseSummaryTiming: the e2e build's summary knob sets the durations
+// it names, and refuses what it can't read.
+func TestParseSummaryTiming(t *testing.T) {
+	got, err := parseSummaryTiming("quiet=50ms, brake_min=1s")
+	require.NoError(t, err)
+	assert.Equal(t, passTiming{quiet: 50 * time.Millisecond, brakeMin: time.Second}, got)
+	for raw, want := range map[string]string{
+		"quiet=50ms,rest=1s": `unknown key "rest"`,
+		"quiet":              `"quiet" is not key=duration`,
+		"check=0s":           "check: 0s is not a positive duration",
+	} {
+		_, err := parseSummaryTiming(raw)
+		assert.ErrorContains(t, err, want, raw)
+	}
+}

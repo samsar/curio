@@ -57,20 +57,20 @@ func TestUp_ConfigWithoutAWritingModel(t *testing.T) {
 	assert.Equal(t, cfg, mustRead(t, home.ConfigPath()))
 }
 
-// TestUp_NoWritingModel: with interest labels and search understanding
-// off, no writing model is pulled, and the plan says so once, naming the
-// keys that turn each role off.
+// TestUp_NoWritingModel: with interest labels, search understanding and
+// summaries off, no writing model is pulled, and the plan says so once,
+// naming the keys that turn each role off.
 func TestUp_NoWritingModel(t *testing.T) {
 	h := newHarness(t)
 	home := h.writeHome(genModel)
 	require.NoError(t, os.WriteFile(home.ConfigPath(), []byte(mustRead(t, home.ConfigPath())+
-		"insight:\n  labeling: terms\nsearch:\n  understand: false\n"), 0o600))
+		"insight:\n  labeling: terms\nsearch:\n  understand: false\nsummaries:\n  enabled: false\n"), 0o600))
 	res := checkStep(t, h.runner(setuptest.NewUI(t), setup.Options{}), "models")
 	assert.Equal(t, "pull qwen3-embedding:0.6b (639 MB)", res.Fix.Summary)
 	require.Len(t, res.Notes, 1)
 	assert.Equal(t, "no writing model is pulled: no role writes with one (interest labels are off with "+
-		"insight.enabled false or insight.labeling not llm, search understanding with search.understand false)",
-		res.Notes[0])
+		"insight.enabled false or insight.labeling not llm, search understanding with search.understand false, "+
+		"document summaries unless summaries.enabled is true)", res.Notes[0])
 	assert.Empty(t, res.Hint, "no writing model to pick another of")
 
 	ui := setuptest.NewUI(t, setuptest.Yes().About("Pull qwen3-embedding:0.6b"), setuptest.Yes().About("launchd"))
@@ -79,33 +79,35 @@ func TestUp_NoWritingModel(t *testing.T) {
 	assert.Equal(t, []string{embedModel}, h.ollama.Pulls())
 }
 
-// TestUp_PlannerModelWithConsent: with interest labels off and search
-// understanding on, as a 2.6 home with term labels is after the upgrade,
-// the daemon pulls no writing model (the planner's rides only on another
-// role's pull), so curio up offers generation.model for search
-// understanding: a warning, never a failure, which doctor shares. A no
-// leaves it out, says what that leaves and how to get it, and the run goes
-// on; a yes pulls it. config.yaml is never edited.
+// TestUp_PlannerModelWithConsent: with interest labels off, search
+// understanding on, as a 2.7 home with term labels is after the upgrade,
+// and summaries turned on, the daemon pulls no writing model (the
+// planner's and the summaries' ride only on another role's pull), so
+// curio up offers generation.model for both: a warning, never a failure,
+// which doctor shares. A no leaves it out, says what that leaves and how
+// to get it, and the run goes on; a yes pulls it. config.yaml is never
+// edited.
 func TestUp_PlannerModelWithConsent(t *testing.T) {
 	h := newHarness(t)
 	h.ollama = setuptest.NewOllama(t, "0.34.4", embedModel)
 	home := h.writeHome(genModel)
-	cfg := mustRead(t, home.ConfigPath()) + "insight:\n  labeling: terms\n"
+	cfg := mustRead(t, home.ConfigPath()) + "insight:\n  labeling: terms\nsummaries:\n  enabled: true\n"
 	require.NoError(t, os.WriteFile(home.ConfigPath(), []byte(cfg), 0o600))
 	res := checkStep(t, h.runner(setuptest.NewUI(t), setup.Options{}), "models")
-	assert.Equal(t, setup.Warn, res.Status, "doctor warns, never fails, for the planner's model alone")
-	assert.Equal(t, genModel+" isn't pulled, and only search understanding writes with it: searches use their "+
-		"words until it is", res.Detail)
+	assert.Equal(t, setup.Warn, res.Status, "doctor warns, never fails, for a model only optional roles write with")
+	assert.Equal(t, genModel+" isn't pulled, and only search understanding and document summaries would write "+
+		"with it: searches use their words and pages get no summary until it is", res.Detail)
 	require.NotNil(t, res.Fix)
 	assert.Equal(t, setup.Offer, res.Fix.Consent)
-	assert.Equal(t, "pull "+genModel+" (19 GB) for search understanding", res.Fix.Summary)
+	assert.Equal(t, "pull "+genModel+" (19 GB) for search understanding and document summaries", res.Fix.Summary)
 
 	declined := setuptest.NewUI(t, setuptest.No().About("Pull "+genModel), setuptest.Yes().About("launchd"))
 	_, out, err := h.up(declined, setup.Options{})
-	require.NoError(t, err, "a no to the planner's model doesn't fail curio up: %v", declined.Events())
+	require.NoError(t, err, "a no to the optional model doesn't fail curio up: %v", declined.Events())
 	assert.Empty(t, h.ollama.Pulls(), "nothing is pulled without a yes")
-	assert.Contains(t, declined.Lines("info"), "models: not pulling "+genModel+": searches use their words; run "+
-		"curio up again to pull it, or set search.understand: false to stop understanding questions")
+	assert.Contains(t, declined.Lines("info"), "models: not pulling "+genModel+": searches use their words and "+
+		"pages get no summary; run curio up again to pull it, or set search.understand: false to stop "+
+		"understanding questions and summaries.enabled: false to write none")
 	var warned bool
 	for _, w := range out.Status.Warnings {
 		warned = warned || strings.HasPrefix(w.Text, "models: "+genModel+" isn't pulled")
@@ -117,6 +119,71 @@ func TestUp_PlannerModelWithConsent(t *testing.T) {
 	_, _, err = h.up(ui, setup.Options{})
 	require.NoError(t, err, "%v", ui.Events())
 	assert.Equal(t, []string{genModel}, h.ollama.Pulls())
+}
+
+// TestUp_SummariesModelWithConsent: a model only the summaries write
+// with is optional, offered for them alone; a no leaves pages without a
+// summary and the run goes on.
+func TestUp_SummariesModelWithConsent(t *testing.T) {
+	h := newHarness(t)
+	h.ollama = setuptest.NewOllama(t, "0.34.4", embedModel, genModel)
+	home := h.writeHome(genModel)
+	// Turned on: summaries are off by default.
+	cfg := strings.Replace(mustRead(t, home.ConfigPath()), "generation:\n",
+		"generation:\n  roles:\n    summaries:\n      model: gemma4:12b\n", 1) + "summaries:\n  enabled: true\n"
+	require.NoError(t, os.WriteFile(home.ConfigPath(), []byte(cfg), 0o600))
+	res := checkStep(t, h.runner(setuptest.NewUI(t), setup.Options{}), "models")
+	assert.Equal(t, setup.Warn, res.Status)
+	assert.Equal(t, "gemma4:12b isn't pulled, and only document summaries would write with it: pages get no "+
+		"summary until it is", res.Detail)
+	require.NotNil(t, res.Fix)
+	assert.Equal(t, setup.Offer, res.Fix.Consent)
+	assert.Equal(t, "pull gemma4:12b (7.6 GB) for document summaries", res.Fix.Summary)
+
+	declined := setuptest.NewUI(t, setuptest.No().About("Pull gemma4:12b"), setuptest.Yes().About("launchd"))
+	_, _, err := h.up(declined, setup.Options{})
+	require.NoError(t, err, "%v", declined.Events())
+	assert.Empty(t, h.ollama.Pulls())
+	assert.Contains(t, declined.Lines("info"), "models: not pulling gemma4:12b: pages get no summary; run curio up "+
+		"again to pull it, or set summaries.enabled: false to write none")
+}
+
+// TestUp_NoSummariesModelWhileOff: summaries off by default write nothing,
+// so a model only they would write with is neither pulled nor offered,
+// whatever config.yaml names for their role.
+func TestUp_NoSummariesModelWhileOff(t *testing.T) {
+	h := newHarness(t)
+	h.ollama = setuptest.NewOllama(t, "0.34.4", embedModel, genModel)
+	home := h.writeHome(genModel)
+	cfg := strings.Replace(mustRead(t, home.ConfigPath()), "generation:\n",
+		"generation:\n  roles:\n    summaries:\n      model: gemma4:12b\n", 1)
+	require.NoError(t, os.WriteFile(home.ConfigPath(), []byte(cfg), 0o600))
+	res := checkStep(t, h.runner(setuptest.NewUI(t), setup.Options{}), "models")
+	assert.Equal(t, setup.OK, res.Status, res.Detail)
+	assert.Nil(t, res.Fix, "nothing offered for summaries that are off")
+	_, _, err := h.up(setuptest.NewUI(t, setuptest.Yes().About("launchd")), setup.Options{})
+	require.NoError(t, err)
+	assert.Empty(t, h.ollama.Pulls())
+}
+
+// TestUp_OptionalModelsOfTwoRoles: two models only roles that don't pull
+// alone write with, the planner's and the summaries', are offered in one
+// line that names both roles.
+func TestUp_OptionalModelsOfTwoRoles(t *testing.T) {
+	h := newHarness(t)
+	h.ollama = setuptest.NewOllama(t, "0.34.4", embedModel, genModel)
+	home := h.writeHome(genModel)
+	cfg := strings.Replace(mustRead(t, home.ConfigPath()), "generation:\n", "generation:\n  roles:\n"+
+		"    planner:\n      model: gemma4:12b\n    summaries:\n      model: qwen3:4b-instruct\n", 1) +
+		"summaries:\n  enabled: true\n"
+	require.NoError(t, os.WriteFile(home.ConfigPath(), []byte(cfg), 0o600))
+	res := checkStep(t, h.runner(setuptest.NewUI(t), setup.Options{}), "models")
+	assert.Equal(t, setup.Warn, res.Status)
+	assert.Equal(t, "gemma4:12b and qwen3:4b-instruct aren't pulled, and only search understanding and document "+
+		"summaries would write with them: searches use their words and pages get no summary until they are",
+		res.Detail)
+	require.NotNil(t, res.Fix)
+	assert.Equal(t, setup.Offer, res.Fix.Consent)
 }
 
 // TestUp_SharedPlannerModelIsRequired: on a default home the labels and
@@ -132,10 +199,11 @@ func TestUp_SharedPlannerModelIsRequired(t *testing.T) {
 	assert.NotEqual(t, setup.Offer, res.Fix.Consent, "the labels' model is never optional")
 }
 
-// TestUp_PlannerWithheld: a planner whose questions may not go where its
-// model runs (generation.base_url off this machine, the role naming no
-// server) writes nothing, so its model is neither pulled nor offered, and
-// the plan says why; the labels' model on that server still is.
+// TestUp_PlannerWithheld: a planner whose questions, and summaries, turned
+// on, whose pages may not go where their model runs (generation.base_url
+// off this machine, the roles naming no server) write nothing, so their
+// model is neither pulled nor offered, and the plan says why for each; the
+// labels' model on that server still is.
 func TestUp_PlannerWithheld(t *testing.T) {
 	h := newHarness(t)
 	h.ollama = setuptest.NewOllama(t, "0.34.4", embedModel)
@@ -143,12 +211,15 @@ func TestUp_PlannerWithheld(t *testing.T) {
 	cfg := mustRead(t, home.ConfigPath())
 	at := strings.LastIndex(cfg, "  base_url: ")
 	remote := cfg[:at] + "  base_url: http://gpu-box.lan:11434\n"
-	require.NoError(t, os.WriteFile(home.ConfigPath(), []byte(remote+"insight:\n  labeling: terms\n"), 0o600))
+	require.NoError(t, os.WriteFile(home.ConfigPath(), []byte(remote+"insight:\n  labeling: terms\nsummaries:\n"+
+		"  enabled: true\n"), 0o600))
 	res := checkStep(t, h.runner(setuptest.NewUI(t), setup.Options{}), "models")
 	assert.Equal(t, setup.OK, res.Status, res.Detail)
 	assert.Nil(t, res.Fix)
-	require.NotEmpty(t, res.Notes)
+	require.Len(t, res.Notes, 2)
 	assert.Contains(t, res.Notes[0], "search understanding's model isn't pulled: questions would leave this machine "+
+		"for http://gpu-box.lan:11434")
+	assert.Contains(t, res.Notes[1], "document summaries' model isn't pulled: pages would leave this machine "+
 		"for http://gpu-box.lan:11434")
 }
 
@@ -172,12 +243,14 @@ func TestUp_RoleModel(t *testing.T) {
 		"keeping generation.model: qwen3:4b-instruct from config.yaml"}, res.Notes)
 
 	require.NoError(t, os.WriteFile(home.ConfigPath(), []byte(strings.Replace(labelsOwn, "  roles:\n",
-		"  roles:\n    planner:\n      model: gemma4:12b\n", 1)), 0o600))
+		"  roles:\n    planner:\n      model: gemma4:12b\n    summaries:\n      model: gemma4:12b\n", 1)+
+		"summaries:\n  enabled: true\n"), 0o600))
 	res = checkStep(t, h.runner(setuptest.NewUI(t), setup.Options{}), "models")
 	require.NotNil(t, res.Fix)
 	assert.Equal(t, "pull qwen3-embedding:0.6b (639 MB) and gemma4:12b (7.6 GB)", res.Fix.Summary)
 	assert.Equal(t, []string{"keeping generation.roles.labels.model: gemma4:12b from config.yaml",
-		"keeping generation.roles.planner.model: gemma4:12b from config.yaml"}, res.Notes)
+		"keeping generation.roles.planner.model: gemma4:12b from config.yaml",
+		"keeping generation.roles.summaries.model: gemma4:12b from config.yaml"}, res.Notes)
 
 	res = checkStep(t, h.runner(setuptest.NewUI(t), setup.Options{GenerationModel: "gemma4:26b"}), "models")
 	assert.True(t, res.Blocked())

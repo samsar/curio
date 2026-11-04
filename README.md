@@ -55,6 +55,12 @@ curio schedule 22:00-07:00      # only work overnight (curio schedule off to und
 curio keep-awake on             # stay awake while importing, when plugged in
 ```
 
+curio's writing model can also summarize each page, one at a time: what
+it is, who made it, what it is about and the names it holds. The
+summaries are off by default: search doesn't use them yet, and a pass
+over a library takes hours. `summaries: {enabled: true}` in config.yaml
+turns them on (see [docs/setup.md](docs/setup.md#document-summaries)).
+
 If something seems off, run `curio doctor`: it checks every part and says what to fix.
 
 ## Use it with Claude

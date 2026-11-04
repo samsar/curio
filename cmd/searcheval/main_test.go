@@ -24,7 +24,7 @@ func TestRun_Usage(t *testing.T) {
 			"flag provided but not defined"},
 		{"an unknown variant", []string{"-db", "x.db", "-queries", "q.yaml", "-variants", "hybrid,rerank"}, exitUsage,
 			`unknown variant "rerank" in -variants (the variants are: hybrid, bm25, vector, fields, cards, titles, ` +
-				`planned, planned-filters, planned-rewrites, planned-names)`},
+				`summaries, planned, planned-filters, planned-rewrites, planned-names)`},
 		{"a -today that isn't a day", []string{"-db", "x.db", "-queries", "q.yaml", "-today", "monday"}, exitUsage,
 			`-today "monday" is not a day YYYY-MM-DD`},
 		{"a variant twice", []string{"-db", "x.db", "-queries", "q.yaml", "-variants", "bm25,hybrid,bm25"}, exitUsage,
@@ -34,7 +34,15 @@ func TestRun_Usage(t *testing.T) {
 		{"-reindex alone", []string{"-db", "x.db", "-queries", "q.yaml", "-reindex"}, exitUsage,
 			"-reindex needs -content"},
 		{"-content alone", []string{"-db", "x.db", "-queries", "q.yaml", "-content", "dir"}, exitUsage,
-			"-content is read only with -reindex"},
+			"-content is read only with -reindex or -summarize"},
+		{"-summarize alone", []string{"-db", "x.db", "-queries", "q.yaml", "-summarize"}, exitUsage,
+			"-summarize needs -content"},
+		{"-summarize and -summaries", []string{"-db", "x.db", "-queries", "q.yaml", "-summarize", "-content", "dir",
+			"-summaries", "s.jsonl"}, exitUsage, "-summarize writes the summaries and -summaries replays them"},
+		{"-documents without -summarize", []string{"-db", "x.db", "-queries", "q.yaml", "-documents", "ids.txt"},
+			exitUsage, "-documents and -summaries-out are read only with -summarize"},
+		{"-summaries-out without -summarize", []string{"-db", "x.db", "-queries", "q.yaml", "-summaries-out", "s.jsonl"},
+			exitUsage, "-documents and -summaries-out are read only with -summarize"},
 		{"help", []string{"-h"}, exitOK, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -44,8 +52,8 @@ func TestRun_Usage(t *testing.T) {
 			assert.Contains(t, res.stderr, tc.says)
 			assert.Contains(t, res.stderr, "usage: searcheval -db <copy of curio.db> -queries <file> "+
 				"[-config <config.yaml>] [-json <file>] [-baseline <previous -json>] [-variants hybrid,bm25,vector,"+
-				"fields,cards,titles,planned,planned-filters,planned-rewrites,planned-names] [-today YYYY-MM-DD] "+
-				"[-plans <previous -json>] [-reindex -content <dir>]")
+				"fields,cards,titles,summaries,planned,planned-filters,planned-rewrites,planned-names] [-today YYYY-MM-DD] [-plans <previous -json>] [-reindex] [-content <dir>] "+
+				"[-summarize [-documents <file>] [-summaries-out <file>] | -summaries <file>]")
 		})
 	}
 }

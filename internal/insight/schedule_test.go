@@ -652,7 +652,8 @@ func TestScheduler_ACheckThatFails(t *testing.T) {
 }
 
 // TestScheduler_Snapshot: before any check the state is unknown; then each
-// check records the done run, the counts and, while due, since when.
+// check records the done run, the counts and, while due, since when and
+// what it waits for.
 func TestScheduler_Snapshot(t *testing.T) {
 	w := newWorld(5254)
 	m := newSim(t, w, false)
@@ -662,7 +663,7 @@ func TestScheduler_Snapshot(t *testing.T) {
 	assert.Equal(t, Snapshot{
 		State: StateDue, LastRebuildAt: *w.done.FinishedAt, LastKind: store.RunKindWarm,
 		LastTrigger: store.RunTriggerAuto, Changed: 300, RebuildAt: 263, DueSince: simStart.Add(CheckInterval),
-		Map: simMapState, CheckedAt: simStart.Add(CheckInterval),
+		WaitingFor: WaitingSettle, Map: simMapState, CheckedAt: simStart.Add(CheckInterval),
 	}, snap)
 }
 
@@ -969,4 +970,38 @@ func TestLibrary_ARebuildEndingDuringARead(t *testing.T) {
 	s.Check(ctx)
 	assert.Equal(t, StateCurrent, s.Snapshot().State)
 	assert.Empty(t, enqueued, "the rebuild that ended is not queued again")
+}
+
+// TestDecide_WaitingFor: a due rebuild's snapshot says what it waits for:
+// a re-embedding's fresh rebuild the re-embedding while index jobs are
+// pending or running, then the library to settle; any due rebuild the
+// first embedding check while it is pending; and no other state says
+// anything.
+func TestDecide_WaitingFor(t *testing.T) {
+	built := &store.InterestRun{RunOutcome: store.RunOutcome{Map: simMap, NumDocuments: 100}}
+	reindex := store.InsightState{FreshOwed: store.FreshReindex}
+	for name, tc := range map[string]struct {
+		in    inputs
+		state RebuildState
+		want  WaitingFor
+	}{
+		"re-embedding": {inputs{Reading: Reading{Done: built, Fetched: 100, State: reindex, IndexBusy: 3,
+			LastIndexed: simStart}}, StateDue, WaitingReembedding},
+		"re-embedded, settling": {inputs{Reading: Reading{Done: built, Fetched: 100, State: reindex,
+			LastIndexed: simStart}}, StateDue, WaitingSettle},
+		"the first embedding check": {inputs{Reading: Reading{Done: built, Fetched: 100, State: reindex,
+			IndexBusy: 3}, driftUnchecked: true}, StateDue, WaitingEmbeddingCheck},
+		"current": {inputs{Reading: Reading{Done: built, Fetched: 100}}, StateCurrent, ""},
+		"held": {inputs{Reading: Reading{Done: built, Fetched: 100, State: reindex}, drift: "the embeddings drifted"},
+			StateHeld, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			v := decide(tc.in, simStart, time.Time{}, SchedulerConfig{}.WithDefaults())
+			assert.Equal(t, tc.state, v.snap.State)
+			assert.Equal(t, tc.want, v.snap.WaitingFor)
+			if tc.want != "" {
+				assert.Equal(t, waitingText[tc.want], waitingFor(tc.in, simStart), "the log words the same")
+			}
+		})
+	}
 }

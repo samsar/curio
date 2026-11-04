@@ -62,6 +62,10 @@ type DeferError struct {
 	Until  time.Time
 	Reason string
 	Err    error
+	// Routine marks a deferral its handler expects often and logs itself,
+	// such as a summary a search pre-empted: the worker logs it at DEBUG,
+	// not INFO.
+	Routine bool
 }
 
 func (e *DeferError) Error() string { return e.Err.Error() }
@@ -466,7 +470,12 @@ func (w *Worker) deferJob(ctx context.Context, log *slog.Logger, job *store.Job,
 		log.Error("defer failed", "err", err, "handler_err", de.Err)
 		return
 	}
-	log.Info("job deferred", "until", until, "reason", reason, "err", de.Err, "duration_ms", dur.Milliseconds())
+	level := slog.LevelInfo
+	if de.Routine {
+		level = slog.LevelDebug
+	}
+	log.Log(ctx, level, "job deferred", "until", until, "reason", reason, "err", de.Err,
+		"duration_ms", dur.Milliseconds())
 }
 
 // deferralTime is when a job deferred at now until until runs again: until,

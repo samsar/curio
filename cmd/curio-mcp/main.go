@@ -131,7 +131,9 @@ func registerTools(s *mcp.Server, d daemon) {
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "get_document",
 		Description: "Fetch one saved document's metadata and full extracted markdown by its doc_id " +
-			"(as returned by search_bookmarks or find_related).",
+			"(as returned by search_bookmarks or find_related), with its summary when curio wrote one: what " +
+			"the page is, its site and author, what it is about and the names it holds. A failed or dead " +
+			"document keeps the summary of the page it last read.",
 	}, getDocHandler(d))
 
 	mcp.AddTool(s, &mcp.Tool{
@@ -258,12 +260,70 @@ type getDocInput struct {
 }
 
 type getDocOutput struct {
-	DocID       string `json:"doc_id"`
-	Title       string `json:"title,omitempty"`
-	URL         string `json:"url"`
-	ContentType string `json:"content_type,omitempty"`
-	State       string `json:"state"`
-	Markdown    string `json:"markdown"`
+	DocID       string      `json:"doc_id"`
+	Title       string      `json:"title,omitempty"`
+	URL         string      `json:"url"`
+	ContentType string      `json:"content_type,omitempty"`
+	State       string      `json:"state"`
+	Summary     *docSummary `json:"summary,omitempty"`
+	Markdown    string      `json:"markdown"`
+}
+
+// docSummary is a document's summary as get_document returns it: what the
+// page is, who made it, what it is about, the names it holds, its claims,
+// how someone might describe it; the model that wrote it and when; whether
+// it read the page now stored (current), and whether another model or
+// prompt than the daemon's now wrote it (outdated).
+type docSummary struct {
+	Kind         string    `json:"kind"`
+	Site         string    `json:"site,omitempty"`
+	Author       string    `json:"author,omitempty"`
+	About        string    `json:"about,omitempty"`
+	Entities     []string  `json:"entities,omitempty"`
+	Claims       []string  `json:"claims,omitempty"`
+	Descriptions []string  `json:"descriptions,omitempty"`
+	Model        string    `json:"model,omitempty"`
+	WrittenAt    time.Time `json:"written_at,omitzero"`
+	Current      bool      `json:"current"`
+	Outdated     bool      `json:"outdated"`
+}
+
+// toDocSummary is s as get_document returns it; nil for none.
+func toDocSummary(s *client.DocumentSummary) *docSummary {
+	if s == nil {
+		return nil
+	}
+	return &docSummary{Kind: s.Kind, Site: s.Site, Author: s.Author, About: s.About, Entities: s.Entities,
+		Claims: s.Claims, Descriptions: s.Descriptions, Model: s.Model, WrittenAt: s.WrittenAt, Current: s.Current,
+		Outdated: s.Outdated}
+}
+
+// summaryText is the short block get_document's text starts with for a
+// document with a summary: its about line, kind, site and author, and the
+// names it holds, then the document's state when it isn't fetched; ""
+// without one.
+func summaryText(s *docSummary, state string) string {
+	if s == nil {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("Summary")
+	if s.Kind != "" {
+		b.WriteString(" (" + s.Kind + ")")
+	}
+	b.WriteString(":")
+	for _, line := range []string{s.About, s.Site, s.Author} {
+		if line != "" {
+			b.WriteString("\n" + line)
+		}
+	}
+	if len(s.Entities) > 0 {
+		b.WriteString("\nNames: " + strings.Join(s.Entities, ", "))
+	}
+	if state != "" && state != "fetched" {
+		b.WriteString("\n(the document is " + state + "; the summary is of the page it last read)")
+	}
+	return b.String() + "\n\n"
 }
 
 func getDocHandler(d daemon) mcp.ToolHandlerFor[getDocInput, getDocOutput] {
@@ -282,8 +342,9 @@ func getDocHandler(d daemon) mcp.ToolHandlerFor[getDocInput, getDocOutput] {
 		}
 		out := getDocOutput{
 			DocID: doc.ID, Title: docTitle(*doc), URL: doc.URL,
-			ContentType: doc.ContentType, State: doc.State,
+			ContentType: doc.ContentType, State: doc.State, Summary: toDocSummary(doc.Summary),
 		}
+		head := summaryText(out.Summary, doc.State)
 		// A document that hasn't been fetched yet has no content, so a 404
 		// here is an answer. Any other failure is reported, not passed off
 		// as a document without content.
@@ -294,10 +355,10 @@ func getDocHandler(d daemon) mcp.ToolHandlerFor[getDocInput, getDocOutput] {
 			return nil, getDocOutput{}, fmt.Errorf("get the content of document %q: %w", in.ID, err)
 		}
 		if out.Markdown == "" {
-			return textResult(fmt.Sprintf("# %s\n%s\n\n(no extracted content available; document state: %s)",
+			return textResult(head + fmt.Sprintf("# %s\n%s\n\n(no extracted content available; document state: %s)",
 				out.Title, out.URL, out.State)), out, nil
 		}
-		return textResult(out.Markdown), out, nil
+		return textResult(head + out.Markdown), out, nil
 	}
 }
 

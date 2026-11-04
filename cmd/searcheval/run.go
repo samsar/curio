@@ -85,6 +85,12 @@ func evaluate(ctx context.Context, opts options, stdout io.Writer, log *slog.Log
 			return err
 		}
 	}
+	var written *summariesReport
+	if opts.summarize || opts.summaries != "" {
+		if written, err = summaries(ctx, summariesSetup{opts: opts, cfg: cfg, log: log}, lib); err != nil {
+			return err
+		}
+	}
 	toReembed, err := lib.Documents.CountToReembed(ctx, store.LocalTenantID, indexer.ContextVersion)
 	if err != nil {
 		return err
@@ -99,7 +105,7 @@ func evaluate(ctx context.Context, opts options, stdout io.Writer, log *slog.Log
 		return err
 	}
 	rep := newReport(opts, cfg, lib, qf, judged, cards)
-	rep.Library.DocumentsToReembed, rep.Reindex = toReembed.Documents, reindexed
+	rep.Library.DocumentsToReembed, rep.Reindex, rep.Summaries = toReembed.Documents, reindexed, written
 	log.Info("judgments resolved", "judgments", rep.Library.Judgments, "missing", rep.Library.Missing,
 		"unsearchable_by_chunks", rep.Library.Unsearchable)
 

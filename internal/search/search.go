@@ -18,23 +18,24 @@ import (
 
 // Engine runs hybrid search.
 //
-//  1. Five lists, concurrently, each reading the same pool whatever the
-//     request asks for: BM25 over chunks_fts and the fields list over the
-//     documents' fields, from the same sanitized query; the title list
-//     over the documents' titles and bookmark titles alone, from the AND
-//     of the query's terms (titleQuery); and, from one embedding of the
-//     query, vector ANN over chunks_vec and over the documents' card
-//     vectors. A list weighted 0 is not read, and the query is embedded
-//     only when a semantic list is weighted. A request's rewrites read the
-//     five lists too, at RewriteWeight times each list's weight, and its
-//     names the document lists alone, at NameWeight times theirs; every
+//  1. Six lists, concurrently, each reading the same pool whatever the
+//     request asks for: BM25 over chunks_fts, the fields list over the
+//     documents' fields and the summary list over their summaries, from
+//     the same sanitized query; the title list over the documents' titles
+//     and bookmark titles alone, from the AND of the query's terms
+//     (titleQuery); and, from one embedding of the query, vector ANN over
+//     chunks_vec and over the documents' card vectors. A list weighted 0
+//     is not read, and the query is embedded only when a semantic list is
+//     weighted. A request's rewrites read the six lists too, at
+//     RewriteWeight times each list's weight, and its names the document
+//     lists alone but the summary list, at NameWeight times theirs; every
 //     text that needs a vector is embedded in the one call.
 //  2. RRF fuse the ranked chunk lists
 //  3. Collapse chunks → documents (best chunk per doc, configurable), and
 //     rank them
 //  4. Add each document list's reciprocal ranks to its documents, fields,
-//     cards, then titles, query by query, a document only they found
-//     joining without chunks, and rank them again
+//     cards, titles, then summaries, query by query, a document only they
+//     found joining without chunks, and rank them again
 //  5. Return the requested window of that ranking, [Offset, Offset+K), with
 //     each document's best chunks and the BM25 snippets of those alone
 //
@@ -55,6 +56,7 @@ type Engine struct {
 	fieldsW      float64
 	cardsW       float64
 	titleW       float64
+	summaryW     float64
 	rewriteW     float64
 	nameW        float64
 	rrfK         int
@@ -88,19 +90,20 @@ const (
 
 // Config wires an Engine. Zero-value fields use sensible defaults.
 type Config struct {
-	// BM25Weight, VectorWeight, FieldsWeight, CardsWeight and TitleWeight
-	// weigh each list in RRF. All five zero means unset: 1.0 for each
-	// chunk list, and the document lists off. A zero switches that list's
-	// contribution off, and a zero document weight leaves its list unread.
-	// With VectorWeight and CardsWeight both zero the query is never
+	// BM25Weight, VectorWeight, FieldsWeight, CardsWeight, TitleWeight and
+	// SummaryWeight weigh each list in RRF. All six zero means unset: 1.0
+	// for each chunk list, and the document lists off. A zero switches that
+	// list's contribution off, and a zero document weight leaves its list
+	// unread. With VectorWeight and CardsWeight both zero the query is never
 	// embedded, so a down or hung embedding model costs the search nothing
 	// and never degrades it. A zero BM25Weight still runs BM25, whose
 	// results are the fallback when the semantic lists fail.
-	BM25Weight   float64
-	VectorWeight float64
-	FieldsWeight float64
-	CardsWeight  float64
-	TitleWeight  float64
+	BM25Weight    float64
+	VectorWeight  float64
+	FieldsWeight  float64
+	CardsWeight   float64
+	TitleWeight   float64
+	SummaryWeight float64
 	// RewriteWeight weighs a request's rewrites in every list, and
 	// NameWeight its names in the document lists, as a multiple of each
 	// list's weight; the query itself is at 1. A zero leaves them unread.
@@ -134,7 +137,7 @@ type Config struct {
 func New(chunks store.ChunkStore, docs store.DocumentStore, index store.DocumentIndex, embedder Embedder,
 	cfg Config) *Engine {
 	if cfg.BM25Weight == 0 && cfg.VectorWeight == 0 && cfg.FieldsWeight == 0 && cfg.CardsWeight == 0 &&
-		cfg.TitleWeight == 0 {
+		cfg.TitleWeight == 0 && cfg.SummaryWeight == 0 {
 		cfg.BM25Weight, cfg.VectorWeight = 1.0, 1.0
 	}
 	if cfg.RRFK == 0 {
@@ -165,6 +168,7 @@ func New(chunks store.ChunkStore, docs store.DocumentStore, index store.Document
 		fieldsW:      cfg.FieldsWeight,
 		cardsW:       cfg.CardsWeight,
 		titleW:       cfg.TitleWeight,
+		summaryW:     cfg.SummaryWeight,
 		rewriteW:     cfg.RewriteWeight,
 		nameW:        cfg.NameWeight,
 		rrfK:         cfg.RRFK,
@@ -226,22 +230,24 @@ type Result struct {
 	Query      string
 	BM25Hits   int
 	VectorHits int
-	// FieldsHits and TitleHits are how many distinct documents the fields
-	// list and the title list matched by the words, over every query of
-	// the search, each list read at most documentListDepth deep: with
-	// BM25Hits, whether the words matched anything at all. Related sets
-	// neither.
-	FieldsHits int
-	TitleHits  int
-	Items      []Hit
+	// FieldsHits, TitleHits and SummaryHits are how many distinct
+	// documents the fields, title and summary lists matched by the words,
+	// over every query of the search, each list read at most
+	// documentListDepth deep: with BM25Hits, whether the words matched
+	// anything at all. A list weighted 0 is unread and counts none.
+	// Related sets none.
+	FieldsHits  int
+	TitleHits   int
+	SummaryHits int
+	Items       []Hit
 	// Total is how many documents Search ranked, at most store.MaxSearchK,
 	// and Capped is set when more matched than it ranks. Related sets
 	// neither.
 	Total  int
 	Capped bool
 	// Degraded is set when the semantic lists failed and Items are
-	// keyword-only (BM25, and the fields and title lists when they are
-	// weighted); Warnings then says why.
+	// keyword-only (BM25, and the fields, title and summary lists when
+	// they are weighted); Warnings then says why.
 	Degraded bool
 	Warnings []string
 	// Undated is, when the filters set a date, how many of the library's
@@ -260,16 +266,17 @@ type Result struct {
 // read. A stage that didn't run is 0, and one that failed counts up to its
 // failure.
 type Timings struct {
-	Embed   time.Duration // embedding the query, its rewrites and names in one batch
-	BM25    time.Duration // the keyword search
-	Fields  time.Duration // the fields list's search
-	Titles  time.Duration // the title list's search
-	Vector  time.Duration // the vector search
-	Cards   time.Duration // the card vectors' search
-	Undated time.Duration // counting the documents a date filter couldn't judge
-	Fuse    time.Duration // RRF, resolving the chunks to their documents, and ranking those with the document lists
-	Hydrate time.Duration // reading the window's documents, their chunks and the snippets
-	Total   time.Duration // the whole search
+	Embed     time.Duration // embedding the query, its rewrites and names in one batch
+	BM25      time.Duration // the keyword search
+	Fields    time.Duration // the fields list's search
+	Titles    time.Duration // the title list's search
+	Summaries time.Duration // the summary list's search
+	Vector    time.Duration // the vector search
+	Cards     time.Duration // the card vectors' search
+	Undated   time.Duration // counting the documents a date filter couldn't judge
+	Fuse      time.Duration // RRF, resolving the chunks to their documents, and ranking those with the document lists
+	Hydrate   time.Duration // reading the window's documents, their chunks and the snippets
+	Total     time.Duration // the whole search
 }
 
 // Search runs the hybrid pipeline end-to-end.
@@ -282,14 +289,15 @@ type Timings struct {
 // then show on both pages or on neither. See docs/decisions.md "Search
 // pages by offset within a fixed-depth pool".
 //
-// The lists fail asymmetrically. BM25, the fields list and the title list
-// are local SQLite and always available, so a failure of any is a bug or
-// corruption and fails the search. The semantic lists depend on an
-// embedding model in another process (Ollama), which may be down, still
-// starting, or hung — legitimately optional at query time — so a failure
-// of any drops them all, for every query, and returns the keyword results
-// marked Degraded instead of discarding them. If the caller's own context
-// ends, Search returns that error, never a degraded success.
+// The lists fail asymmetrically. BM25, the fields list, the title list and
+// the summary list are local SQLite and always available, so a failure of
+// any is a bug or corruption and fails the search. The semantic lists
+// depend on an embedding model in another process (Ollama), which may be
+// down, still starting, or hung — legitimately optional at query time — so
+// a failure of any drops them all, for every query, and returns the
+// keyword results marked Degraded instead of discarding them. If the
+// caller's own context ends, Search returns that error, never a degraded
+// success.
 func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 	began := time.Now()
 	if req.Query == "" {
@@ -366,7 +374,7 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 	timings.Hydrate = time.Since(hydrateStart)
 	res.BM25Hits = len(bm25ByID)
 	res.VectorHits = len(vecByID)
-	res.FieldsHits, res.TitleHits = wordDocuments(read.queries)
+	res.FieldsHits, res.TitleHits, res.SummaryHits = wordDocuments(read.queries)
 	res.Items = items
 	timings.Total = time.Since(began)
 	res.Timings = timings
@@ -417,18 +425,20 @@ func (e *Engine) chunkLists(qs []query, hits []queryHits, degraded bool) ([][]Ra
 }
 
 // documentLists are the document lists to add to the chunks' ranking, in
-// a fixed order: each query's fields, cards and titles, the question
-// first, then its rewrites, then its names, each at the list's weight
-// times the query's. Degraded, the cards are left out with the other
-// semantic lists.
+// a fixed order: each query's fields, cards, titles and summaries, the
+// question first, then its rewrites, then its names, each at the list's
+// weight times the query's. Degraded, the cards are left out with the
+// other semantic lists. The summaries come last in each query's, so with
+// them weighted 0, or none read, every sum is the five lists' alone.
 func (e *Engine) documentLists(qs []query, hits []queryHits, degraded bool) []documentList {
-	out := make([]documentList, 0, 3*len(qs))
+	out := make([]documentList, 0, 4*len(qs))
 	for i, q := range qs {
 		out = append(out, documentList{weight: e.fieldsW * q.weight, hits: hits[i].fields})
 		if !degraded {
 			out = append(out, documentList{weight: e.cardsW * q.weight, hits: hits[i].cards})
 		}
-		out = append(out, documentList{weight: e.titleW * q.weight, hits: hits[i].titles})
+		out = append(out, documentList{weight: e.titleW * q.weight, hits: hits[i].titles},
+			documentList{weight: e.summaryW * q.weight, hits: hits[i].summaries})
 	}
 	return out
 }
@@ -456,9 +466,9 @@ func chunkHits(hits []queryHits, degraded bool) (bm25ByID, vecByID map[string]st
 	return bm25ByID, vecByID
 }
 
-// wordDocuments counts the distinct documents the fields lists and the
-// title lists of hits returned, each over every query.
-func wordDocuments(hits []queryHits) (fields, titles int) {
+// wordDocuments counts the distinct documents the fields, title and
+// summary lists of hits returned, each over every query.
+func wordDocuments(hits []queryHits) (fields, titles, summaries int) {
 	count := func(list func(queryHits) []store.DocumentHit) int {
 		seen := map[string]bool{}
 		for _, h := range hits {
@@ -469,7 +479,8 @@ func wordDocuments(hits []queryHits) (fields, titles int) {
 		return len(seen)
 	}
 	return count(func(h queryHits) []store.DocumentHit { return h.fields }),
-		count(func(h queryHits) []store.DocumentHit { return h.titles })
+		count(func(h queryHits) []store.DocumentHit { return h.titles }),
+		count(func(h queryHits) []store.DocumentHit { return h.summaries })
 }
 
 // snippetQuery is what the window's snippets mark: the OR of every chunk

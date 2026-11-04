@@ -96,6 +96,7 @@ func printStatus(ctx context.Context, w io.Writer, env *daemonctl.Env) (answerin
 	fmt.Fprint(w, embedderHoldWarning(health.EmbedderHold))
 	fmt.Fprint(w, reembedBrakeWarning(health.ReembedBrake))
 	fmt.Fprint(w, understandingWarning(health.Understanding))
+	fmt.Fprint(w, summariesWarning(health.Summaries))
 
 	sctx, scancel := context.WithTimeout(ctx, 1*time.Second)
 	defer scancel()
@@ -119,6 +120,7 @@ func printStatus(ctx context.Context, w io.Writer, env *daemonctl.Env) (answerin
 				plural(r.Chunks, "chunk"), r.Documents, stats.DocumentsByState[string(store.DocStateFetched)],
 				reembedETA(r))
 		}
+		fmt.Fprint(w, summariesLines(stats.Summaries, health.Summaries))
 	}
 	printQueue(ctx, w, env.Client)
 

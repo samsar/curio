@@ -133,6 +133,7 @@ func newStartingTestServerUI(t *testing.T, pages UIOptions, options ...func(*Dep
 		Index:          sqlite.NewDocumentIndex(db, defaults.Dim),
 		Queue:          sqlite.NewJobs(db),
 		Insights:       sqlite.NewInsights(db),
+		Summaries:      sqlite.NewSummaries(db),
 		InsightEnabled: true,
 		Interests:      interests,
 		Gate:           gate,

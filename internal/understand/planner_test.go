@@ -949,6 +949,27 @@ func TestPlanner_TimeoutHold(t *testing.T) {
 		"once a run, and again after a plan")
 }
 
+// TestPlanner_HoldsEndOnTheWallClock: the timeout hold's end and the
+// eviction hold's, which healthz reports, are wall times, with no
+// monotonic reading: judged on Go's monotonic clock, which stops while a
+// Mac sleeps, a hold would outlast the time it says.
+func TestPlanner_HoldsEndOnTheWallClock(t *testing.T) {
+	r := newRigWith(t, &fakeModel{loaded: true}, func(o *Options) { o.Now = time.Now })
+	r.p.mu.Lock()
+	r.p.timeouts = timeoutsToHold
+	r.p.holdTimeoutsLocked()
+	now := r.p.now()
+	r.p.keptUntil, r.p.evictions, r.p.firstEviction = now.Add(time.Minute), evictionsToHold-1, now
+	_, held := r.p.unloadedLocked(now)
+	r.p.mu.Unlock()
+	require.True(t, held)
+	st := r.p.State()
+	for _, end := range []time.Time{st.TimeoutHoldUntil, st.EvictionHoldUntil} {
+		require.False(t, end.IsZero())
+		assert.NotContains(t, end.String(), "m=")
+	}
+}
+
 // TestPlanner_ConcurrentTimeouts: plans in flight together that all time
 // out start one hold of 2 minutes, not one escalated per plan.
 func TestPlanner_ConcurrentTimeouts(t *testing.T) {
@@ -1212,4 +1233,117 @@ func TestPlanner_State(t *testing.T) {
 
 	off := New(context.Background(), &fakeModel{}, Options{Model: config.ModelSpec{Model: "m"}})
 	assert.Equal(t, State{Model: "m", Reason: OffReason, Check: CheckUnchecked}, off.State())
+}
+
+// usedModel is a fakeModel that records, at each call of the model, how
+// many uses Options.Using has open.
+type usedModel struct {
+	*fakeModel
+	open  *atomic.Int32
+	calls map[string][]int32
+	mu    sync.Mutex
+}
+
+func (m *usedModel) note(call string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls[call] = append(m.calls[call], m.open.Load())
+}
+
+func (m *usedModel) GenerateJSON(ctx context.Context, prompt string, schema json.RawMessage,
+	opts generator.Options) (json.RawMessage, error) {
+	m.note("generate")
+	return m.fakeModel.GenerateJSON(ctx, prompt, schema, opts)
+}
+
+func (m *usedModel) Warm(ctx context.Context, keepAlive time.Duration) error {
+	m.note("warm")
+	return m.fakeModel.Warm(ctx, keepAlive)
+}
+
+func (m *usedModel) Unload(ctx context.Context) error {
+	m.note("unload")
+	return m.fakeModel.Unload(ctx)
+}
+
+// TestPlanner_UsingWrapsEveryModelCall: each call of the model, a load,
+// the check's probes, a plan and an unload, runs inside a use the hook
+// was told of, and every use ends.
+func TestPlanner_UsingWrapsEveryModelCall(t *testing.T) {
+	var open atomic.Int32
+	var begun atomic.Int32
+	using := func() func() {
+		open.Add(1)
+		begun.Add(1)
+		var once sync.Once
+		return func() { once.Do(func() { open.Add(-1) }) }
+	}
+	wrong := func(string) (json.RawMessage, error) {
+		return json.RawMessage(`{"kind":"list","names":[],"rewrites":[],"filters":{"source":["chrome"]}}`), nil
+	}
+	planner := func(m *usedModel) *Planner {
+		return New(context.Background(), m, Options{On: true, Timeout: time.Minute, Using: using,
+			Model: config.ModelSpec{Provider: "ollama", Model: "gemma4:26b"}, Log: slog.New(slog.DiscardHandler)})
+	}
+	plan := func(p *Planner) Status {
+		out, err := p.Plan(context.Background(), "q")
+		require.NoError(t, err)
+		p.Wait()
+		return out.Status
+	}
+	m := &usedModel{fakeModel: &fakeModel{plan: answerWith(fullPlan)}, open: &open, calls: map[string][]int32{}}
+	fit := planner(m)
+	assert.Equal(t, StatusCold, plan(fit), "loaded, then checked, in the background")
+	assert.Equal(t, StatusPlanned, plan(fit))
+	unfit := &usedModel{fakeModel: &fakeModel{loaded: true, probes: wrong}, open: &open, calls: map[string][]int32{}}
+	assert.Equal(t, StatusChecking, plan(planner(unfit)), "checked, found unfit and unloaded")
+
+	for _, calls := range []map[string][]int32{m.calls, unfit.calls} {
+		for call, opened := range calls {
+			for _, n := range opened {
+				assert.Positive(t, n, "a %s inside a use", call)
+			}
+		}
+	}
+	assert.NotEmpty(t, m.calls["warm"])
+	assert.NotEmpty(t, m.calls["generate"])
+	assert.NotEmpty(t, unfit.calls["unload"])
+	assert.Zero(t, open.Load(), "every use ended")
+	assert.Positive(t, begun.Load())
+}
+
+// panicModel is a fakeModel whose every call of the model panics.
+type panicModel struct{ *fakeModel }
+
+func (panicModel) GenerateJSON(context.Context, string, json.RawMessage, generator.Options) (json.RawMessage,
+	error) {
+	panic("generate")
+}
+func (panicModel) Warm(context.Context, time.Duration) error { panic("warm") }
+func (panicModel) Unload(context.Context) error              { panic("unload") }
+
+// TestPlanner_UseEndsWhenACallPanics: a call of the model that panics, a
+// plan's, a probe's, a load or an unload, still ends its use, so a search
+// net/http recovered from doesn't hold the summary pass back.
+func TestPlanner_UseEndsWhenACallPanics(t *testing.T) {
+	var open atomic.Int32
+	using := func() func() {
+		open.Add(1)
+		var once sync.Once
+		return func() { once.Do(func() { open.Add(-1) }) }
+	}
+	p := New(context.Background(), panicModel{&fakeModel{}}, Options{On: true, Timeout: time.Minute, Using: using,
+		Model: config.ModelSpec{Provider: "ollama", Model: "gemma4:26b"}, Log: slog.New(slog.DiscardHandler)})
+	for _, c := range []struct {
+		name, value string
+		call        func()
+	}{
+		{"a plan", "generate", func() { _, _ = p.Ask(context.Background(), "q") }},
+		{"a probe", "generate", func() { _, _ = p.Check(context.Background()) }},
+		{"a load", "warm", func() { p.warm() }},
+		{"an unload", "unload", p.unload},
+	} {
+		assert.PanicsWithValue(t, c.value, c.call, c.name)
+		assert.Zero(t, open.Load(), "%s's use ended", c.name)
+	}
 }

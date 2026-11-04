@@ -43,7 +43,8 @@ import (
 // embedding model doesn't answer, and ReembedBrake the re-embed's brake
 // while it stops the re-embed: each present only while it holds, and
 // neither changes Status. Understanding is what the planner knows of its
-// model, from its memory alone; it never changes Status either.
+// model, and Summaries what the summaries' writer knows of its, each from
+// memory alone; neither changes Status either.
 type Health struct {
 	Status          string              `json:"status"`
 	PID             int                 `json:"pid"`
@@ -66,6 +67,7 @@ type Health struct {
 	EmbedderHold    *EmbedderHold       `json:"embedder_hold,omitempty"`
 	ReembedBrake    *ReembedBrake       `json:"reembed_brake,omitempty"`
 	Understanding   UnderstandingHealth `json:"understanding"`
+	Summaries       SummariesHealth     `json:"summaries"`
 }
 
 // UnderstandingHealth mirrors the openapi UnderstandingHealth schema: what
@@ -383,6 +385,7 @@ func (d Deps) health(ctx context.Context) (Health, error) {
 		EmbedderHold:    d.embedderHold(),
 		ReembedBrake:    d.reembedBrake(),
 		Understanding:   d.understanding(),
+		Summaries:       d.summaries(),
 	}, nil
 }
 
@@ -406,7 +409,8 @@ func (d Deps) generationRoles() map[string]string {
 // Stats is the /v1/stats response. CardsStale is how many of the
 // documents' cards are left to embed: the cards job's backlog. Reembed is
 // what is left of the re-embed for a new chunk context, absent when
-// nothing is.
+// nothing is. Summaries counts the documents by their summary while
+// summaries are on.
 type Stats struct {
 	Version          string         `json:"version"`
 	BookmarksTotal   int            `json:"bookmarks_total"`
@@ -415,6 +419,7 @@ type Stats struct {
 	JobsByStatus     map[string]int `json:"jobs_by_status,omitempty"`
 	CardsStale       int            `json:"cards_stale"`
 	Reembed          *ReembedStats  `json:"reembed,omitempty"`
+	Summaries        *SummaryStats  `json:"summaries,omitempty"`
 }
 
 // ReembedStats is what is left to re-embed for a new chunk context
@@ -469,6 +474,12 @@ func (d Deps) stats(ctx context.Context) (Stats, error) {
 	if err != nil {
 		return Stats{}, err
 	}
+	var summaries *SummaryStats
+	if d.summariesOn() {
+		if summaries, err = d.summaryStats(ctx); err != nil {
+			return Stats{}, err
+		}
+	}
 
 	docsTotal := 0
 	for _, n := range docsByState {
@@ -482,6 +493,7 @@ func (d Deps) stats(ctx context.Context) (Stats, error) {
 		JobsByStatus:     stringKeys(jobsByStatus),
 		CardsStale:       cardsStale,
 		Reembed:          reembed,
+		Summaries:        summaries,
 	}, nil
 }
 

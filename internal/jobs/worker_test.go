@@ -1,6 +1,7 @@
 package jobs
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -254,6 +255,27 @@ func TestWorker_DeferralRefundsTheAttempt(t *testing.T) {
 			assert.Equal(t, tc.wantLastError, *got.LastError)
 			assert.Zero(t, hookCalls.Load())
 		})
+	}
+}
+
+// TestWorker_RoutineDeferralLogsAtDebug: a deferral its handler marks
+// routine is logged at DEBUG, any other at INFO.
+func TestWorker_RoutineDeferralLogsAtDebug(t *testing.T) {
+	for _, routine := range []bool{false, true} {
+		q := sqlitestore.NewJobs(sqlitetest.NewDB(t))
+		require.NoError(t, q.Enqueue(context.Background(), &store.Job{TenantID: "local", Kind: store.JobKindSummarize}))
+		var logs bytes.Buffer
+		w := NewWorker(q, WorkerOptions{Log: slog.New(slog.NewJSONHandler(&logs,
+			&slog.HandlerOptions{Level: slog.LevelDebug}))})
+		w.Register(store.JobKindSummarize, func(context.Context, *store.Job) error {
+			return &DeferError{Reason: "searches to pause", Err: errors.New("pre-empted"), Routine: routine}
+		})
+		handleOnce(t, w, store.JobKindSummarize)
+		want := `"level":"INFO","msg":"job deferred"`
+		if routine {
+			want = `"level":"DEBUG","msg":"job deferred"`
+		}
+		assert.Contains(t, logs.String(), want, "routine %v", routine)
 	}
 }
 
