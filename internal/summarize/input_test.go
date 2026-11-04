@@ -5,6 +5,7 @@ import (
 	"io"
 	"math/rand/v2"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -285,17 +286,20 @@ func FuzzReduceRules(f *testing.F) {
 // which removing a level a pass reads once a level, and of open links and
 // images, which a regexp's search after each match reads to the line's
 // end, as the page's title and site too, are read in the time of their
-// length: a page four times as long, the scan window's whole, takes about
-// four times as long, as an ordinary page does, where a read of the square
-// of its length takes sixteen (a minute or more at the window). A ratio,
+// length: a page eight times as long, the scan window's whole, takes about
+// eight times as long, as an ordinary page does, where a read of the square
+// of its length takes sixty-four (a minute or more at the window). A ratio,
 // not a time, so a loaded machine or a small runner, which slows both
 // reads alike, doesn't fail it: each size is timed at its best of a few
-// reads, and a read past hangGuard is a hang, whatever the ratio.
+// reads, each after a collection, and a read past hangGuard is a hang,
+// whatever the ratio. Linear and quadratic are eight times apart, so a
+// pause that lands in one read (a quarter against the whole once measured
+// 9.95 on CI, where linear is 4) stays far from the bound.
 func TestBuildInput_HostilePagesCostTheirLength(t *testing.T) {
-	// maxRatio bounds the full page's time over its quarter's: 4 at linear
-	// (measured 3.7 to 4.3, with the race detector and without), 16 at
-	// quadratic.
-	const maxRatio = 8
+	// maxRatio bounds the full page's time over its eighth's: 8 at linear
+	// (measured 7.1 to 8.6, with the race detector and without), 64 at
+	// quadratic; 22 is about their geometric mean.
+	const maxRatio = 22
 	fill := func(unit string, size int) string { return strings.Repeat(unit, size/len(unit)) }
 	// nested is levels delimiters, each opened by open and closed by ">",
 	// around "page", their halves.
@@ -325,9 +329,9 @@ func TestBuildInput_HostilePagesCostTheirLength(t *testing.T) {
 				assert.Equal(t, tc.text, in.Text)
 			}
 			assert.False(t, delimiterRE.MatchString(in.Text+in.Title+in.Site), "no delimiter is left")
-			quarter, whole := bestRead(t, tc.page(scanWindow/4)), bestRead(t, page)
-			assert.LessOrEqual(t, float64(whole)/float64(quarter), float64(maxRatio),
-				"a quarter of the page read in %v, all of it in %v", quarter, whole)
+			eighth, whole := bestRead(t, tc.page(scanWindow/8)), bestRead(t, page)
+			assert.LessOrEqual(t, float64(whole)/float64(eighth), float64(maxRatio),
+				"an eighth of the page read in %v, all of it in %v", eighth, whole)
 		})
 	}
 }
@@ -337,13 +341,15 @@ func TestBuildInput_HostilePagesCostTheirLength(t *testing.T) {
 // race detector, read in its length; a minute or more read in its square.
 const hangGuard = 10 * time.Second
 
-// bestRead is the shortest of three reads of page as BuildInput reads a
-// page with it as its title and site too, failing on a read past
+// bestRead is the shortest of five reads of page as BuildInput reads a
+// page with it as its title and site too, each after a collection so that
+// none pays for the garbage of the one before, failing on a read past
 // hangGuard.
 func bestRead(t *testing.T, page string) time.Duration {
 	t.Helper()
 	var best time.Duration
-	for i := range 3 {
+	for i := range 5 {
+		runtime.GC()
 		start := time.Now()
 		_, err := BuildInput(Document{Title: page, Site: page}, strings.NewReader(page))
 		took := time.Since(start)

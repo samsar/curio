@@ -19,13 +19,16 @@ import (
 )
 
 // renderLimit and renderAlloc are generous bounds on rendering
-// MaxRenderedMarkdown bytes of anything, race detector included: what the
-// budgets stop took from seconds to minutes at that size, or allocated
-// gigabytes. shownAlloc bounds showing a text over a budget, which the
-// budgets refuse before goldmark parses it. linkAlloc bounds a text over
-// the link budget, which costs what goldmark's parse of its links does.
+// MaxRenderedMarkdown bytes of anything: what the budgets stop took from
+// seconds to minutes at that size, or allocated gigabytes. The time bound
+// is 10 s, times raceSlowdown under the race detector (a shape just under
+// the budgets took 11.7 s under it on a CI runner, 3.5 s on a developer's
+// machine, 0.5 s without it). shownAlloc bounds showing a text over a
+// budget, which the budgets refuse before goldmark parses it. linkAlloc
+// bounds a text over the link budget, which costs what goldmark's parse of
+// its links does.
 const (
-	renderLimit = 10 * time.Second
+	renderLimit = 10 * time.Second * raceSlowdown
 	renderAlloc = 1 << 30
 	shownAlloc  = 16 << 20
 	linkAlloc   = 512 << 20

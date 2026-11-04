@@ -794,7 +794,6 @@ func TestSummarizeJob_Preempted(t *testing.T) {
 // stop does, pre-empted or not, and a stop deferred beside a call that
 // panics joins it too; stop answers the same however often it is called.
 func TestPreemptible_JoinsItsWatcher(t *testing.T) {
-	before := runtime.NumGoroutine()
 	for i := range 300 {
 		begun := make(chan struct{})
 		ctx, stop := preemptible(context.Background(), begun)
@@ -805,6 +804,9 @@ func TestPreemptible_JoinsItsWatcher(t *testing.T) {
 			assert.True(t, stop())
 			assert.True(t, stop(), "the same answer again")
 		case 1:
+			if i == 1 { // watchers sees a watcher that runs
+				require.Eventually(t, func() bool { return watchers() == 1 }, time.Second, time.Millisecond)
+			}
 			assert.False(t, stop())
 			assert.Error(t, ctx.Err(), "released once stopped")
 		case 2:
@@ -814,10 +816,26 @@ func TestPreemptible_JoinsItsWatcher(t *testing.T) {
 			})
 			assert.Error(t, ctx.Err(), "released by the deferred stop")
 		}
+		require.Zero(t, watchers(), "call %d: stop returned before its watcher", i)
 	}
-	assert.LessOrEqual(t, runtime.NumGoroutine(), before)
 	_, stop := preemptible(context.Background(), nil)
 	assert.False(t, stop(), "nothing pre-empts without a channel")
+	assert.Zero(t, watchers())
+}
+
+// watchers counts the goroutines running a preemptible call's watcher,
+// read from every goroutine's stack. It counts only them, where
+// runtime.NumGoroutine also counts what other tests' timers and
+// goroutines start meanwhile.
+func watchers() int {
+	buf := make([]byte, 1<<20)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			return strings.Count(string(buf[:n]), "jobs.preemptible.func")
+		}
+		buf = make([]byte, 2*len(buf))
+	}
 }
 
 // TestSummaryFailed: the hook records a page's own failure against the
