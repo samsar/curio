@@ -462,7 +462,7 @@ func TestSearchHome_ClientGone(t *testing.T) {
 	assert.Contains(t, w.Body.String(), `<div class="landing">`)
 	assert.Empty(t, rec.at(slog.LevelError))
 	infos := rec.at(slog.LevelInfo)
-	require.Len(t, infos, 3, "the counts, the newest saves and the interests")
+	require.Len(t, infos, 2, "the counts and the interests")
 	for _, info := range infos {
 		assert.EqualValues(t, statusClientClosedRequest, info["status"])
 	}

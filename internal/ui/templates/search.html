@@ -1,9 +1,8 @@
 {{/*
 Search is the home. Without a query, #results holds the landing, under
-the box in the upper third: a line of the largest interests, how many
-documents were placed since they were rebuilt, and the newest saves, as
-the Library's Date saved order lists them (the row partial the lists
-use). With one, it holds the results.
+the box in the upper third: a line of the largest interests, and
+nothing else (the Library lists the newest saves). With one, it holds
+the results.
 
 Search as you type: htmx sends the form's query, and the type the
 search is limited to, 400 ms after the last keystroke, and the answer,
@@ -95,17 +94,6 @@ text/template keeps a block's default over an empty define.
 {{end}}</ul>
 <a class="all" href="{{navHref "interests"}}">All {{num $.Home.AllInterests}} →</a>
 </nav>{{end}}
-{{if .New}}<p class="home-new"><a href="{{.NewHref}}">{{count .New "document" "documents"}} new since the interests were rebuilt →</a></p>{{end}}
-{{with .Lately}}<section class="card table-card lately" aria-labelledby="lately">
-<div class="card-head"><h2 id="lately">Lately saved</h2><a class="more" href="{{$.Home.SavesHref}}">All saves →</a></div>
-<table class="data">
-<colgroup><col><col class="c-when c-saved"></colgroup>
-<thead class="visually-hidden"><tr><th scope="col">Bookmark</th><th scope="col" class="c-when">Saved</th></tr></thead>
-<tbody>
-{{range .}}<tr><td>{{template "doc-cell" .LatelyCell}}</td><td class="c-when when">{{with .Saved}}{{template "saved-ago" .}}{{end}}</td></tr>
-{{end}}</tbody>
-</table>
-</section>{{end}}
 </div>
 {{else}}<div class="results">
 {{template "understood" .}}
@@ -140,16 +128,6 @@ text/template keeps a block's default over an empty define.
 </div>{{end}}
 </div>
 </div>
-{{- end}}
-
-{{/*
-A save's time in Lately saved, a SavedTime, on one line: "saved" and how
-long ago, or for a save whose date is unknown, "imported" and when curio
-imported it; what an inexact time means on hover. The row names the
-browser it came from already, under its title.
-*/}}
-{{define "saved-ago" -}}
-{{if .Exact}}saved {{template "reltime" .At}}{{else}}<span class="saved-time" title="{{.Why}}">{{with .Then}}{{.}}{{else}}saved{{end}} {{template "reltime" .Shown}}</span>{{end}}
 {{- end}}
 
 {{/*

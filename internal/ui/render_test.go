@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
@@ -78,7 +79,7 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 
 	return map[string]any{
 		PageStatus: Status{
-			Layout: layout(NavStatus),
+			Layout: footed(layout(NavStatus)),
 			Counts: &CountsPanel{Documents: 3, Bookmarks: 4,
 				ByState: []Count{{Name: evilAttr, Count: 1}, {Name: "fetched", Count: 2}},
 				Jobs:    []Count{{Name: evilScript, Count: 5}},
@@ -260,7 +261,6 @@ func sampleVariants(t testing.TB) map[string][]any {
 	return map[string][]any{
 		PageSearch: {
 			Search{Layout: layout(NavSearch), Type: "pdf", Home: &SearchHome{Searchable: 4498, AllInterests: 222,
-				New: 9, NewUnsorted: 9, Lately: append([]LibraryRow{row}, saves...),
 				Interests: []Interest{
 					{ID: evilAttr, Label: evilScript, Size: 90},
 					{ID: "long", Label: strings.Repeat("W", 200), Size: 80},
@@ -282,7 +282,7 @@ func sampleVariants(t testing.TB) map[string][]any {
 			Search{Layout: layout(NavSearch), Query: evilAttr, Results: &SearchResults{WordHits: 1, Total: 4, Hits: sampleHits()},
 				Understood: &Understood{Status: "cold", Model: evilScript}},
 		},
-		PageStatus:    statusVariants(layout(NavStatus), panelErr, at),
+		PageStatus:    statusVariants(footed(layout(NavStatus)), panelErr, at),
 		PageFailures:  failuresVariants(layout(NavLibrary), panelErr, counts),
 		PageDocument:  documentVariants(layout(NavLibrary), panelErr, at),
 		PageInterests: interestsVariants(layout(NavInterests), panelErr, at),
@@ -697,6 +697,20 @@ func allSamples(t testing.TB, r *Renderer) map[string][]any {
 	return all
 }
 
+// footed is l as the Status page's handler sets it: with the footer.
+func footed(l Layout) Layout {
+	l.Footer = true
+	return l
+}
+
+// layoutOf is the Layout of a page's view model.
+func layoutOf(t *testing.T, data any) Layout {
+	t.Helper()
+	f := reflect.ValueOf(data).FieldByName("Layout")
+	require.True(t, f.IsValid(), "%T has a Layout", data)
+	return f.Interface().(Layout)
+}
+
 // sampleListen is the samples' daemon address.
 const sampleListen = "127.0.0.1:8765"
 
@@ -719,7 +733,6 @@ func partialSamples(t testing.TB) map[string][]any {
 		"icons.html":  {nil},
 		"reltime":     {time.Time{}, at},
 		"saved-time":  append(anys(savedTimes(at)), SavedTime{}),
-		"saved-ago":   append(anys(savedTimes(at)), SavedTime{}),
 		"doc-title": {DocRef{ID: evilAttr, Title: evilScript, URL: evilURL}, DocRef{ID: evilAttr, URL: evilURL},
 			DocRef{Title: evilScript, URL: evilURL}, DocRef{ID: evilAttr, Fallback: evilScript, URL: evilURL},
 			DocRef{Fallback: evilAttr + evilQuotes, URL: evilURL}},
@@ -1012,13 +1025,22 @@ func TestPages_Layout(t *testing.T) {
 		} else {
 			assert.NotContains(t, out, `class="header-search"`, page)
 		}
-		assert.Contains(t, out, `<footer class="site"><div class="container"><span>curio-daemon &#39;&#34;&lt;&gt;&amp;</span>`+
-			`<span>`+sampleListen+` · this Mac only</span></div></footer>`, page)
+		assert.Equal(t, 1, strings.Count(out, `<button class="btn btn-ghost theme-toggle js-only" id="theme-toggle" type="button"`),
+			"%s: the theme button", page)
+		const footer = `<footer class="site"><div class="container"><span>curio-daemon &#39;&#34;&lt;&gt;&amp;</span>` +
+			`<span>` + sampleListen + ` · this Mac only</span></div></footer>`
+		if layoutOf(t, data).Footer {
+			assert.Equal(t, PageStatus, page, "only Status shows the footer")
+			assert.Contains(t, out, footer, page)
+		} else {
+			assert.NotContains(t, out, "<footer", page)
+		}
 	}
 
-	unknown := samples(t, r)[PageError].(ErrorPage)
-	unknown.Layout.Listen = ""
-	assert.Contains(t, render(t, r, PageError, unknown),
+	status := samples(t, r)[PageStatus].(Status)
+	require.True(t, status.Layout.Footer, "the Status sample shows the footer")
+	status.Layout.Listen = ""
+	assert.Contains(t, render(t, r, PageStatus, status),
 		`<footer class="site"><div class="container"><span>curio-daemon &#39;&#34;&lt;&gt;&amp;</span></div></footer>`,
 		"the footer without an address")
 
@@ -1095,7 +1117,7 @@ func TestAssets(t *testing.T) {
 			}
 		}
 	}
-	require.Len(t, refs, 15, "the stylesheet, htmx, actions.js, search.js, the d3 modules and map.js")
+	require.Len(t, refs, 16, "the stylesheet, theme.js, htmx, actions.js, search.js, the d3 modules and map.js")
 	entries, err := fs.ReadDir(files, "static")
 	require.NoError(t, err)
 	for _, e := range entries {
@@ -1125,7 +1147,14 @@ func TestAssets(t *testing.T) {
 // scriptRefRE finds the scripts a page loads, by file, less its hash.
 var scriptRefRE = regexp.MustCompile(`<script src="/ui/static/([a-z0-9.-]+)\.[0-9a-f]{16}\.js" defer></script>`)
 
-// TestPages_Scripts: every page loads htmx, then actions.js, each deferred
+// themeScriptRE is how every page loads theme.js: first in <head>,
+// before the stylesheet, without defer, so a kept theme applies before
+// the first paint.
+var themeScriptRE = regexp.MustCompile(`<title>[^<]*</title>\n<script src="/ui/static/theme\.[0-9a-f]{16}\.js"></script>\n` +
+	`<link rel="stylesheet" href="/ui/static/app\.[0-9a-f]{16}\.css">\n`)
+
+// TestPages_Scripts: every page loads theme.js first, before the
+// stylesheet and not deferred; then htmx, then actions.js, each deferred
 // and under its hashed name; the search page loads search.js after them,
 // and no other page does; the interest map's page, with a map to draw,
 // loads the d3 modules after them, in mapScripts' order, then map.js, and
@@ -1135,6 +1164,7 @@ func TestPages_Scripts(t *testing.T) {
 	base := []string{"htmx-2.0.11.min", "actions"}
 	for page, data := range eachSample(t, r) {
 		out := render(t, r, page, data)
+		assert.Regexp(t, themeScriptRE, out, page)
 		var loaded []string
 		for _, m := range scriptRefRE.FindAllStringSubmatch(out, -1) {
 			loaded = append(loaded, m[1])
@@ -1149,7 +1179,7 @@ func TestPages_Scripts(t *testing.T) {
 				"d3-drag-3.0.0.min", "d3-zoom-3.0.0.min", "d3-quadtree-3.0.1.min", "map")
 		}
 		assert.Equal(t, want, loaded, page)
-		assert.Equal(t, len(want), strings.Count(out, "<script"), page)
+		assert.Equal(t, len(want)+1, strings.Count(out, "<script"), "%s: theme.js and the deferred scripts", page)
 	}
 }
 

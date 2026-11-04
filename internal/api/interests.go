@@ -425,18 +425,6 @@ func (d Deps) interests(ctx context.Context, opts interestsOpts) (InterestListRe
 	return resp, nil
 }
 
-// placedSince counts the documents placed since run was rebuilt, and those
-// of them placed into Unsorted, for a page that says how many are new
-// without listing where (the search home).
-func (d Deps) placedSince(ctx context.Context, runID string) (total, unsorted int, err error) {
-	placed, err := d.Insights.PlacementCounts(ctx, runID)
-	if err != nil {
-		return 0, 0, err
-	}
-	total, unsorted = placedTotals(placed)
-	return total, unsorted, nil
-}
-
 // placedTotals sums PlacementCounts' answer, by interest ("" for
 // Unsorted): every document placed, and those placed into Unsorted.
 func placedTotals(placed map[string]int) (total, unsorted int) {

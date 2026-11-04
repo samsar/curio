@@ -182,6 +182,39 @@ func TestSearchScript(t *testing.T) {
 	assert.Contains(t, code, "event.preventDefault()")
 }
 
+// TestThemeScript: theme.js, which every page loads first, is one strict
+// IIFE of a few lines that sends nothing and uses nothing the other
+// scripts may not, but localStorage, its one key, every access inside a
+// try. It forces a theme only through data-theme, follows the system
+// (matchMedia) for a choice that matches it, and names the button by
+// what it will do.
+func TestThemeScript(t *testing.T) {
+	src, err := fs.ReadFile(files, "static/theme.js")
+	require.NoError(t, err)
+	js := string(src)
+	assert.LessOrEqual(t, strings.Count(js, "\n"), 80, "lines")
+
+	code := strings.TrimSpace(jsCode(js))
+	assertStrictIIFE(t, code)
+	banned := slices.DeleteFunc(slices.Clone(scriptBanned), func(s string) bool { return s == "localStorage" })
+	for _, b := range append(banned, "fetch(", "sendBeacon", "WebSocket", "EventSource", "history.", "cookie") {
+		assert.NotContains(t, code, b)
+	}
+	assert.Contains(t, code, "const key = 'curio-theme';")
+	storage := regexp.MustCompile(`localStorage\.[a-zA-Z]+\(`).FindAllStringIndex(code, -1)
+	require.Len(t, storage, 3, "read, write, forget")
+	for _, at := range storage {
+		before := code[:at[0]]
+		assert.Greater(t, strings.LastIndex(before, "try {"), strings.LastIndex(before, "} catch"),
+			"every storage access is inside a try")
+	}
+	assert.Contains(t, code, "matchMedia('(prefers-color-scheme: dark)')")
+	assert.Contains(t, code, "root.setAttribute('data-theme', theme)")
+	assert.Contains(t, code, "root.removeAttribute('data-theme')")
+	assert.Contains(t, code, "closest('#theme-toggle')")
+	assert.Contains(t, code, "'Switch to light theme' : 'Switch to dark theme'")
+}
+
 // scriptBanned is what the dashboard's own scripts' code (their comments
 // aside) never uses: nothing that evaluates code or injects markup, sets a
 // timer, loosens fetch or keeps state in the browser.

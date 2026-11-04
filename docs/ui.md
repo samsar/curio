@@ -73,21 +73,22 @@ page isn't updating, and it goes once the daemon is back.
 ## The pages
 
 The navigation is Search, Library, Interests and Status. The pages follow
-your Mac's light or dark appearance. Every page but Search and the
-starting page has a search box in its header (on a wide window), and the
-footer names the address the daemon listens on.
+your Mac's light or dark appearance until you pick one with the sun/moon
+button at the right of the header: it switches to the other theme, and
+the browser remembers the choice, until you pick the theme your Mac is
+in again, which forgets it, so the pages follow the Mac once more
+(without JavaScript there is no button, and the pages follow the Mac).
+Every page but Search and the starting page has a search box in its
+header (on a wide window). Status's footer names the daemon's version
+and the address it listens on; no other page has a footer.
 
 - **Search** (`/ui/`, the home): a search box, with a type filter under
   it (All, Articles, Repos, Videos, PDFs). With nothing typed, the box
   says how many documents there are to search ("Search your 4,498
-  documents"). Under it, in the box's column: a quiet line naming your
+  documents"). Under it, in the box's column, a quiet line naming your
   six largest areas (or interests, in a library too small for areas),
-  each linking to its page, with a link to all of them; when documents
-  were placed since the interests were rebuilt, a line saying how many
-  ("12 documents new since the interests were rebuilt"), leading to
-  Unsorted when they all went there and to Interests otherwise; and
-  **Lately saved**, your eight newest saves as the Library's Date saved
-  order lists them, with **All saves →** to that order.
+  each linking to its page, with a link to all of them, and nothing
+  else: the Library opens on your newest saves.
   Type, and the same hybrid search as `curio search` runs as you type,
   limited to the type chosen, which the address keeps
   (`/ui/?q=kafka&content_type=pdf`). The results come 10 a page, with
@@ -159,7 +160,12 @@ footer names the address the daemon listens on.
   open from a bookmark or from another app (mail, chat, a terminal) is
   understood, and so is any in a Safari before 16.4, which doesn't say
   where a request came from.
-- **Library**: every document, most recently updated first. Tabs choose
+- **Library**: your saves, newest saved first (**Recently saved**, the
+  order it opens in), or, with **Order** set to **Last updated**
+  (`/ui/library?order=updated`), every document, most recently updated
+  first; every link, the tabs, the filters and Load more keep the order
+  chosen. The state bar on Status and the Failures tab's links lead to
+  Last updated, which lists the documents they count. Tabs choose
   the state (All, Fetched, Pending, Failed, Dead), each with its count
   when the state is the only filter; with a type, host, folder or cause
   chosen too, the counts are left out, since they count the whole
@@ -168,7 +174,7 @@ footer names the address the daemon listens on.
   folder (the folder and the folders under it), and Apply keeps the tab
   chosen. Each row shows the title, in two lines at most (the whole on
   hover), with where the page lives under it, its type and when it was
-  last updated. A row reads as a bookmark: a fetched document, the usual
+  saved (in Last updated, when it was last updated). A row reads as a bookmark: a fetched document, the usual
   case, shows no state, and any other has its state's badge at the head
   of the line under its name. A page with no title of its own (every one that
   failed, and a few others) is named by its bookmark's title, in italics,
@@ -181,9 +187,9 @@ footer names the address the daemon listens on.
   when it is a verdict a refetch won't change (a dead link, a login, an
   error status, a certificate, a page curio can't read). On
   a phone the type and time move under the title. "Load more" pages
-  through the rest, and the line under the table counts the documents
-  shown ("Showing 100 of 2,150 documents"). A `cause=` in the address
-  (`/ui/library?cause=anti_bot`, where Failures' links lead) narrows it
+  through the rest, and the line under the table counts the rows shown
+  ("Showing 100 of 2,150 documents" in Last updated). A `cause=` in the address
+  (`/ui/library?order=updated&cause=anti_bot`, where Failures' links lead) narrows it
   to the documents that failed for one cause: a line under the filters
   names it, with **Clear**, which drops the cause and keeps everything
   else, and paging, the tabs and filtering keep it. Above the filters,
@@ -191,9 +197,8 @@ footer names the address the daemon listens on.
   Failures shows how many documents failed or are dead, whatever the
   filters.
 
-  **Order** switches to **Date saved** (`/ui/library?order=saved`): your
-  saves, newest saved first, one row per bookmark, so a page saved in two
-  browsers is listed twice. The time column reads Saved, the line under a
+  In **Recently saved** a row is a save, one per bookmark, so a page
+  saved in two browsers is listed twice. The time column reads Saved, the line under a
   title adds the browser it was saved in on a wide window (hover it for
   the folder), and a note under the table says why a page can appear
   twice and that undated saves are marked and listed by the time they
@@ -205,8 +210,8 @@ footer names the address the daemon listens on.
   bookmarks, an HTML export without dates). Hover an inexact time for what
   it means. On a phone, whose time column folds away, a save's time is a
   line of its own under the page's address. An untitled page is named by
-  that save's own title. The tabs, filters and Load more work as in Last updated, and
-  the tabs still count documents; the line under the table counts saves,
+  that save's own title. The tabs, filters and Load more work in both
+  orders, and the tabs count documents in both; the line under the table counts saves,
   "Showing 50 of 7,497 saves" with no filter at all, and "Showing 50
   saves" with any.
 - **Failures** (`/ui/failures`), the Library's second tab: the documents
@@ -227,7 +232,7 @@ footer names the address the daemon listens on.
   a box naming why it failed and what that means, with its **Full
   error** a click away, and for a dead one, that the page is gone. Then
   its text, and beside it related documents, its bookmarks with their
-  folders, tags and save times (marked as the Library's Date saved order
+  folders, tags and save times (marked as the Library's Recently saved order
   marks them), and its details: when it was added, updated and
   fetched (Jina Reader called out), its ID, where its markdown is, and
   the `curio` commands that work for it. Under its facts, a line says
