@@ -93,10 +93,13 @@
   --header-h: 3.5rem;
 }
 
-/* Dark: follows the system. The data-theme selectors only let a host force
-   one (the product never sets them). */
+/* Dark: follows the system, unless data-theme on <html> forces light or
+   dark: the header's theme button sets it (theme.js), kept per browser
+   while the choice differs from the system's. The two dark blocks set the
+   same tokens (TestStylesheet). */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
+    color-scheme: dark;
     --bg: #0c0d10;
     --surface: #131519;
     --surface-2: #1a1c21;
@@ -129,7 +132,9 @@
     --focus: #a8a9ff;
   }
 }
+:root[data-theme="light"] { color-scheme: light; }
 :root[data-theme="dark"] {
+  color-scheme: dark;
   --bg: #0c0d10; --surface: #131519; --surface-2: #1a1c21; --surface-3: #23262d;
   --border: #262930; --border-strong: #353942;
   --text: #eceef1; --text-2: #b3b8c2; --text-3: #8d939e;
@@ -275,6 +280,19 @@ header.site nav a[aria-current="page"] svg { color: var(--accent); }
 .site-tools { margin-left: auto; display: flex; align-items: center; gap: var(--s3); }
 
 .header-search { position: relative; width: 15rem; }
+
+/* The theme button: the icon of the theme it switches to, a moon in
+   light, a sun in dark, whichever decides it (the system or data-theme). */
+.theme-toggle { width: 2rem; height: 2rem; padding: 0; flex: none; }
+.theme-toggle svg { width: 1rem; height: 1rem; color: currentColor; }
+.theme-toggle .to-light { display: none; }
+.theme-toggle .to-dark { display: contents; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .theme-toggle .to-dark { display: none; }
+  :root:not([data-theme="light"]) .theme-toggle .to-light { display: contents; }
+}
+:root[data-theme="dark"] .theme-toggle .to-dark { display: none; }
+:root[data-theme="dark"] .theme-toggle .to-light { display: contents; }
 .header-search svg { position: absolute; left: 0.65rem; top: 50%; transform: translateY(-50%); color: var(--text-3); pointer-events: none; }
 
 main.page { padding: var(--s8) 0 var(--s16); }
@@ -668,6 +686,8 @@ a.doc-title:hover { color: var(--accent-text); }
 .filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--s3); }
 .filters .input { width: 9.5rem; }
 .filters .select { width: 8.75rem; }
+/* The order's select holds "Recently saved" whole. */
+.filters .field-order .select { width: 10.25rem; }
 
 .subnav { display: flex; gap: var(--s5); border-bottom: 1px solid var(--border); margin-bottom: var(--s5); overflow-x: auto; }
 .subnav a {
@@ -939,9 +959,8 @@ body:has(#show-scores:checked) .score { display: inline; }
 /* Search home -------------------------------------------------------------
    One frame for home and results. On the landing (#results holds
    .landing) the box sits at the top, where results keep it, and under its type tabs, in
-   its column: the interests line, the line of documents new since the
-   rebuild, and the newest saves. The first results swap .landing out. No
-   script. */
+   its column: the interests line, and nothing else. The first results
+   swap .landing out. No script. */
 
 /* The box stands where the results will have it, so the first keystroke's
    results don't move it. */
@@ -970,11 +989,6 @@ main.page:has(.landing) { padding-bottom: var(--s12); }
 .explore-line a:hover { color: var(--accent-text); text-decoration: none; }
 .explore-line .unlabeled { color: var(--text-3); font-style: italic; }
 .explore-line .all { grid-row: 1; grid-column: 2; color: var(--accent-text); font-weight: var(--fw-medium); white-space: nowrap; }
-.home-new { margin-top: calc(-1 * var(--s2)); font-size: var(--fs-sm); }
-.home-new a { font-weight: var(--fw-medium); }
-.lately { margin-top: var(--s4); }
-.lately .card-head { padding-bottom: var(--s3); border-bottom: 1px solid var(--border); }
-
 
 /* Document ------------------------------------------------------------------ */
 
@@ -1411,7 +1425,8 @@ td .badge.fit-new { margin-top: var(--s1); }
   .bars li { grid-template-columns: minmax(0, 7rem) minmax(0, 1fr) 3rem; }
   .filters { width: 100%; }
   .filters .field { flex: 1 1 8rem; }
-  .filters .input, .filters .select { width: 100%; }
+  .filters .field-order { flex-basis: 10.25rem; }
+  .filters .input, .filters .select, .filters .field-order .select { width: 100%; }
   .card-head, .card-body { padding-left: var(--s4); padding-right: var(--s4); }
   .related li, .bookmark-list li { padding-left: var(--s4); padding-right: var(--s4); }
   .center-card { padding: var(--s6) var(--s4); }
