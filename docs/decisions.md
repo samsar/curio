@@ -7585,8 +7585,10 @@ allocation (512 MiB for the link budget, whose text costs what the parse
 does). `TestMarkdown_CostsCheckShapeDoesntSee` holds the four shapes
 above to their outcome and to a time and an allocation bound per render.
 `TestMarkdown_JustUnderBudget` cuts the block and emphasis shapes to the
-most of them within the budgets and holds their render to 10 s and
-1 GiB. `TestMarkdown_TimeLimit` stops a block-heavy and an inline-heavy
+most of them within the budgets and holds their render to 10 s (30 s
+under the race detector, `raceSlowdown`: a CI runner took 11.7 s for deep
+lists under it, which render in 0.5 s without it) and 1 GiB.
+`TestMarkdown_TimeLimit` stops a block-heavy and an inline-heavy
 text at a 10 ms limit within 250 ms, and `TestMarkdown_AllocLimit` stops
 text under deep lists at a 32 MiB limit within 64 MiB, race detector
 included.
