@@ -77,7 +77,9 @@ func TestNative_HeadersFollowProfile(t *testing.T) {
 
 // TestNative_JinaUserAgent: origin requests carry the Chrome profile's
 // User-Agent, or the configured override, with the browser headers; Jina
-// requests carry curio's own User-Agent and none of them, on both backends.
+// requests carry curio's own User-Agent and none of them, on both backends,
+// and no selector of elements for Reader to drop: what Jina judges is the
+// whole page.
 func TestNative_JinaUserAgent(t *testing.T) {
 	cases := []struct{ backend, override, originUA string }{
 		{"", "", chromeUA(133)},
@@ -114,6 +116,7 @@ func TestNative_JinaUserAgent(t *testing.T) {
 			assert.Equal(t, "navigate", originHeader.Get("Sec-Fetch-Mode"))
 			assert.Equal(t, jinaUserAgent, jinaHeader.Get("User-Agent"))
 			assert.Equal(t, "text/plain", jinaHeader.Get("Accept"))
+			assert.Empty(t, jinaHeader.Get("X-Remove-Selector"), "Reader converts the whole page; curio cleans it")
 			for key := range jinaHeader {
 				key = strings.ToLower(key)
 				assert.False(t, strings.HasPrefix(key, "sec-ch-ua") || strings.HasPrefix(key, "sec-fetch-"),

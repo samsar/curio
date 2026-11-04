@@ -1,6 +1,7 @@
 package fetcher
 
 import (
+	"cmp"
 	"iter"
 	"regexp"
 	"strconv"
@@ -288,16 +289,17 @@ func (t *pageText) parkedDomain(target string) string {
 }
 
 // parkedNotice reports whether line, on a page of host, is a parked
-// domain's notice: a search-ads parking page's heading, or a match of
-// parkedDomainRE. A notice naming a domain counts only when it names host
-// or its site (urlutil.Site): a page may report another site's sale.
+// domain's notice: a search-ads parking page's heading, a sale page's call
+// to action (parkingActionRE), or a match of parkedDomainRE. A notice
+// naming a domain counts only when it names host or its site
+// (urlutil.Site): a page may report another site's sale.
 // Without a subject, the predicate must be the whole line, as GoDaddy's
 // "is for sale!" under the domain's name; a line that goes on after it is
 // about something else ("is parked. The owner left."). An expiry counts
 // only with its subject: "Registration has expired." alone is as likely
 // an event's sign-up page.
 func parkedNotice(line, host string) bool {
-	if parkingHeadingRE.MatchString(line) {
+	if parkingHeadingRE.MatchString(line) || parkingActionRE.MatchString(line) {
 		return true
 	}
 	m := parkedDomainRE.FindStringSubmatch(line)
@@ -305,7 +307,7 @@ func parkedNotice(line, host string) bool {
 		return false
 	}
 	group := func(name string) string { return m[parkedDomainRE.SubexpIndex(name)] }
-	if domain := group("domain"); domain != "" {
+	if domain := cmp.Or(group("named"), group("domain")); domain != "" {
 		domain = strings.TrimPrefix(strings.ToLower(domain), "www.")
 		return domain == host || domain == urlutil.Site(host)
 	}
@@ -373,24 +375,33 @@ var (
 		`)[.!]`)
 
 	// parkedDomainRE matches a parked domain's notice: an optional subject
-	// ("this domain", "the domain name", "domain", or a domain name), one
-	// predicate, and the rest of the line, which must open with ".", "!" or
-	// ":" ("This domain is for sale: $5,795", "This domain name may be for
-	// sale. Click here…"). The predicates are what registrars and parking
-	// services say: for sale, parked, expired (a group of its own, which
-	// parkedNotice holds to a subject), just registered, Hover's "is a
-	// totally awesome idea still being worked on" and easyDNS's "is yet
-	// another domain managed by easyDNS". The list is explicit: a predicate
-	// added to it needs a test row.
+	// ("this domain", "the domain name", "domain", any of them followed by
+	// a domain name, or a domain name), one predicate, and the rest of the
+	// line, which must open with ".", "!" or ":" ("This domain is for sale:
+	// $5,795", "This domain name may be for sale. Click here…", "The domain
+	// example.com is available for purchase."). The predicates are what
+	// registrars, parking services and domain marketplaces say: for sale
+	// or lease (or available or listed for it, or for purchase), parked,
+	// expired (a group of its own, which parkedNotice holds to a subject),
+	// just registered, Hover's "is a totally awesome idea still being
+	// worked on" and easyDNS's "is yet another domain managed by easyDNS".
+	// The list is explicit: a predicate added to it needs a test row.
 	parkedDomainRE = regexp.MustCompile(`(?i)^` +
-		`(?:(?:(?P<subject>(?:(?:this|the)\s+)?domain(?:\s+name)?)|(?P<domain>` + domainName + `))\s+)?` +
-		`(?:(?:is|may\s+be)\s+for\s+sale` +
+		`(?:(?:(?P<subject>(?:(?:this|the)\s+)?domain(?:\s+name)?)(?:\s+(?P<named>` + domainName + `))?` +
+		`|(?P<domain>` + domainName + `))\s+)?` +
+		`(?:(?:is|may\s+be)\s+(?:(?:available|listed)\s+)?for\s+(?:sale|lease|purchase)` +
 		`|is\s+parked` +
 		`|(?P<expired>(?:registration\s+)?has\s+expired)` +
 		`|has\s+been\s+(?:recently\s+)?registered\s+(?:with|at)\s+` + domainName +
 		`|is\s+a\s+totally\s+awesome\s+idea\s+still\s+being\s+worked\s+on` +
 		`|is\s+yet\s+another\s+domain\s+managed\s+by\s+\S+` +
 		`)(?P<rest>[.!:].*)?$`)
+
+	// parkingActionRE matches a domain sale page's call to action, a line of
+	// its own: "Buy this domain", "Make an offer on this domain!", "Get
+	// this domain name now". "Make an offer" alone is any shop's.
+	parkingActionRE = regexp.MustCompile(`(?i)^(?:buy|get|lease|make\s+an\s+offer\s+on|inquire\s+about)` +
+		`\s+this\s+domain(?:\s+name)?(?:\s+(?:now|today))?\s*[.!]?$`)
 
 	// parkingHeadingRE matches the heading of a search-ads parking page,
 	// over its ad links: "Related Searches:", "Related Search Topics".

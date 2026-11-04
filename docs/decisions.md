@@ -157,7 +157,7 @@ when the entry was first committed.
 - 2026-10-03 — [Louvain: ours, warm-started; gonum as a test oracle](#louvain-ours-warm-started-gonum-as-a-test-oracle) (revised)
 - 2026-10-03 — [Interests: two levels, stable identities, automatic rebuilds](#interests-two-levels-stable-identities-automatic-rebuilds) (revised)
 - 2026-10-03 — [Dashboard: two-level interests](#dashboard-two-level-interests)
-- 2026-10-03 — [Page text: not-found notices, parked domains and sign-in forms](#page-text-not-found-notices-parked-domains-and-sign-in-forms)
+- 2026-10-03 — [Page text: not-found notices, parked domains and sign-in forms](#page-text-not-found-notices-parked-domains-and-sign-in-forms) (revised)
 - 2026-10-04 — [Interest map: two views of each regrouping, drawn when it is built](#interest-map-two-views-of-each-regrouping-drawn-when-it-is-built)
 - 2026-10-13 — [Search evaluation: graded, per kind, on a copy, never in the repo](#search-evaluation-graded-per-kind-on-a-copy-never-in-the-repo) (revised)
 - 2026-10-13 — [Model roles: a provider and model per use, inheriting generation's](#model-roles-a-provider-and-model-per-use-inheriting-generations) (revised)
@@ -165,6 +165,7 @@ when the entry was first committed.
 - 2026-10-14 — [Saved dates and search filters](#saved-dates-and-search-filters) (revised)
 - 2026-10-14 — [Chunks embedded with their context](#chunks-embedded-with-their-context)
 - 2026-10-14 — [Understanding the question: a planner role, one structured call, grounded filters, a fitness check](#understanding-the-question-a-planner-role-one-structured-call-grounded-filters-a-fitness-check)
+- 2026-11-03 — [Jina answers are stored without the site's chrome](#jina-answers-are-stored-without-the-sites-chrome)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -11815,6 +11816,51 @@ its refetch ends it failed or dead. The interests change only at the next
 rebuild, `curio interests rebuild`: 73 changed documents are below the
 automatic rebuild's threshold (5% of the library, 262 documents).
 
+**Revised (2026-11-03): marketplace wording.** `parkedDomainRE` takes a
+subject followed by a domain name ("The domain (name) <host> is for
+sale", checked against the requested host and its site like a bare one,
+through the group `named`), and the predicate "is" or "may be" (available
+or listed) for sale, lease or purchase ("This domain is available for
+purchase.", "is listed for sale: make an offer", "This domain name is for
+lease."); without a subject the predicate is still the whole line. A sale
+page's call to action on a line of its own is a notice too
+(`parkingActionRE`): "Buy", "Get", "Lease", "Make an offer on" or
+"Inquire about" "this domain (name)", optionally "now" or "today" and a
+closing "." or "!". "Make an offer" alone is any shop's button and stays
+out, as do "This lamp is available for purchase.", "The office is for
+lease." and "Buy this domain before your rival does: a guide" (test rows).
+The bounds are unchanged: the opening's first 256 bytes of own text.
+
+Why: a UI review found an interest labelled as domain names for sale or
+lease holding 87 fetched documents, and asked for the shapes that got
+past these rules. Measured on the owner's library (read-only, 2026-11-03),
+none did. The interest's label is the one an LLM gave it on 2026-10-03,
+when it held the parked pages this entry lists; those 19 are now `dead`
+(`dead_link`, their reasons the rules' quotes: "is for sale!", "This
+domain is for sale: $5,795", "Domain registration has expired.", …), and
+the identity kept its label while its members became other pages (the
+latest run's lineage: kept, 75 shared). Of the 87 now: 15 GitHub
+repositories, 2 videos and a PDF the text rules never read, and 69 pages
+through Readability (56) or Jina (13) that are the pages they were saved
+as (product homepages, articles, skill repositories), but for 4 a domain
+whose site moved on: two blogs of a closed hosting service whose host now
+shows its registrar's notice that the service has closed, a homepage
+redirected to a web host's homepage, and one redirected to a domain
+broker's. None says that its domain is for sale; a homepage redirected
+to another site's homepage is no verdict (`looksLikeLandingPage` needs the
+source to name a page), and one service's shutdown wording is one site's
+phrase list. Across the 4,688 fetched documents stored through
+Readability or Jina, a phrase search of the first 3 KB for "for sale",
+"buy this domain", "make an offer", the marketplaces' names and kin found
+20 pages, all articles or shops about something else for sale but the
+broker's. The old and the widened rules flag none of the 4,688, and both
+still flag the 19 dead ones from their stored text, so the widening
+changes no stored verdict: it covers the marketplaces' wording that the
+grammar couldn't parse ("The domain <host> may be for sale", "is
+available for purchase", "Buy this domain") before a page in it is
+bookmarked. The stale label is the interests' to fix (a carried identity
+keeps its label however its members change), not the fetcher's.
+
 ---
 
 ## Interest map: two views of each regrouping, drawn when it is built
@@ -15474,6 +15520,146 @@ refuses `understand` and `plan` in a request with its unknown-field 400;
 `PromptVersion` and its golden files: run `make search-eval` with the
 planned variants and the oracle file, and the weak control, before it is
 recorded. A weight is a config key, measured the same way.
+
+---
+
+## Jina answers are stored without the site's chrome
+
+**Decision:** a Jina Reader answer is judged whole, exactly as Reader sent
+it (`judgeJinaAnswer`: its warnings, then `judgePage`), and only an answer
+that passes is cleaned, for storage alone (`dropBoilerplate(body,
+target)`, pure, `internal/fetcher/boilerplate.go`). No verdict reads the
+cleaned text, so the cleaning changes none: the thin floor, the text
+rules and the title rules see what they saw before
+(`TestNative_JinaJudgedBeforeCleaning` pins it). The cleaner reads lines
+as the text rules do (`readLine`: images dropped, links reduced to their
+text), outside fenced code, in blocks (lines between blank lines), and
+drops:
+
+- a block of which every line shows only links, or nothing but a link or
+  an image: a menu, a story card's byline, a row of share buttons;
+- in other blocks, a list item that shows only links (a menu's item), and
+  a line that shows nothing but holds a link or an image ("![Image
+  3](…)", "[](…)"). A line of links that isn't a list item stays in a
+  block with text: a hard-wrapped paragraph can break around a link. The
+  lines indented under a dropped list item lose its marker's width, so a
+  description under a menu item doesn't turn into a code block, and a
+  nested item's note joins its parent item;
+- a line that is a site's chrome as a whole, at most 300 bytes
+  (`chromeLineRE`, `chromeLineBytes`), when its block holds only such
+  lines, links and lines that show nothing, and the block is outside the
+  page's body: a skip link, a copyright notice ("©" and a year anywhere,
+  "Copyright" or "(c)" and a year first, or "all rights reserved"), a
+  cookie consent and its buttons, a sign-up consent ("By clicking … you
+  agree to …") and its sign-in buttons ("Sign up with Google"), a legal
+  footer's labels ("Privacy Policy", "Terms of Service", "Your Privacy
+  Choices", "Do Not Sell or Share My Personal Information"). The body
+  runs from the first block of prose to the last: a block with more than
+  200 bytes of own text, chrome lines aside (`bodyLineBytes`), however its
+  lines are wrapped. A chrome-like line inside a hard-wrapped paragraph
+  ("The company updated its / Privacy Policy / last week") or a PDF's
+  section title between its paragraphs stays; a page with no prose block
+  has no body, and its chrome blocks go wherever they are.
+
+**What stays:** headings, quoted lines and code; a list of links under a
+heading of plain text, under one whose links lead to the page itself
+(`linksHere`: fragments, or the requested URL whatever its scheme,
+"www.", fragment and trailing slash), or under a lead-in, a line that
+ends with a colon ("This guide covers the following topics:", a list
+item "Next steps:") or is emphasis alone ("**Contents**"), in its block
+or the blocks after it, up to the next line of own text that isn't a
+list item or a lead-in, heading of other links, quote or code: a table of
+contents or a reading list is the section's content, not a menu. Every
+kept line is kept byte for byte but for that dedent; runs of blank lines
+become one. An answer it would leave without own text is stored whole (a
+page of links that passed judgement is the page asked for), as is one it
+drops nothing from.
+
+**Why:** a nonsense query ranked pages by passages that were menus,
+footers, cookie and sign-up dialogs and link lists. Each such passage came
+through Jina, which converts the whole page; Readability keeps its
+article. On the owner's library (read-only, 2026-11-03; 5,329 fetched
+documents, 1,245 stored through Jina and 3,443 through Readability), the
+documents with a chunk holding "Skip to main content" or "Skip to
+content": 365 through Jina, 43 through Readability; "Privacy Policy": 418
+against 56; a cookie policy or "Your Privacy Choices": 276 against 19;
+"Sign up with Google" or its kin: 242 against 2; "All rights reserved":
+182 against 46. The passages the review quoted are Jina's (140 documents
+carry one site's "Site design / logo ©" footer alone). The cleaner, run
+over the stored Jina answers (what a refetch would store from the same
+answers), measures:
+
+| | Jina documents |
+|---|---|
+| Stored bytes | 30.8 MB → 20.8 MB (−33%) |
+| Chunks (384 words, 48 overlap) | 14,300 → 10,069 (−30%) |
+| Documents losing a chunk | 680 of 1,245 |
+| Documents untouched | 90 |
+| Shown words dropped, by decile | 0–10%: 736, 10–20%: 229, 20–30%: 140, 30–40%: 39, 40–50%: 28, 50–60%: 25, 60–70%: 28, 70–80%: 9, 80–90%: 7, 90–100%: 4 |
+
+Words shown in links aren't the page's own text, in the text rules'
+terms. Own text is lost only by the chrome templates: 1,103 lines in 163
+distinct forms, reviewed, all chrome (copyright lines, cookie and sign-up
+consents, sign-in buttons, footer labels; the longest a 272-byte cookie
+consent). 33 documents lose more than 10% of their own words, all short
+pages whose lost lines are such footers. The pages that lose most are
+those Jina read only the chrome of (an article whose answer was its
+site's story cards, a news portal's homepage); a specification's cover
+page keeps its 721-word table of contents under its heading linking to
+itself, a tutorial its contents under "Table of Contents", and a guide
+its topics under "This guide covers the following topics:" (a review of
+the first version found 31 documents, 240 list items, lost under a
+lead-in that wasn't a heading).
+
+**Why at the fetcher, and for Jina only:** the stored markdown is what the
+document page shows and what `word_count`, the chunks, BM25 and both
+vector lists read, so the extraction is where the chrome belongs out,
+like Readability's own. Readability's link lists are its article's
+(references, a reading list), and its documents carry an order of
+magnitude less of this boilerplate; the indexer reads every fetcher's
+markdown (GitHub READMEs, transcripts, PDFs), whose link lists are
+content, and a chunker change would need a new chunks golden and a
+re-embed of every home. The cleaner costs at most about 160 ms a MiB
+(1 MiB of 2-byte lines; 1 MiB of menu lines 48 ms), linear in the
+answer, capped at 32 MiB.
+
+**Not done: Reader's `X-Remove-Selector`.** Reader can drop elements by a
+CSS selector before it converts the page (`removeSelector` in its
+`crawler-options.ts`, the header split at ", "; "Exclude (CSS Selector)"
+on jina.ai/reader), and a first version sent `nav, footer, body > header,
+[role="navigation"], [role="banner"], [role="contentinfo"]`. It changes
+what is judged: the thin floor (500 bytes of the answer, links and all)
+would then count a page without its menus. Run as a proxy over the
+stored answers (the line rules standing in for the selector, an upper
+bound), 31 answers fall from 500 bytes or more to under 500 and 48 from
+1 KiB or more to under 1 KiB, and a refetch would reject them for good.
+About half are pages Reader read nothing of (a search error, a portal's
+cards, an empty profile, a sign-in dialog), and about half are real short
+pages carried past the floor by their links: a project's homepage, a
+library's landing page, a documentation stub, a portfolio's index, a
+personal site's homepage. The selector's own gain was never measured
+apart from the line rules', and it has risks of its own: `nav` holds some
+articles' tables of contents (`<nav id="TableOfContents">`), `footer`
+some blockquotes' attributions, and a header or banner a landing page's
+tagline or a small blog's title. So no selector is sent and every verdict
+is what it was. A selector with a second, unselected request for an
+answer it makes thin would keep both, at a Jina request (of 20 a minute)
+for every thin page.
+
+**Accepted risks.** A page made only of links to other pages, with no
+heading or lead-in above them (a link directory, a portal's homepage),
+keeps only its own text, or all of itself when it has none. A story
+card's heading of links stays though its byline goes. A block of chrome
+templates alone outside the body is dropped from an article that opens
+or ends with one (a photo's "© 2019 …" credit on its own after the last
+paragraph; one in a caption's block stays).
+
+**Existing documents:** the change cleans what is fetched from now on;
+nothing stored changes until it is refetched. The Jina documents stay as
+they are until then (each refetch asks the origin, then Jina, at Jina's
+pace: 20 a minute without a key, 6 a minute per site), which re-indexes
+them; their interests follow at the next rebuild. A reindex doesn't help:
+it reads the stored markdown.
 
 ---
 

@@ -1118,8 +1118,9 @@ documents (`curio refetch --all --state=dead`, or `curio refetch <id>
 (text reads like a parked domain: "…")`** on a document — the page
 answered, but under a title that doesn't say so, its text opens by saying
 the page is gone ("PAGE NOT FOUND", "We can’t find the page you’re looking
-for.") or that the domain is for sale, parked, expired or just registered
-("is for sale!", "Domain registration has expired."). The reason quotes
+for.") or that the domain is for sale or lease, parked, expired or just
+registered ("is for sale!", "Domain registration has expired.", "Buy
+this domain"). The reason quotes
 the line. Only the page's opening counts: its own lines, menus, other
 lines of links and code blocks left out, up to its first paragraph and
 within its first 2 KiB (a parked domain's notice within its first 256
