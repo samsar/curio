@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"html"
 	"slices"
 	"strings"
 	"unicode"
@@ -16,7 +17,10 @@ const passageRunes = 300
 // markup reads as noise in a line of text (a chunk holds no newlines, so
 // even a heading is inline), so the markup is taken out and the text it
 // wraps kept: a link's text without its destination, an image's alt text,
-// emphasis without its asterisks. A snippet the markup leaves nothing of
+// emphasis without its asterisks, an HTML element's text without its tags,
+// a character reference as its character,
+// whole or cut by the snippet at either end; and an emoji's shortcode
+// (:fire:), which only GitHub draws, goes. A snippet the markup leaves nothing of
 // falls back to the text. The segments are plain text, which the template
 // escapes; the document's page shows the whole text as it is formatted.
 func Passage(snippet, text string) []Segment {
@@ -51,6 +55,8 @@ type passage struct {
 	literal []bool // escaped: taken as itself, never read as markup
 	drop    []bool
 	start   int // where the text starts, after FTS5's leading ellipsis
+	// lastClose is where the text's last "-->" starts, -1 for none.
+	lastClose int
 }
 
 func newPassage(segs []Segment) *passage {
@@ -74,11 +80,13 @@ func newPassage(segs []Segment) *passage {
 func (p *passage) clean() []Segment {
 	p.escapes()
 	p.leadingDestination()
+	p.leadingTag()
 	p.links()
 	p.emphasis()
 	p.headings()
 	p.quotes()
 	p.htmlTags()
+	p.shortcodes()
 	p.tableRules()
 	return p.segments()
 }
@@ -302,11 +310,32 @@ var htmlElements = map[string]bool{
 	"table": true, "thead": true, "tbody": true, "tr": true, "td": true, "th": true, "h1": true, "h2": true,
 	"h3": true, "h4": true, "h5": true, "h6": true, "hr": true, "picture": true, "source": true,
 	"figure": true, "figcaption": true, "video": true, "audio": true, "iframe": true, "center": true,
-	"font": true,
+	"font": true, "section": true, "article": true, "header": true, "footer": true, "nav": true, "aside": true,
+	"main": true, "blockquote": true, "dl": true, "dt": true, "dd": true, "del": true, "ins": true, "svg": true,
+	"path": true, "caption": true, "time": true, "cite": true, "q": true, "abbr": true, "wbr": true,
+	"strike": true, "tt": true, "big": true, "label": true, "input": true, "button": true, "noscript": true,
 }
 
-// htmlTags drops the tags of htmlElements, opening and closing.
+// maxCutTag is how far from a passage's end a tag the snippet cut may
+// start, or how far into it one it starts inside may end: FTS5 cuts a
+// snippet at tens of words, so a '<' further from the end opens no tag the
+// snippet cut.
+const maxCutTag = 512
+
+// htmlTags drops the tags of htmlElements, opening and closing, and HTML
+// comments: a whole one, or, in a snippet FTS5 cut at its end (its last
+// rune its ellipsis), one that cut, which goes to that end, the ellipsis
+// kept, when what follows its name reads as a tag's: spaces, or an
+// attribute. A text that isn't cut keeps an unclosed tag as text: "a <b c" is
+// no tag.
 func (p *passage) htmlTags() {
+	p.lastClose = -1
+	for i := len(p.r) - 3; i >= 0; i-- {
+		if p.r[i] == '-' && p.r[i+1] == '-' && p.r[i+2] == '>' {
+			p.lastClose = i
+			break
+		}
+	}
 	for i := 0; i < len(p.r); i++ {
 		if p.r[i] != '<' || !p.markup(i) {
 			continue
@@ -318,11 +347,28 @@ func (p *passage) htmlTags() {
 	}
 }
 
-// htmlTag reports whether a tag of one of htmlElements starts at the '<'
-// at i, and the index of its '>'. The tag ends at the first '>', and a '<'
-// before it means it wasn't one.
+// htmlTag reports whether a tag of one of htmlElements, or a comment,
+// starts at the '<' at i, and the index of its last rune: its '>', or for
+// one cut at the end, the passage's last rune before FTS5's ellipsis. A
+// tag ends at the first '>', and a '<' before it means it wasn't one. A
+// tag cut inside its name counts when the name is the start of an
+// element's.
 func (p *passage) htmlTag(i int) (int, bool) {
 	n := len(p.r)
+	last := -1 // the last rune a tag cut at the end takes; none unless the snippet was cut there
+	if n-1 > i && p.r[n-1] == ellipsis && n-i <= maxCutTag {
+		last = n - 2
+	}
+	if p.comment(i) {
+		// A comment closes at the first "-->" after it, and no scan runs
+		// past the last: an unclosed comment's scan would, from each '<'.
+		for j := i + 4; j <= p.lastClose; j++ {
+			if p.r[j] == '-' && p.r[j+1] == '-' && p.r[j+2] == '>' {
+				return j + 2, true
+			}
+		}
+		return last, last >= i
+	}
 	j := i + 1
 	if j < n && p.r[j] == '/' {
 		j++
@@ -331,19 +377,106 @@ func (p *passage) htmlTag(i int) (int, bool) {
 	for j < n && p.r[j] < unicode.MaxASCII && (unicode.IsLetter(p.r[j]) || unicode.IsDigit(p.r[j])) {
 		j++
 	}
-	if !htmlElements[strings.ToLower(string(p.r[name:j]))] ||
-		(j < n && !unicode.IsSpace(p.r[j]) && p.r[j] != '/' && p.r[j] != '>') {
+	tag := strings.ToLower(string(p.r[name:j]))
+	if j > last && j > name && last >= i {
+		return last, elementPrefix(tag)
+	}
+	if !htmlElements[tag] || (j < n && !unicode.IsSpace(p.r[j]) && p.r[j] != '/' && p.r[j] != '>') {
 		return 0, false
 	}
+	// A tag cut at the end reads as one: nothing after its name but
+	// spaces, or an attribute's '='. "<b y then c…" is text.
+	attr, words := false, false
 	for ; j < n; j++ {
-		switch p.r[j] {
-		case '>':
+		switch c := p.r[j]; {
+		case c == '>':
 			return j, true
-		case '<':
+		case c == '<':
 			return 0, false
+		case c == '=':
+			attr = true
+		case j < n-1 && !unicode.IsSpace(c) && c != '/':
+			words = true
 		}
 	}
-	return 0, false
+	return last, last >= i && (attr || !words)
+}
+
+// comment reports whether an HTML comment, "<!--", starts at i.
+func (p *passage) comment(i int) bool {
+	return i+3 < len(p.r) && p.r[i+1] == '!' && p.r[i+2] == '-' && p.r[i+3] == '-'
+}
+
+// elementPrefix reports whether name, a tag's name cut by the end of the
+// passage, starts the name of one of htmlElements.
+func elementPrefix(name string) bool {
+	for e := range htmlElements {
+		if strings.HasPrefix(e, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// leadingTag drops the end of a tag a snippet FTS5 cut at its start (its
+// leading ellipsis) starts inside: its run up to the first '>', when no '<'
+// comes first, the run holds an attribute's value (=" or =') and the '>'
+// closes a quote or a "/". "a => b" and "x > 5" stay, and so does a text
+// that wasn't cut.
+func (p *passage) leadingTag() {
+	if p.start == 0 {
+		return
+	}
+	value := false
+	for i := p.start; i < len(p.r) && i-p.start < maxCutTag; i++ {
+		if !p.markup(i) {
+			continue
+		}
+		switch c := p.r[i]; {
+		case c == '<':
+			return
+		case c == '=' && i+1 < len(p.r) && (p.r[i+1] == '"' || p.r[i+1] == '\''):
+			value = true
+		case c == '>':
+			if prev := p.r[max(i-1, 0)]; value && (prev == '"' || prev == '\'' || prev == '/') {
+				p.dropRange(p.start, i+1)
+			}
+			return
+		}
+	}
+}
+
+// maxShortcode is the longest emoji shortcode's name shortcodes drops.
+const maxShortcode = 40
+
+// shortcodes drops emoji shortcodes, which GitHub's markdown draws and
+// stored text keeps as written: ":" a name of lower-case letters, digits,
+// '_', '+' and '-', with a letter in it or a sign first (:+1:), and ":",
+// with neither a letter
+// nor a digit next to it on either side. "10:30:45", "std::vector" and
+// "http://x" stay.
+func (p *passage) shortcodes() {
+	n := len(p.r)
+	for i := 0; i < n; i++ {
+		if p.r[i] != ':' || !p.markup(i) || (i > 0 && (isWord(p.r[i-1]) || p.r[i-1] == ':')) {
+			continue
+		}
+		letter := false
+		j := i + 1
+		for ; j < n && j-i <= maxShortcode; j++ {
+			c := p.r[j]
+			if c >= 'a' && c <= 'z' {
+				letter = true
+			} else if (c < '0' || c > '9') && c != '_' && c != '+' && c != '-' {
+				break
+			}
+		}
+		if j < n && j > i+1 && p.r[j] == ':' && (letter || p.r[i+1] == '+' || p.r[i+1] == '-') && p.markup(j) &&
+			(j+1 == n || (!isWord(p.r[j+1]) && p.r[j+1] != ':')) {
+			p.dropRange(i, j+1)
+			i = j
+		}
+	}
 }
 
 // tableRules drops a table's markup, flattened into the line: each word
@@ -379,7 +512,9 @@ type char struct {
 }
 
 // segments is what is left: its whitespace collapsed, its marks merged,
-// as runs of marked and unmarked text.
+// as runs of marked and unmarked text, with character references (&gt;,
+// &amp;, &#39;) read as the characters they name: stored text holds them
+// as an HTML page wrote them, and the page escapes the text again.
 func (p *passage) segments() []Segment {
 	chars := p.kept()
 	mergeMarks(chars)
@@ -388,7 +523,7 @@ func (p *passage) segments() []Segment {
 	for i, c := range chars {
 		b.WriteRune(c.r)
 		if i+1 == len(chars) || chars[i+1].mark != c.mark {
-			segs = append(segs, Segment{Text: b.String(), Mark: c.mark})
+			segs = append(segs, Segment{Text: html.UnescapeString(b.String()), Mark: c.mark})
 			b.Reset()
 		}
 	}

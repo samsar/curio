@@ -28,6 +28,7 @@ after a rebuild that split, merged or dissolved interests, a note says so.
 {{- template "rebuild-control" .Rebuild}}
 {{- if and .Rebuild.Enabled .Run}}<span class="no-js muted">Rebuild them with <code>curio interests rebuild</code>.</span>{{end}}</div>
 </div>
+{{if .Rebuild.Enabled}}{{template "rebuild-confirm" .Rebuild}}{{end}}
 {{template "interests-subnav" .Views}}
 {{if .RunChanged}}<div class="callout callout-info mb-4" role="note">{{template "icon" "info"}}<div class="callout-body"><p>The interests were rebuilt since the page you came from, so this page {{if .OutOfRange}}is past the new run's last{{else}}lists the new run's{{end}}.{{if gt .Page 1}} <a href="{{.FirstPage}}">Start again from page 1</a>.{{end}}</p></div></div>
 {{end}}
@@ -35,7 +36,7 @@ after a rebuild that split, merged or dissolved interests, a note says so.
 {{end}}
 <section class="card mb-4" aria-label="Coverage"><div class="card-body"><div class="coverage">
 {{template "stackbar" .Bar}}
-<div class="legend">{{range .Legend}}<span class="item"><span class="swatch swatch-{{.Tone}}"></span><span class="n">{{num .Count}}</span> {{.Label}} <span class="pct">{{pct .Count $.Run.CoverageTotal}}</span></span>{{end}}<span class="item run">Run of {{when .ComputedAt}}{{with .Kind}} · {{.}}{{end}} · {{count .Documents "document" "documents"}}</span></div>
+<div class="legend">{{range .Legend}}<span class="item"><span class="swatch swatch-{{.Tone}}"></span><span class="n">{{num .Count}}</span> {{.Label}} <span class="pct">{{pct .Count $.Run.CoverageTotal}}</span></span>{{end}}<span class="item run">Rebuilt {{when .ComputedAt}}{{with kindLabel .Kind}}, {{.}}{{end}} · {{count .Documents "document" "documents"}}</span></div>
 </div></div></section>
 {{end}}
 {{- if .OutOfRange}}{{template "out-of-range" .OutOfRange}}
@@ -110,13 +111,32 @@ live role.
 {{- end}}
 
 {{/*
-The Rebuild button, while insight is on: disabled while the queue holds a
-rebuild, queued or running, the only change that replaces it. A held or
-failing state leaves it on: a rebuild asked for isn't held, and retries a
-failure now.
+The Rebuild button, while insight is on: it opens the confirm
+(rebuild-confirm), and is disabled while the queue holds a rebuild,
+queued or running, the only change that replaces it. A held or failing
+state leaves it on: a rebuild asked for isn't held, and retries a failure
+now.
 */}}
 {{define "rebuild-control" -}}
 <div class="rebuild-control js-only" id="rebuild-control">
-{{- if .Enabled}}<button class="btn" type="button" id="rebuild"{{if .InFlight}} aria-disabled="true" title="A rebuild is already queued or running"{{end}}{{template "action" .Action}}>{{template "icon" "refresh"}}Rebuild</button>{{end -}}
+{{- if .Enabled}}{{if .InFlight}}<button class="btn" type="button" id="rebuild" aria-disabled="true" title="A rebuild is already queued or running">{{template "icon" "refresh"}}Rebuild</button>
+{{- else}}<button class="btn" type="button" id="rebuild" popovertarget="confirm-rebuild">{{template "icon" "refresh"}}Rebuild…</button>{{end}}{{end -}}
+</div>
+{{- end}}
+
+{{/*
+The Rebuild button's confirm, outside the polled regions: what a rebuild
+does, in plain words, and that the interests known keep their names. Its
+Rebuild sends the change; a rebuild already queued answers with that one.
+*/}}
+{{define "rebuild-confirm" -}}
+<div class="confirm" id="confirm-rebuild" popover role="alertdialog" aria-labelledby="confirm-rebuild-title" aria-describedby="confirm-rebuild-text">
+<h2 id="confirm-rebuild-title">{{template "icon" "refresh"}}Rebuild your interests?</h2>
+<p id="confirm-rebuild-text">curio groups your library again by what its pages are about, and names any new interest. Interests you know keep their names and their pages, unless the new grouping splits or merges them. It runs in the background, a couple of minutes on a large library, and this page offers the new interests when it is done.</p>
+<p class="confirm-note">curio also rebuilds them on its own once enough of the library changes.</p>
+<div class="actions">
+<button class="btn" type="button" id="rebuild-cancel" popovertarget="confirm-rebuild" popovertargetaction="hide" autofocus>Cancel</button>
+<button class="btn btn-primary" type="button" id="rebuild-confirm" popovertarget="confirm-rebuild" popovertargetaction="hide"{{template "action" .Action}}>Rebuild</button>
+</div>
 </div>
 {{- end}}

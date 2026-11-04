@@ -912,7 +912,7 @@
     legend: m => [words('span', '', 'Each dot is a document, coloured by its ' + (m.flat ? 'interest' : 'area')),
       key('map-key-unsorted', 'unsorted'), key('map-key-loose', 'loose fit'), key('map-key-new', 'new')],
     about: m => 'Every document is a dot near the documents most like it, coloured by its ' +
-      (m.flat ? 'interest' : 'area') + ': grey dots are unsorted, rings loose fits, ringed dots new since the rebuild.',
+      (m.flat ? 'interest' : 'area') + ': grey dots unsorted, rings near an interest but not in it, ringed dots new.',
   };
 
   // allLabels names what the zoom allows on By similarity: the selected group first, then the areas (the
@@ -1112,7 +1112,7 @@
   const newIn = (m, list) => list.filter(d => m.docs.fit[d] === 'new').length;
   const documentRows = (m, list) => rows(list.map(d => documentRow(m, d, two(m.docs.similarity[d]))));
 
-  // groupRow leads to an area, an interest or Unsorted: its colour, its name on one line, n, and extra.
+  // groupRow leads to an area, an interest or Unsorted: its colour, its name in two lines at most, n, and extra.
   function groupRow(m, kind, i, n, extra) {
     const sel = kind === 'unsorted' ? {kind} : {kind, i};
     return go(el('button', {type: 'button', class: 'map-row'}, swatch(slotOf(m, sel)), el('span',
@@ -1146,7 +1146,7 @@
     const fresh = newIn(m, m.areaDocs[a]);
     return [
       stats([num(area.size), 'documents'], [num(m.areaInterests[a].length), 'interests'], fresh && [num(fresh), 'new'],
-        [two(area.cohesion), 'cohesion']),
+        [two(area.cohesion), 'alike']),
       section('Interests', rows(m.areaInterests[a].map(i => groupRow(m, 'interest', i, num(m.interests[i].size))))),
       link(interestPage, area.id, 'Open area page', 'btn btn-sm map-open'),
     ];
@@ -1158,7 +1158,7 @@
     const [loose, fresh] = [list.filter(d => m.docs.fit[d] === 'loose').length, newIn(m, list)];
     return [
       stats([num(it.size), 'documents'], loose && [num(loose), loose === 1 ? 'loose fit' : 'loose fits'],
-        fresh && [num(fresh), 'new'], [two(it.cohesion), 'cohesion']),
+        fresh && [num(fresh), 'new'], [two(it.cohesion), 'alike']),
       it.area >= 0 && el('dl', {class: 'facts'}, words('dt', '', 'Area'), el('dd', {}, groupButton(m, 'area',
         it.area))),
       section('Closest documents', documentRows(m, list.slice(0, closestShown))),

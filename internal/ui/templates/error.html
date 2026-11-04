@@ -1,9 +1,16 @@
+{{/*
+An error: what went wrong for people first (ErrorPage.Lead), then the
+daemon's words for it, and the status with the problem's title, smaller;
+the request to look up in the log, and the way on: a page that helps, or
+the page to start over from.
+*/}}
 {{define "content" -}}
 <div class="center-page"><div class="card center-card">
-<div class="big-code">{{.Status}}</div>
-<h1>{{.Title}}</h1>
-<p>{{.Message}}</p>
+<h1>{{.Lead}}</h1>
+{{with .Message}}<p>{{.}}</p>{{end}}
+<p class="error-code">Error {{.Status}} · {{.Title}}</p>
 {{with .RequestID}}<p class="meta">Request {{.}} · see <code>curio daemon logs</code></p>{{end}}
-{{with navHref .Retry}}<div class="actions"><a class="btn btn-primary" href="{{.}}">Start over</a></div>{{end}}
+{{with .Back}}<div class="actions"><a class="btn btn-primary" href="{{.Href}}">{{.Label}}</a></div>
+{{- else}}{{with navHref .Retry}}<div class="actions"><a class="btn btn-primary" href="{{.}}">Start over</a></div>{{end}}{{end}}
 </div></div>
 {{- end}}

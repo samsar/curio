@@ -1,15 +1,14 @@
-/* The dashboard's changes, and the upkeep of its live regions.
-
+/* The dashboard's changes, the upkeep of its live regions, and its /.
    A control carries its change as data attributes built in Go
    (internal/ui/actions.go): data-method, data-path under /v1/, and a
    button's data-body, a checkbox's state under data-field, or a form's
    fields, those sharing a name joined by data-join. This sends it as JSON,
    one change at a time, and writes what came of it into the .action-status
    data-status names: data-done (data-done-off for an unchecked checkbox) or
-   the daemon's problem (TestDashboard_ActionsMatchTheAPI mirrors it). The
-   hooks at the end hold the pollers ([data-poll]) while nobody looks or a
-   change is in flight, mark the page stale while the daemon doesn't answer,
-   and leave an unchanged region alone. */
+   the daemon's problem (TestDashboard_ActionsMatchTheAPI mirrors it). Its
+   hooks hold the pollers ([data-poll]) while nobody looks or a change is in
+   flight, mark the page stale while the daemon doesn't answer, and leave an
+   unchanged region alone. / focuses the page's search box. */
 (function () {
   'use strict';
 
@@ -19,10 +18,7 @@
   const timeoutMs = 15000;
   const changed = 'curio:changed';
   let inFlight = false;
-
-  function isCheckbox(control) {
-    return control instanceof HTMLInputElement && control.type === 'checkbox';
-  }
+  const isCheckbox = control => control instanceof HTMLInputElement && control.type === 'checkbox';
 
   function report(control, state, text) {
     const status = document.getElementById(control.getAttribute('data-status') || '');
@@ -32,8 +28,7 @@
     }
   }
 
-  // target is the URL data-path names: null unless it is a path under /v1/
-  // of this page's own origin.
+  // target is the URL data-path names: null but for a path under /v1/ here.
   function target(control) {
     let url;
     try {
@@ -44,8 +39,7 @@
     return url.origin === location.origin && url.pathname.startsWith('/v1/') ? url : null;
   }
 
-  // body is the JSON a control sends, or null for none.
-  function body(control) {
+  function body(control) { // the JSON a control sends, or null for none
     if (isCheckbox(control)) {
       return JSON.stringify({[control.getAttribute('data-field')]: control.checked});
     }
@@ -63,16 +57,14 @@
     return JSON.stringify(fields);
   }
 
-  // refusal is what the daemon said when it refused a change: its problem's
-  // detail, else its title, else the status of an answer that isn't one.
+  // refusal is a refused change's problem's detail, title, or else status.
   async function refusal(resp) {
     const p = await resp.json().catch(function () { return null; });
     const text = p && (p.detail || p.title);
     return typeof text === 'string' && text ? text : 'HTTP ' + resp.status;
   }
 
-  // send sends control's change and reports what came of it: true when the
-  // daemon took it.
+  // send sends control's change and reports it: true when the daemon took it.
   async function send(control) {
     const method = control.getAttribute('data-method');
     const url = target(control);
@@ -102,15 +94,13 @@
     return true;
   }
 
-  // setBack undoes a checkbox's change the daemon didn't take.
-  function setBack(control, taken) {
+  function setBack(control, taken) { // undoes a checkbox's change the daemon didn't take
     if (!taken && isCheckbox(control)) {
       control.checked = !control.checked;
     }
   }
 
-  // act sends control's change, unless it is stored content's, disabled,
-  // or another change is in flight.
+  // act sends control's change: not stored content's, a disabled one's or a second.
   async function act(control) {
     if (control.closest('.prose') || control.disabled || control.getAttribute('aria-disabled') === 'true' ||
         inFlight) {
@@ -158,17 +148,14 @@
     return elt instanceof Element && elt.hasAttribute('data-poll');
   }
 
-  // A poll waits while nobody sees the page, or while a change is in
-  // flight: its answer could land before the change's.
+  // A poll waits while nobody looks, or for a change in flight, whose answer it could beat.
   document.addEventListener('htmx:beforeRequest', function (event) {
     if (fromPoller(event) && (document.hidden || inFlight)) {
       event.preventDefault();
     }
   });
-  // An answer that isn't the page (the starting page, an error) marks it
-  // stale and swaps nothing. Checked before the swap: a poller that lists
-  // itself is replaced by it, and a replaced element's events no longer
-  // reach the document.
+  // An answer that isn't the page (starting, an error) marks it stale and swaps
+  // nothing, checked before the swap, which replaces a poller listing itself.
   document.addEventListener('htmx:beforeSwap', function (event) {
     if (!fromPoller(event)) {
       return;
@@ -184,8 +171,7 @@
       root.setAttribute('data-stale', '');
     }
   });
-  // A region that didn't change keeps its element, its focus, and what a
-  // screen reader said of it.
+  // A region that didn't change keeps its element, focus and what was said.
   document.addEventListener('htmx:oobBeforeSwap', function (event) {
     const incoming = event.detail.fragment && event.detail.fragment.firstElementChild;
     if (incoming && incoming.isEqualNode(event.detail.target)) {
@@ -195,6 +181,20 @@
   document.addEventListener('visibilitychange', function () {
     if (!document.hidden) {
       document.body.dispatchEvent(new CustomEvent(changed));
+    }
+  });
+  // / focuses the search box: not in a field, with a modifier, over a confirm, or once a page took it.
+  window.addEventListener('keydown', function (event) {
+    if (event.key !== '/' || event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey ||
+        document.querySelector(':popover-open') ||
+        (event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable]'))) {
+      return;
+    }
+    const box = document.querySelector('input[type="search"][name="q"]');
+    if (box && box.offsetParent !== null) {
+      event.preventDefault();
+      box.focus();
+      box.select();
     }
   });
 })();

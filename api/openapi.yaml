@@ -2117,6 +2117,8 @@ components:
         took_ms:     { type: integer, description: "Time the search took, in milliseconds, understanding the query included" }
         bm25_hits:   { type: integer, description: "How many distinct chunks BM25 returned before fusion, over the query's and its rewrites' lists" }
         vector_hits: { type: integer, description: "How many distinct chunks the vector index returned before fusion, over the query's and its rewrites' lists (0 when degraded, and with search.vector_weight 0, which skips the vector search)" }
+        fields_hits: { type: integer, description: "How many distinct documents the fields list matched by the query's words (title, bookmark titles and folders, site, author), over every query of the search, each list read at most 200 deep (0 with search.fields_weight 0, which skips it)" }
+        title_hits:  { type: integer, description: "How many distinct documents the title list matched (every term in a title or a bookmark's title; only for two terms or more), over every query of the search, each list read at most 200 deep (0 with search.title_weight 0, which skips it)" }
         total:
           type: integer
           description: >
@@ -2158,7 +2160,7 @@ components:
         items:
           type: array
           items: { $ref: "#/components/schemas/SearchHit" }
-      required: [query, took_ms, bm25_hits, vector_hits, total, capped, items]
+      required: [query, took_ms, bm25_hits, vector_hits, fields_hits, title_hits, total, capped, items]
 
     # ---------- insight ----------
 

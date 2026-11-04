@@ -263,13 +263,13 @@ func TestFormat_RecoversOnlyBudgetStops(t *testing.T) {
 		m.md = goldmark.New(goldmark.WithParserOptions(parser.WithASTTransformers(util.Prioritized(panicking{v}, 0))))
 	}
 	panicsWith(errFormatAlloc)
-	html, remote, err := m.format([]byte("text\n"), docURL, false)
+	html, remote, err := m.format([]byte("text\n"), docURL, "", false)
 	require.ErrorIs(t, err, errFormatAlloc)
 	assert.Empty(t, html)
 	assert.Zero(t, remote)
 
 	panicsWith("a bug")
-	assert.PanicsWithValue(t, "a bug", func() { _, _, _ = m.format([]byte("text\n"), docURL, false) })
+	assert.PanicsWithValue(t, "a bug", func() { _, _, _ = m.format([]byte("text\n"), docURL, "", false) })
 }
 
 func TestCutMarkdown(t *testing.T) {
@@ -304,4 +304,47 @@ func TestCutMarkdown(t *testing.T) {
 	assert.True(t, cut)
 	assert.Greater(t, len(got), MaxRenderedMarkdown-utf8.UTFMax)
 	assert.True(t, utf8.RuneStart(runes[len(got)]), "cut before a character")
+}
+
+// TestRenderDocument_DropsTheTitleHeading: a text that opens with a
+// heading saying the page's title, its case, punctuation and spacing
+// aside, renders without it, so the page doesn't say its title twice; any
+// other first heading, a later one, or every heading of a page rendered
+// without a title stays.
+func TestRenderDocument_DropsTheTitleHeading(t *testing.T) {
+	r := newRenderer(t)
+	cases := []struct {
+		name, src, title string
+		dropped          bool
+	}{
+		{"the same words", "# Kafka: The *Definitive* Guide\n\nBody.\n", "Kafka — the definitive guide", true},
+		{"a setext heading", "Kafka Streams\n=============\n\nBody.\n", "Kafka streams", true},
+		{"a level 2 heading", "## Kafka Streams\n\nBody.\n", "Kafka Streams", true},
+		{"a linked heading", "# [Kafka Streams](https://kafka.example/)\n\nBody.\n", "Kafka Streams", true},
+		{"other words", "# Kafka Streams in Practice\n\nBody.\n", "Kafka Streams", false},
+		{"a level 3 heading", "### Kafka Streams\n\nBody.\n", "Kafka Streams", false},
+		{"not first", "Intro.\n\n# Kafka Streams\n\nBody.\n", "Kafka Streams", false},
+		{"no title", "# Kafka Streams\n\nBody.\n", "", false},
+		{"the heading alone", "# Kafka Streams\n", "Kafka Streams", false},
+		{"a title of punctuation", "# ---\n\nBody.\n", "—", false},
+		{"a heading far longer than the title", "# Kafka " + strings.Repeat("streams ", 200) + "\n\nBody.\n", "Kafka",
+			false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := r.RenderDocument([]byte(tc.src), docURL, tc.title, false)
+			require.NoError(t, err)
+			html := string(out.HTML)
+			if !strings.HasPrefix(tc.name, "the heading alone") {
+				assert.Contains(t, html, "Body.")
+			}
+			hasHeading := strings.Contains(html, "<h1") || strings.Contains(html, "<h2") || strings.Contains(html, "<h3")
+			assert.Equal(t, !tc.dropped, hasHeading, html)
+			uitest.AssertInert(t, html)
+		})
+	}
+	// RenderMarkdown never drops one.
+	out, err := r.RenderMarkdown([]byte("# Kafka Streams\n\nBody.\n"), docURL, false)
+	require.NoError(t, err)
+	assert.Contains(t, string(out.HTML), "<h1")
 }

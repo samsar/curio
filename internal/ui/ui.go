@@ -101,7 +101,15 @@ func (r *Renderer) Page(w http.ResponseWriter, status int, name string, data any
 // document's URL, which relative links and images resolve against, and
 // images shows its https images. See markdown for what it lets through.
 func (r *Renderer) RenderMarkdown(src []byte, base string, images bool) (Text, error) {
-	return r.markdown.render(src, base, images)
+	return r.markdown.render(src, base, "", images)
+}
+
+// RenderDocument renders a document's stored markdown as RenderMarkdown
+// does, under the page's heading, title: a first heading of the text that
+// says the same (sameHeading) is left out, so the page doesn't say it
+// twice, unless nothing follows it.
+func (r *Renderer) RenderDocument(src []byte, base, title string, images bool) (Text, error) {
+	return r.markdown.render(src, base, title, images)
 }
 
 // funcs are the templates' functions. Every link is built by one of them
@@ -157,6 +165,9 @@ func funcs(assets assetSet) template.FuncMap {
 		"fitClass":           fitClass,
 		"eventLabel":         eventLabel,
 		"triggerLabel":       triggerLabel,
+		"kindLabel":          kindLabel,
+		"poolLabel":          poolLabel,
+		"poolHint":           poolHint,
 		"freshReason":        freshReason,
 		"queueReason":        queueReason,
 		"jobHold":            jobHold,
