@@ -91,7 +91,8 @@ the document's page when there is one.
 {{- end}}
 
 {{/*
-A list's document cell, a DocCell: its name, where it lives, for a save
+A list's document cell, a DocCell: its name, where it lives (after its
+state, in the Library, when it isn't fetched), for a save
 the browser it came from on a wide screen (its folder on hover), on a
 phone the type and time its row's other columns hold there, and, for a
 failed one, why: the cause and the start of the error, the whole error on
@@ -99,7 +100,7 @@ hover.
 */}}
 {{define "doc-cell" -}}
 {{template "doc-title" .Ref}}
-<span class="doc-sub"><span class="host" title="{{.Ref.URL}}">{{.Where}}</span>
+<span class="doc-sub">{{with .Badge}}{{template "state-badge" .}}{{end}}<span class="host" title="{{.Ref.URL}}">{{.Where}}</span>
 {{- with .Source}}<span class="sep wide">·</span><span class="wide"{{with $.Folder}} title="{{.}}"{{end}}>{{.}}</span>{{end}}
 {{- with .ContentType}}<span class="sep narrow">·</span><span class="narrow">{{.}}</span>{{end}}
 {{- if and (not .Saved) (not .When.IsZero)}}<span class="sep narrow">·</span><span class="narrow">{{template "reltime" .When}}</span>{{end -}}
@@ -108,7 +109,7 @@ hover.
 <span class="doc-saved">{{template "saved-time" .}}</span>
 {{- end}}
 {{- if or .FailureCause .LastError}}
-<span class="doc-error"{{with .LastError}} title="{{.}}"{{end}}>{{with causeLabel .FailureCause}}<span class="err-cause">{{.}}</span> {{end}}{{with shortError .LastError}}<span class="msg">{{.}}</span>{{end}}</span>
+<span class="doc-error {{causeTone .FailureCause}}"{{with .LastError}} title="{{.}}"{{end}}>{{with causeLabel .FailureCause}}<span class="err-cause">{{.}}</span> {{end}}{{with shortError .LastError}}<span class="msg">{{.}}</span>{{end}}</span>
 {{- end}}
 {{- end}}
 
@@ -235,7 +236,7 @@ an interest shows its most similar members.
 {{define "area-card" -}}
 <h2>{{template "icon" "layers"}}<a href="{{interestHref .ID}}">{{with .Label}}{{.}}{{else}}<span class="unlabeled">Unlabeled area</span>{{end}}</a></h2>
 <div class="stats"><span><b>{{num .Size}}</b> documents</span><span><b>{{num .NumChildren}}</b> {{if eq .NumChildren 1}}interest{{else}}interests{{end}}</span>{{with .New}}<span class="new"><b>{{num .}}</b> new</span>{{end}}</div>
-{{with .Summary}}<p class="summary">{{.}}</p>{{end}}
+{{with .Summary}}<p class="summary">{{summaryText .}}</p>{{end}}
 {{with .Children}}<ul class="members children">{{range .}}<li><a href="{{interestHref .ID}}" title="{{.Name}}">{{with .Label}}{{.}}{{else}}<span class="unlabeled">Unlabeled interest</span>{{end}}</a>{{template "stackbar" (childBar .Size $.Largest)}}<span class="n">{{num .Size}}</span></li>{{end}}</ul>{{end}}
 <a class="all" href="{{interestHref .ID}}">{{with .MoreChildren}}+ {{count . "more interest" "more interests"}}{{else}}All {{count .NumChildren "interest" "interests"}}{{end}} →</a>
 {{- end}}
@@ -243,14 +244,18 @@ an interest shows its most similar members.
 {{define "interest-card" -}}
 <h2><a href="{{interestHref .ID}}">{{with .Label}}{{.}}{{else}}<span class="unlabeled">Unlabeled interest</span>{{end}}</a></h2>
 <div class="stats"><span><b>{{num .Size}}</b> documents</span>{{with .Loose}}<span title="{{template "loose-why"}}"><b>{{num .}}</b> {{if eq . 1}}loose fit{{else}}loose fits{{end}}</span>{{end}}{{with .New}}<span class="new"><b>{{num .}}</b> new</span>{{end}}{{template "cohesion" .Cohesion}}</div>
-{{with .Summary}}<p class="summary">{{.}}</p>{{end}}
+{{with .Summary}}<p class="summary">{{summaryText .}}</p>{{end}}
 {{with .Members}}<ul class="members">{{range .}}{{with .Ref}}<li><a{{with .Class}} class="{{.}}"{{end}} href="{{documentHref .ID}}" title="{{.Hover}}">{{.Name}}</a></li>{{end}}{{end}}</ul>{{end}}
 <a class="all" href="{{interestHref .ID}}">All {{num .Size}} documents →</a>
 {{- end}}
 
-{{/* An interest's cohesion: how alike its documents are, from 0 to 1. */}}
+{{/*
+An interest's cohesion: how alike its documents are, from 0 to 1, as a
+number alone. Cohesions and similarities sit between about 0.5 and 0.9,
+where a bar from 0 to 1 draws every one alike, so none has a bar.
+*/}}
 {{define "cohesion" -}}
-<span class="meter-row" title="{{template "alike-why"}}"><meter class="meter" min="0" max="1" value="{{printf "%.2f" .}}">{{printf "%.2f" .}}</meter>{{printf "%.2f" .}}</span>
+<span class="sim" title="{{template "alike-why"}}"><b>{{printf "%.2f" .}}</b> alike</span>
 {{- end}}
 
 {{/* What a group's cohesion means, for its title. */}}
@@ -259,9 +264,9 @@ an interest shows its most similar members.
 {{/* What a loose fit is, for a title. */}}
 {{define "loose-why"}}Loose fits are close to this interest without being grouped in it, and never name it{{end}}
 
-{{/* A document's similarity to an interest, from 0 to 1. */}}
+{{/* A document's similarity to an interest, from 0 to 1, a number alone (see cohesion). */}}
 {{define "similarity" -}}
-<span class="meter-row"><meter class="meter" min="0" max="1" value="{{printf "%.2f" .}}">{{printf "%.2f" .}}</meter>{{printf "%.2f" .}}</span>
+<span class="sim">{{printf "%.2f" .}}</span>
 {{- end}}
 
 {{/* A day a rebuild ran, on the daemon's clock, its time on hover. */}}
@@ -313,7 +318,7 @@ similarity; and how many more there are.
 <section class="band" aria-labelledby="new-band"><div class="band-head"><h2 id="new-band">New since the last rebuild</h2><p>Shown where they are most alike; the next rebuild decides where they belong.</p></div>
 <div class="table-scroll"><table class="data">
 <colgroup><col><col class="c-sim"></colgroup>
-<thead><tr><th scope="col">Document</th><th scope="col">Similarity</th></tr></thead>
+<thead><tr><th scope="col">Document</th><th scope="col" class="c-sim">Similarity</th></tr></thead>
 <tbody>
 {{range .Members}}<tr class="{{fitClass .Fit}}"><td>{{template "doc-cell" .Cell}}<span class="badge plain {{fitClass .Fit}}">new</span></td><td>{{template "similarity" .Similarity}}</td></tr>
 {{end}}</tbody>

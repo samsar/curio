@@ -566,7 +566,31 @@ type SearchHome struct {
 	// AllInterests how many it has.
 	Interests    []Interest
 	AllInterests int
+	// New counts the documents placed since the latest rebuild, and
+	// NewUnsorted those of them placed into Unsorted.
+	New, NewUnsorted int
+	// Lately are the newest saves, newest first, as the Library's Date
+	// saved order lists them (HomeLately of them at most); none when they
+	// couldn't be read.
+	Lately []LibraryRow
 }
+
+// HomeLately is how many of the newest saves the search home lists.
+const HomeLately = 8
+
+// NewHref is where the home's "new since the rebuild" line leads: to
+// Unsorted when every new document was placed there, else to the
+// Interests, whose cards count each group's new documents.
+func (h SearchHome) NewHref() string {
+	if h.New > 0 && h.New == h.NewUnsorted {
+		return unsortedHref(1, "")
+	}
+	return navHref(NavInterests)
+}
+
+// SavesHref is the Library in the Date saved order, all of the saves the
+// home's Lately saved begins.
+func (SearchHome) SavesHref() string { return libraryHref(LibraryFilters{Order: OrderSaved}, "") }
 
 // Placeholder is the search box's placeholder: how many documents there
 // are to search, when the home knows.
@@ -991,7 +1015,19 @@ type LibraryRow struct {
 func (r LibraryRow) Cell() DocCell {
 	ref := DocRef{ID: r.DocumentID, Title: r.Title, Fallback: r.BookmarkTitle, URL: r.URL}
 	return DocCell{Ref: ref, Where: ref.where(), Source: r.Source, Folder: r.Folder, ContentType: r.ContentType,
-		When: r.When, Saved: r.Saved, FailureCause: r.FailureCause, LastError: r.LastError}
+		When: r.When, Saved: r.Saved, FailureCause: r.FailureCause, LastError: r.LastError, State: r.State}
+}
+
+// LatelyCell is the row's cell in the search home's Lately saved: Cell,
+// but with the save's time as a plain time (SavedTime.Ago), so the line
+// under its name on a phone says when as "· 4 d ago", once, never "saved
+// by".
+func (r LibraryRow) LatelyCell() DocCell {
+	cell := r.Cell()
+	if r.Saved != nil {
+		cell.Saved, cell.When = nil, r.Saved.Ago()
+	}
+	return cell
 }
 
 // DocRef names a document in a list (the doc-title partial): by its
@@ -1066,6 +1102,19 @@ type DocCell struct {
 	Saved        *SavedTime
 	FailureCause string
 	LastError    string
+	// State is the document's, for a list of the library's rows; other
+	// lists leave it empty.
+	State string
+}
+
+// Badge is the state the cell shows a badge of: its State unless that is
+// fetched, the usual case, which a row that reads as a bookmark doesn't
+// say; "" for none.
+func (c DocCell) Badge() string {
+	if c.State == string(store.DocStateFetched) {
+		return ""
+	}
+	return c.State
 }
 
 // Failures is the Library's Failures tab: the library's failed and dead
@@ -1501,6 +1550,15 @@ func (s SavedTime) Shown() time.Time {
 		return s.At
 	}
 	return s.Imported
+}
+
+// Ago is the time a one-line list says a save was saved: when, for an
+// exact date; else Shown, the upper bound or when curio imported it.
+func (s SavedTime) Ago() time.Time {
+	if s.Exact() {
+		return s.At
+	}
+	return s.Shown()
 }
 
 // Why is an inexact time's title: what the time means.

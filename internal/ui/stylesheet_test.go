@@ -142,8 +142,8 @@ func TestStylesheet(t *testing.T) {
 	assert.Equal(t, "fixed", declarations(ruleFor(t, rules, "", "table.data").body)["table-layout"])
 	assert.Equal(t, "hidden", declarations(ruleFor(t, rules, "", "table.data td").body)["overflow"],
 		"a cell's content stays in its column")
-	for col, width := range map[string]string{"col.c-state": "7rem", "col.c-type": "6.5rem", "col.c-when": "7.5rem",
-		"col.c-saved": "11rem", "col.c-sim": "9.5rem", "col.c-rank": "3.5rem", "col.c-nearest": "16rem"} {
+	for col, width := range map[string]string{"col.c-type": "6.5rem", "col.c-when": "7.5rem",
+		"col.c-saved": "11rem", "col.c-sim": "6.5rem", "col.c-rank": "3.5rem", "col.c-nearest": "16rem"} {
 		assert.Equal(t, width, declarations(ruleFor(t, rules, "", col).body)["width"], col)
 	}
 	// A save's time takes two lines in its column: what it is, then when.
@@ -157,7 +157,6 @@ func TestStylesheet(t *testing.T) {
 	// Unsorted's nearest interest folds under the document's name, as the
 	// Library's type and time do.
 	assert.Equal(t, "none", declarations(ruleFor(t, rules, "", ".nearest-sub").body)["display"])
-	assert.Equal(t, "5.75rem", declarations(ruleFor(t, rules, phone, "col.c-state").body)["width"])
 	assert.Equal(t, "inline", declarations(ruleFor(t, rules, phone, ".doc-sub .narrow").body)["display"])
 	assert.Equal(t, "none", declarations(ruleFor(t, rules, phone, ".doc-sub .wide").body)["display"],
 		"a save's browser shows on wide screens only")

@@ -1118,8 +1118,8 @@ func TestUI_InterestsReads(t *testing.T) {
 	getPage(t, srv, "/ui/interests/"+areas.Areas[0]+"?page=x", http.StatusBadRequest)
 	assert.Empty(t, r.take())
 	getPage(t, srv, "/ui/", http.StatusOK)
-	assert.Equal(t, map[string]int{"stats": 1, "done run": 1, "interests": 1}, r.take(),
-		"the search home names the areas, never reading their interests or what was placed into them")
+	assert.Equal(t, map[string]int{"stats": 1, "saves": 1, "done run": 1, "interests": 1, "new counts": 1}, r.take(),
+		"the search home names the areas and counts what was placed since, never reading their interests")
 
 	enqueueRebuild(t, srv)
 	_, err := srv.Deps.Queue.ClaimNext(context.Background(), []store.JobKind{store.JobKindCluster})

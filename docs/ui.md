@@ -80,9 +80,14 @@ footer names the address the daemon listens on.
 - **Search** (`/ui/`, the home): a search box, with a type filter under
   it (All, Articles, Repos, Videos, PDFs). With nothing typed, the box
   says how many documents there are to search ("Search your 4,498
-  documents"), and a quiet line at the foot of the screen names your six
-  largest areas (or interests, in a library too small for areas), each
-  linking to its page, and links to all of them.
+  documents"). Under it, in the box's column: a quiet line naming your
+  six largest areas (or interests, in a library too small for areas),
+  each linking to its page, with a link to all of them; when documents
+  were placed since the interests were rebuilt, a line saying how many
+  ("12 documents new since the interests were rebuilt"), leading to
+  Unsorted when they all went there and to Interests otherwise; and
+  **Lately saved**, your eight newest saves as the Library's Date saved
+  order lists them, with **All saves →** to that order.
   Type, and the same hybrid search as `curio search` runs as you type,
   limited to the type chosen, which the address keeps
   (`/ui/?q=kafka&content_type=pdf`). The results come 10 a page, with
@@ -162,13 +167,19 @@ footer names the address the daemon listens on.
   Filters narrow it by type, host (`example.com`, exactly) and bookmark
   folder (the folder and the folders under it), and Apply keeps the tab
   chosen. Each row shows the title, in two lines at most (the whole on
-  hover), with where the page lives under it, its state, type and when it
-  was last updated. A page with no title of its own (every one that
+  hover), with where the page lives under it, its type and when it was
+  last updated. A row reads as a bookmark: a fetched document, the usual
+  case, shows no state, and any other has its state's badge at the head
+  of the line under its name. A page with no title of its own (every one that
   failed, and a few others) is named by its bookmark's title, in italics,
   with its address under it; one without a titled bookmark, or whose
   bookmark's title is an address, is named by its short address, in the
   same italics, with its host under it. A failed or dead row adds why it failed, its cause and the start of
-  its error, with the whole error on hover and on the document's page. On
+  its error, with the whole error on hover and on the document's page;
+  the cause is amber when it may pass or you can act on it (a block, a
+  host down, a timeout, a rate limit, an index that gave up) and plain
+  when it is a verdict a refetch won't change (a dead link, a login, an
+  error status, a certificate, a page curio can't read). On
   a phone the type and time move under the title. "Load more" pages
   through the rest, and the line under the table counts the documents
   shown ("Showing 100 of 2,150 documents"). A `cause=` in the address
@@ -319,8 +330,13 @@ footer names the address the daemon listens on.
   none (a rebuild to draw it is due; Interests or `curio interests
   rebuild` draws one now), the map failed (with its error), or the map
   is off (`insight.map: false` in config.yaml).
-- **An area's page**: the area's summary, its documents, interests,
-  loose fits, new documents and how alike they are (from 0 to 1), when it
+- **An area's page**: the area's summary (as everywhere the pages show
+  a description, without the stock opening the writing model gives most
+  of them, "A collection of resources covering…", "This group focuses
+  on…"; the stored description is unchanged, and the map shows it as
+  stored), its documents, interests,
+  loose fits, new documents and how alike they are (a number from 0 to
+  1, shown without a bar: they sit between about 0.5 and 0.9), when it
   was rebuilt, and what
   the last rebuild did to it; then its interests as cards, 24 a page.
 - **An interest's page**: Interests › its area › the interest above its
@@ -373,16 +389,21 @@ footer names the address the daemon listens on.
   minutes: fetch, index, grouping (the interests) and metadata
   embeddings (each document's title, site and folder, which search
   matches), each explained on hover),
-  and why documents failed (the five commonest causes as bars, each
-  leading to its group on Failures, and **All failures →** to the tab);
-  beside them, health (the daemon and its build, Ollama, the models (the
+  and the jobs by status; beside them, health (the daemon and its build, Ollama, the models (the
   writing model with what it does, which Status doesn't check; `curio
   doctor` does), the interests,
   embedding drift, the Jina Reader fallback and the YouTube fetcher,
   each with a status dot; the interests' row says where their rebuilds
   stand, in the line `curio status` prints, its dot a warning while they
   are held or failing), an estimate of when the queued work will be done,
-  at the pace of the last 10 minutes, and the jobs by status. The estimate counts only
+  at the pace of the last 10 minutes, and why documents failed (the five
+  commonest causes as bars, each leading to its group on Failures, and
+  **All failures →** to the tab). On a phone the cards are one column:
+  the library, health, progress, the queue, why documents failed, the
+  jobs. Red is kept for an outage (Ollama not ready); a failure cause,
+  like the failed state, is amber when it may pass or you can act on it
+  and grey when it is a verdict, and pending is drawn in the accent
+  colour. The estimate counts only
   the jobs that can run now: jobs due later (a retry backing off, a fetch
   waiting for a rate limit) are said apart, how many and when the first is
   due, and when they are all that is queued, the card says so instead of
@@ -441,5 +462,6 @@ their checksums. The rules, and why, are in
 daemon (phase 1)", "Dashboard: formatting budgets for stored markdown",
 "Dashboard: a design language under the CSP", "Dashboard: actions through
 /v1, sent by a first-party module", "Dashboard: the Failures tab",
-"Dashboard: two-level interests", "Dashboard: the interest map" and "Local
-API: loopback only, no token, browsers shut out".
+"Dashboard: two-level interests", "Dashboard: the interest map",
+"Dashboard: the category standard" and "Local API: loopback only, no
+token, browsers shut out".

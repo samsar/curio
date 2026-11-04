@@ -8,6 +8,10 @@ shows so far (shown), so that its #showing, which replaces this one,
 counts them all; the plain link leaves it out, since that page shows only
 its own rows. The Date saved note sits outside both, so it shows once.
 
+A row reads as a bookmark: there is no State column, and a fetched
+document, the usual case, has no state badge; any other has its own, at
+the head of the line under its name (DocCell.Badge).
+
 The state tabs count the whole library's documents, so they show counts
 only when state is the one filter, in either order. The form carries the
 state as a hidden input: Apply keeps the tab. The order is a field of the
@@ -37,12 +41,11 @@ toolbar names it, with a link that clears it alone.
 <div class="card table-card">
 <div class="table-scroll">
 <table class="data">
-<colgroup><col><col class="c-state"><col class="c-type"><col class="c-when{{if .Filters.Saved}} c-saved{{end}}"></colgroup>
-<thead><tr><th scope="col">Document</th><th scope="col">State</th><th scope="col" class="c-type">Type</th><th scope="col" class="c-when">{{if .Filters.Saved}}Saved{{else}}Updated{{end}}</th></tr></thead>
+<colgroup><col><col class="c-type"><col class="c-when{{if .Filters.Saved}} c-saved{{end}}"></colgroup>
+<thead><tr><th scope="col">Document</th><th scope="col" class="c-type">Type</th><th scope="col" class="c-when">{{if .Filters.Saved}}Saved{{else}}Updated{{end}}</th></tr></thead>
 <tbody id="rows">
 {{range .Rows}}<tr>
 <td>{{template "doc-cell" .Cell}}</td>
-<td class="state-cell">{{with .State}}{{template "state-badge" .}}{{end}}</td>
 <td class="c-type">{{with .ContentType}}<span class="tag">{{template "icon" (typeIcon .)}}{{.}}</span>{{end}}</td>
 <td class="c-when when">{{with .Saved}}{{template "saved-time" .}}{{else}}{{template "reltime" .When}}{{end}}</td>
 </tr>

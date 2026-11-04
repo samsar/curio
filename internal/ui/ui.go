@@ -153,6 +153,7 @@ func funcs(assets assetSet) template.FuncMap {
 		"causeIcon":          causeIcon,
 		"causeTone":          causeTone,
 		"interestName":       interestName,
+		"summaryText":        summaryText,
 		"stateClass":         stateClass,
 		"stateTone":          stateTone,
 		"typeIcon":           typeIcon,

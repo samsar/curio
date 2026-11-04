@@ -244,10 +244,13 @@ func searchPageParam(r *http.Request) (int, error) {
 }
 
 // home is what the search page shows without a query: how many documents
-// there are to search, for the box's placeholder, and the latest
-// rebuild's largest top-level groups (areas, or interests in the flat
-// shape), without their interests or members. The home does without a read
-// that fails: it is logged, and what it was for is left out.
+// there are to search, for the box's placeholder; the latest rebuild's
+// largest top-level groups (areas, or interests in the flat shape),
+// without their interests' members, and how many documents were placed
+// since it (read apart, so the line of interests doesn't hang on it); and
+// the newest saves, as the Library's Date saved order lists them. Each
+// read the home does without when it fails: it is logged, and what it was
+// for is left out.
 func (h pageHandlers) home(r *http.Request) *ui.SearchHome {
 	ctx := r.Context()
 	home := &ui.SearchHome{}
@@ -255,6 +258,12 @@ func (h pageHandlers) home(r *http.Request) *ui.SearchHome {
 		h.quietError(r, err)
 	} else {
 		home.Searchable = st.DocumentsByState[string(store.DocStateFetched)]
+	}
+	if saves, err := h.d.listBookmarks(ctx, store.ListBookmarksOpts{Order: store.BookmarkOrderSaved,
+		Limit: ui.HomeLately}); err != nil {
+		h.quietError(r, err)
+	} else {
+		home.Lately = saveRows(saves.Items)
 	}
 	interests, err := h.d.interests(ctx, interestsOpts{Limit: homeInterests, Bare: true})
 	if err != nil {
@@ -264,6 +273,11 @@ func (h pageHandlers) home(r *http.Request) *ui.SearchHome {
 	home.AllInterests = interests.Total
 	for _, in := range interests.Items {
 		home.Interests = append(home.Interests, interestView(in))
+	}
+	if interests.RunID != "" {
+		if home.New, home.NewUnsorted, err = h.d.placedSince(ctx, interests.RunID); err != nil {
+			h.quietError(r, err)
+		}
 	}
 	return home
 }

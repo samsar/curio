@@ -37,24 +37,25 @@ func TestCauses(t *testing.T) {
 }
 
 // TestCauses_IconAndTone pins each cause's icon and tone: warn where a
-// refetch later usually works, neutral for a dead link and where a refetch
-// can't change the verdict or it isn't the site refusing, danger for the
-// rest. A cause this build doesn't know, or none, is a neutral alert.
+// refetch later usually works or the operator can act (a block, a host down,
+// an index that gave up), neutral for a verdict a refetch won't change;
+// never danger, which is kept for outages. A cause this build doesn't
+// know, or none, is a neutral alert.
 func TestCauses_IconAndTone(t *testing.T) {
 	for cause, want := range map[store.FailureCause][2]string{
 		store.FailureCauseDeadLink:    {"unlink", "neutral"},
-		store.FailureCauseAntiBot:     {"shield-alert", "danger"},
-		store.FailureCauseLoginWall:   {"lock", "danger"},
-		store.FailureCauseJinaRefused: {"ban", "danger"},
-		store.FailureCauseTLS:         {"shield-x", "danger"},
-		store.FailureCauseUnreachable: {"wifi-off", "danger"},
+		store.FailureCauseAntiBot:     {"shield-alert", "warn"},
+		store.FailureCauseLoginWall:   {"lock", "neutral"},
+		store.FailureCauseJinaRefused: {"ban", "neutral"},
+		store.FailureCauseTLS:         {"shield-x", "neutral"},
+		store.FailureCauseUnreachable: {"wifi-off", "warn"},
 		store.FailureCauseTimeout:     {"hourglass", "warn"},
 		store.FailureCauseNetwork:     {"zap-off", "warn"},
 		store.FailureCauseRateLimited: {"gauge", "warn"},
-		store.FailureCauseHTTPError:   {"server", "danger"},
+		store.FailureCauseHTTPError:   {"server", "neutral"},
 		store.FailureCauseUnsupported: {"file-x", "neutral"},
 		store.FailureCauseTooLarge:    {"weight", "neutral"},
-		store.FailureCauseIndex:       {"database", "danger"},
+		store.FailureCauseIndex:       {"database", "warn"},
 		store.FailureCauseOther:       {"alert-circle", "neutral"},
 		"":                            {"alert-circle", "neutral"},
 		"new_cause":                   {"alert-circle", "neutral"},
