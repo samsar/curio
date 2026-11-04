@@ -1688,7 +1688,9 @@ func (n *Native) jinaOnce(ctx context.Context, target string) (*Result, error) {
 		return nil, fmt.Errorf("jina: %w", err)
 	}
 	result := &Result{
-		Markdown: parsed.body,
+		// Judged whole, as Jina gave it; stored less its menus and footer
+		// (dropBoilerplate), which no verdict sees.
+		Markdown: dropBoilerplate(parsed.body, target),
 		// Not URL Source: Jina echoes the request there, re-encoded, even
 		// after a redirect, so it names no URL the request settled on.
 		FinalURL:    target,
