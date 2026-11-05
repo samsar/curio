@@ -135,6 +135,7 @@ func funcs(assets assetSet) template.FuncMap {
 		"failureCauseHref":   failureCauseHref,
 		"navHref":            navHref,
 		"navItems":           navItems,
+		"interestsHref":      interestsHref,
 		"outbound":           outbound,
 		"when":               when,
 		"ago":                ago,

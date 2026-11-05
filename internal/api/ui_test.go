@@ -926,7 +926,7 @@ func TestUI_SearchHome(t *testing.T) {
 	assert.Contains(t, body, `title="Identity and Access Management">Identity and Access Management</a></li>`)
 	assert.Contains(t, body, `<li><a href="/ui/interests/`+ids[2]+`"><span class="unlabeled">Unlabeled interest</span></a></li>`)
 	assert.Contains(t, body, `title="Kafka &lt;streams&gt;">Kafka &lt;streams&gt;</a>`)
-	assert.Contains(t, body, `<a class="all" href="/ui/interests">All 7 →</a>`)
+	assert.Contains(t, body, `<a class="all" href="/ui/interests/map">All 7 →</a>`)
 	assert.NotContains(t, body, "Smallest topic")
 
 	areas := srv.AddAreas(t, apitest.Area{Label: "Engineering", Interests: []apitest.Interest{{Label: "Kafka", Size: 9}}},
@@ -935,7 +935,7 @@ func TestUI_SearchHome(t *testing.T) {
 	assert.Contains(t, body, `<li><a href="/ui/interests/`+areas.Areas[0]+`" title="Engineering">Engineering</a></li>`,
 		"the areas, in the areas shape")
 	assert.NotContains(t, body, "Kafka")
-	assert.Contains(t, body, `<a class="all" href="/ui/interests">All 2 →</a>`)
+	assert.Contains(t, body, `<a class="all" href="/ui/interests/map">All 2 →</a>`)
 
 	titled(t, srv, "https://example.com/a", "A", store.DocStateFetched)
 	srv.AddDocument(t, "https://example.com/pending", store.DocStatePending)
