@@ -24,9 +24,12 @@ type Options struct {
 	// Model is the planner role's writing model, as the role resolves it.
 	Model config.ModelSpec
 	// Shared says another role in use writes with the same model on the
-	// same server (config.SharesModel): the planner then never unloads it,
-	// and allows that role's requests to shorten its keep-alive.
+	// same server (config.SharesModel): the planner then never unloads it.
 	Shared bool
+	// ShortSharer says such a role sends no keep-alive, or a shorter one
+	// (config.SharesModelShorter): the planner then allows its requests to
+	// shorten its keep-alive, to Ollama's default.
+	ShortSharer bool
 	// Withheld, when set, is why no question may be sent to the model:
 	// it runs off this machine, or with another provider, which the
 	// planner role doesn't name itself, or search.embed_timeout_seconds
@@ -53,12 +56,13 @@ type Options struct {
 // and log stay unset, for New's defaults.
 func OptionsFrom(c config.Config) Options {
 	o := Options{
-		On:        c.Search.Understand,
-		Timeout:   time.Duration(c.Search.UnderstandTimeoutSeconds) * time.Second,
-		KeepAlive: time.Duration(c.Search.UnderstandKeepAliveMinutes) * time.Minute,
-		Model:     c.Generation.Role(config.RolePlanner),
-		Shared:    c.SharesModel(config.RolePlanner),
-		Withheld:  withheld(c.Generation),
+		On:          c.Search.Understand,
+		Timeout:     time.Duration(c.Search.UnderstandTimeoutSeconds) * time.Second,
+		KeepAlive:   time.Duration(c.Search.UnderstandKeepAliveMinutes) * time.Minute,
+		Model:       c.Generation.Role(config.RolePlanner),
+		Shared:      c.SharesModel(config.RolePlanner),
+		ShortSharer: c.SharesModelShorter(config.RolePlanner),
+		Withheld:    withheld(c.Generation),
 	}
 	o.fitBudget(c.Search.UnderstandTimeoutSeconds, c.Search.EmbedTimeoutSeconds)
 	return o

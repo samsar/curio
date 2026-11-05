@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/samsar/curio/internal/generator"
+	"github.com/samsar/curio/internal/modelgate"
 )
 
 // OffReason is why a search wasn't understood while search.understand is
@@ -17,27 +18,15 @@ const OffReason = "search understanding is off (search.understand: false)"
 
 // The planner's constants, measured in review on Ollama 0.40.4 with
 // gemma4:26b and on the operator's library (decisions.md "Understanding the
-// question").
+// question"). Readiness, holds and the fitness check's bookkeeping are the
+// gate's (internal/modelgate).
 const (
-	// loadedBound bounds asking Ollama whether the model is loaded, a local
-	// listing.
-	loadedBound = time.Second
-	// defaultKeepAlive holds the model loaded after a plan or a warm-up
-	// when Options leave it 0: a cold load takes 7 to 11 s, so a search a
-	// few minutes after the last finds it warm.
-	defaultKeepAlive = 30 * time.Minute
 	// maxPlanTokens caps a plan's answer: the median plan is 46 tokens, and
 	// a rambling model is cut off well before it costs seconds.
 	maxPlanTokens = 256
 	// probeTimeout bounds each question of the fitness check, run in the
 	// background on a loaded model: a warm plan takes 1 to 4 s.
 	probeTimeout = 30 * time.Second
-	// unloadBound bounds asking the provider to free an unfit model.
-	unloadBound = 10 * time.Second
-	// retryAfter is how long after a failed warm-up, or a check that
-	// couldn't reach the model, the planner tries again; meanwhile the
-	// failure answers.
-	retryAfter = time.Minute
 	// maxNameBytes and maxRewriteBytes cap a plan's texts, once trimmed
 	// (the counts are the schema's): one longer is a model rambling, not
 	// a search.
@@ -50,28 +39,11 @@ const (
 	// earliestSaveYear starts the year no saved window may end by:
 	// nothing was bookmarked before it.
 	earliestSaveYear = 1990
-	// timeoutsToHold plans in a row that time out hold planning: the
-	// model is too slow here (too large, or sharing the machine with an
-	// index), and each further question would cost its full timeout
-	// before its words are searched. The hold lasts firstTimeoutHold,
-	// twice as long each time it holds again, up to lastTimeoutHold; a
-	// plan that answers in time ends the episode.
-	timeoutsToHold   = 3
-	firstTimeoutHold = 2 * time.Minute
-	lastTimeoutHold  = 15 * time.Minute
-	// evictionsToHold times the model found unloaded within its
-	// keep-alive, within evictionWindow of the first, hold warming it for
-	// evictionHold: Ollama is evicting it for another model, most often
-	// the embedder, and every warm-up would reload gigabytes and stall
-	// that model's work.
-	evictionsToHold = 2
-	evictionWindow  = time.Hour
-	evictionHold    = 15 * time.Minute
-	// sharedKeepAlive is Ollama's default keep-alive, which a request of
-	// another role sharing the model sets when it sends none (the labels
-	// don't): only that long after a plan is a shared model sure to stay.
-	sharedKeepAlive = 5 * time.Minute
 )
+
+// gateWords are how the gate's records and reasons name the planner.
+var gateWords = modelgate.Words{Feature: "search understanding", Role: "planner", Calls: "plans",
+	Resumes: "understanding", Fallback: "searches use their words", UnfitFix: UnfitFix}
 
 // Planner understands questions with the planner role's model. Before any
 // plan is used the model must pass a fitness check, run once a process in
@@ -82,66 +54,20 @@ const (
 // for concurrent use.
 type Planner struct {
 	gen       generator.JSONGenerator // nil when the planner is off
-	warmer    generator.Warmer        // nil when the provider can't say; the model is then taken as loaded
+	gate      *modelgate.Gate
 	offReason string
 	withheld  string
 	on        bool
 	model     string
 	timeout   time.Duration
-	keepAlive time.Duration
-	shared    bool
-	using     func() (end func())
 	now       func() time.Time
 	loc       *time.Location
 	log       *slog.Logger
-	// lifetime is the daemon's context, which background work runs on: a
-	// request cancelled during a cold load would abort the load itself.
-	lifetime context.Context
-	work     sync.WaitGroup
 
-	mu          sync.Mutex
-	verdict     verdict
-	unfitReason string
-	checkedAt   time.Time // when the verdict was reached
-	running     bool      // a warm-up or check is in flight
-	warmErr     error     // the last warm-up's failure
-	warmErrAt   time.Time // when it failed
-	checkErr    error     // the last check that couldn't reach the model
-	checkErrAt  time.Time
-	logged      map[string]bool // the causes logged at WARN since the last plan
-	// timeouts counts the plans in a row that timed out; while
-	// timeoutHoldUntil is ahead, questions answer timeout at once, and
-	// timeoutHold is how long the last hold of the run lasted. Each hold's
-	// end is wall time, its monotonic reading dropped: healthz reports it,
-	// and judged on Go's monotonic clock, which stops while a Mac sleeps,
-	// a hold would outlast the time it says. The 60 s retries (warmErrAt,
-	// checkErrAt) and keptUntil, which stands for Ollama's own keep-alive
-	// timer, stay monotonic: nothing reports or stores them.
-	timeouts         int
-	timeoutHoldUntil time.Time
-	timeoutHold      time.Duration
-	// keptUntil is until when the model should stay loaded, by the last
-	// answer or warm-up's keep-alive; zero when nothing holds it.
-	keptUntil time.Time
-	// evictions counts the times the model was found unloaded before
-	// keptUntil since firstEviction; while evictionHoldUntil is ahead, no
-	// warm-up starts.
-	evictions         int
-	firstEviction     time.Time
-	evictionHoldUntil time.Time
-	last              Status // the last question's status
-	lastAt            time.Time
-	failure           Failure // the last failure
+	mu     sync.Mutex
+	last   Status // the last question's status
+	lastAt time.Time
 }
-
-// verdict is what the fitness check found of the model.
-type verdict int
-
-const (
-	verdictUnknown verdict = iota
-	verdictFit
-	verdictUnfit
-)
 
 // New builds a planner over gen, whose background work runs on lifetime,
 // the daemon's context; Wait returns once it has stopped after lifetime
@@ -152,21 +78,13 @@ const (
 // question reaches the model, logged once, at WARN.
 func New(lifetime context.Context, gen generator.Generator, opts Options) *Planner {
 	p := &Planner{
-		on:        opts.On,
-		model:     opts.Model.Model,
-		timeout:   opts.Timeout,
-		keepAlive: opts.KeepAlive,
-		shared:    opts.Shared,
-		withheld:  opts.Withheld,
-		using:     opts.Using,
-		now:       opts.Now,
-		loc:       opts.Location,
-		log:       opts.Log,
-		lifetime:  lifetime,
-		logged:    map[string]bool{},
-	}
-	if p.keepAlive <= 0 {
-		p.keepAlive = defaultKeepAlive
+		on:       opts.On,
+		model:    opts.Model.Model,
+		timeout:  opts.Timeout,
+		withheld: opts.Withheld,
+		now:      opts.Now,
+		loc:      opts.Location,
+		log:      opts.Log,
 	}
 	if p.now == nil {
 		p.now = time.Now
@@ -177,6 +95,8 @@ func New(lifetime context.Context, gen generator.Generator, opts Options) *Plann
 	if p.log == nil {
 		p.log = slog.Default()
 	}
+	p.gate = modelgate.New(lifetime, gen, modelgate.Options{Words: gateWords, Model: p.model, KeepAlive: opts.KeepAlive,
+		Shared: opts.Shared, ShortSharer: opts.ShortSharer, Using: opts.Using, Now: p.now, Location: p.loc, Log: p.log, Check: p.runCheck})
 	if !opts.On {
 		p.offReason = OffReason
 		return p
@@ -197,24 +117,12 @@ func New(lifetime context.Context, gen generator.Generator, opts Options) *Plann
 			"timeout", p.timeout, "reason", opts.Shortened)
 	}
 	p.gen = jg
-	p.warmer, _ = gen.(generator.Warmer)
 	return p
-}
-
-// use marks a call of the model beginning (Options.Using), and returns
-// the func that marks it ended, which its callers defer: a call that
-// panics (net/http recovers a search's) would otherwise leave the use
-// open, holding the summary pass back until a restart.
-func (p *Planner) use() (end func()) {
-	if p.using == nil {
-		return func() {}
-	}
-	return p.using()
 }
 
 // Wait returns once the planner's background work has stopped, after the
 // lifetime context New was given has ended.
-func (p *Planner) Wait() { p.work.Wait() }
+func (p *Planner) Wait() { p.gate.Wait() }
 
 // Timeout is how long a plan may take before the question is searched by
 // its words: search.understand_timeout_seconds.
@@ -230,11 +138,11 @@ func (p *Planner) Plan(ctx context.Context, question string) (Outcome, error) {
 		if out, refused := p.refuse(question); refused {
 			return out, nil
 		}
-		if out, ready := p.ready(ctx); !ready {
+		if r, ready := p.gate.Ready(ctx); !ready {
 			if err := ctx.Err(); err != nil {
 				return Outcome{}, err
 			}
-			return out, nil
+			return refused(r), nil
 		}
 		out, err := p.ask(ctx, question)
 		if err == nil {
@@ -299,9 +207,27 @@ func (p *Planner) timed(ctx context.Context, plan func() (Outcome, error)) (Outc
 
 func (p *Planner) off() Outcome { return Outcome{Status: StatusOff, Reason: p.offReason} }
 
+// refused is the Outcome of a question the gate held back from the
+// model: its refusal's kind as a status, with its reason.
+func refused(r modelgate.Refusal) Outcome {
+	status := StatusUnavailable
+	switch r.Kind {
+	case modelgate.Unfit:
+		status = StatusUnfit
+	case modelgate.TimeoutHeld:
+		status = StatusTimeout
+	case modelgate.Cold:
+		status = StatusCold
+	case modelgate.Checking:
+		status = StatusChecking
+	case modelgate.Unavailable:
+	}
+	return Outcome{Status: status, Reason: r.Reason}
+}
+
 // KeepAlive is how long the model stays loaded after a plan or a warm-up:
 // search.understand_keep_alive_minutes.
-func (p *Planner) KeepAlive() time.Duration { return p.keepAlive }
+func (p *Planner) KeepAlive() time.Duration { return p.gate.KeepAlive() }
 
 // ask asks the model for a plan of question under the planner's timeout,
 // and turns its answer into one, or into the status that says why there
@@ -309,7 +235,7 @@ func (p *Planner) KeepAlive() time.Duration { return p.keepAlive }
 func (p *Planner) ask(ctx context.Context, question string) (Outcome, error) {
 	pctx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
-	end := p.use()
+	end := p.gate.Use()
 	defer end()
 	raw, err := p.gen.GenerateJSON(pctx, renderPrompt(question, p.now().In(p.loc)), schema(), p.planOptions())
 	if cerr := ctx.Err(); cerr != nil {
@@ -333,207 +259,28 @@ func (p *Planner) ask(ctx context.Context, question string) (Outcome, error) {
 // labels share: a request with another would load the model again
 // (measured: 5.1 s).
 func (p *Planner) planOptions() generator.Options {
-	return generator.Options{Temperature: new(0.0), MaxTokens: maxPlanTokens, KeepAlive: p.keepAlive}
+	return generator.Options{Temperature: new(0.0), MaxTokens: maxPlanTokens, KeepAlive: p.gate.KeepAlive()}
 }
 
 // settle records what a search's plan said of the model: one that
 // answered in time ends a run of timeouts, and holds the model loaded for
 // its keep-alive; a plan made clears the causes logged, so a later outage
-// warns again. A timeout counts toward holding planning (holdTimeoutsLocked).
+// warns again. A timeout counts toward holding planning.
 func (p *Planner) settle(out Outcome) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	switch out.Status {
 	case StatusPlanned, StatusInvalid:
-		if p.timeouts >= timeoutsToHold {
-			p.log.Info("search understanding: plans answer in time again", "model", p.model)
-		}
-		p.timeouts, p.timeoutHold = 0, 0
-		p.keptUntil = p.now().Add(p.keptFor())
+		p.gate.Answered()
 		if out.Status == StatusPlanned {
-			clear(p.logged)
+			p.gate.Succeeded()
 		}
 	case StatusTimeout:
-		// Plans asked together time out together: one hold in effect
-		// already counts for them all, so they don't escalate it.
-		p.timeouts++
-		if p.timeouts >= timeoutsToHold && !p.now().Before(p.timeoutHoldUntil) {
-			p.holdTimeoutsLocked()
-		}
+		p.gate.TimedOut(p.timeout)
 	case StatusUnavailable:
 		// No answer says nothing of the model's speed: the run stands.
 	case StatusSupplied, StatusOff, StatusCold, StatusChecking, StatusUnfit, StatusTooLong:
 		// Not a plan the model was asked for.
 	}
 }
-
-// holdTimeoutsLocked holds planning after timeoutsToHold plans in a row
-// took longer than the timeout: firstTimeoutHold, twice the last hold
-// while the run goes on, at most lastTimeoutHold. p.mu is held.
-func (p *Planner) holdTimeoutsLocked() {
-	if p.timeoutHold == 0 {
-		p.timeoutHold = firstTimeoutHold
-	} else {
-		p.timeoutHold = min(2*p.timeoutHold, lastTimeoutHold)
-	}
-	p.timeoutHoldUntil = p.now().Add(p.timeoutHold).Round(0)
-	p.recordLocked("timeout:held", fmt.Errorf("%d plans in a row took longer than %s", p.timeouts, p.timeout))
-	p.noteLocked("timeout:held", "search understanding: plans keep timing out; searches use their words for a while",
-		nil, "timeouts", p.timeouts, "hold", p.timeoutHold, "until", p.timeoutHoldUntil)
-}
-
-// keptFor is how long after an answer or a warm-up the model is sure to
-// stay loaded: its keep-alive, or Ollama's default when another role,
-// whose requests send none, shares the model.
-func (p *Planner) keptFor() time.Duration {
-	if p.shared {
-		return min(p.keepAlive, sharedKeepAlive)
-	}
-	return p.keepAlive
-}
-
-// ready reports whether a plan may be asked for now; when it may not, the
-// Outcome says why, and background work is started that will make it
-// possible: loading the model, or checking it.
-func (p *Planner) ready(ctx context.Context) (Outcome, bool) {
-	p.mu.Lock()
-	switch now := p.now(); {
-	case p.verdict == verdictUnfit:
-		out := Outcome{Status: StatusUnfit, Reason: p.unfitReason}
-		p.mu.Unlock()
-		return out, false
-	case now.Before(p.timeoutHoldUntil):
-		out := Outcome{Status: StatusTimeout, Reason: fmt.Sprintf("%d plans in a row took longer than %s; "+
-			"understanding resumes at %s", p.timeouts, p.timeout, p.clock(p.timeoutHoldUntil))}
-		p.mu.Unlock()
-		return out, false
-	}
-	p.mu.Unlock()
-
-	loaded := true
-	if p.warmer != nil {
-		lctx, cancel := context.WithTimeout(ctx, loadedBound)
-		var err error
-		loaded, err = p.warmer.Loaded(lctx)
-		cancel()
-		if err != nil && ctx.Err() != nil {
-			// The caller left, which says nothing of Ollama: Plan returns
-			// its error, and the first WARN is kept for a real outage.
-			return Outcome{}, false
-		}
-		if err != nil {
-			p.note("unavailable:loaded", "search understanding: can't ask whether the planner's model is loaded", err)
-			return Outcome{Status: StatusUnavailable, Reason: fmt.Sprintf("can't tell whether %s is loaded: %v",
-				p.model, err)}, false
-		}
-	}
-	// A model that isn't loaded may not be pulled at all: the provider's
-	// model listing, local and quick, says so before a warm-up is started
-	// that would only fail, and says so again on each question until it
-	// is pulled, so a pull is seen at the next one. Any other failure of
-	// it says nothing, and the warm-up finds out.
-	var missing error
-	if !loaded {
-		pctx, cancel := context.WithTimeout(ctx, loadedBound)
-		err := p.gen.Ping(pctx)
-		cancel()
-		switch {
-		case err != nil && ctx.Err() != nil:
-			return Outcome{}, false
-		case errors.Is(err, generator.ErrModelMissing):
-			missing = err
-		}
-	}
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	now := p.now()
-	if !loaded {
-		if out, held := p.unloadedLocked(now); held {
-			return out, false
-		}
-	}
-	switch {
-	case missing != nil:
-		p.recordLocked("unavailable:missing", missing)
-		p.noteLocked("unavailable:missing", "search understanding: the planner's model isn't pulled: run curio up; "+
-			"searches use their words", missing)
-		return Outcome{Status: StatusUnavailable, Reason: p.notPulled()}, false
-	case !loaded && p.warmErr != nil && errors.Is(p.warmErr, generator.ErrModelMissing):
-		// A model not pulled stays so until curio up pulls it: each retry
-		// tries again, and says what is known meanwhile.
-		if now.Sub(p.warmErrAt) >= retryAfter {
-			p.startLocked(true)
-		}
-		return Outcome{Status: StatusUnavailable, Reason: p.notPulled()}, false
-	case !loaded && p.warmErr != nil && now.Sub(p.warmErrAt) < retryAfter:
-		return Outcome{Status: StatusUnavailable, Reason: fmt.Sprintf("loading %s failed: %v", p.model, p.warmErr)},
-			false
-	case !loaded:
-		p.startLocked(true)
-		return Outcome{Status: StatusCold, Reason: p.model + " is loading"}, false
-	case p.verdict == verdictFit:
-		return Outcome{}, true
-	case p.checkErr != nil && now.Sub(p.checkErrAt) < retryAfter:
-		if errors.Is(p.checkErr, generator.ErrModelMissing) {
-			return Outcome{Status: StatusUnavailable, Reason: p.notPulled()}, false
-		}
-		return Outcome{Status: StatusUnavailable, Reason: fmt.Sprintf("checking %s failed: %v", p.model, p.checkErr)},
-			false
-	default:
-		p.startLocked(false)
-		return Outcome{Status: StatusChecking, Reason: "curio is checking " + p.model}, false
-	}
-}
-
-// unloadedLocked counts the model found unloaded before its keep-alive
-// ran out as evicted, and reports whether warming it is held: by a hold
-// in effect, or one that this eviction, the evictionsToHold-th within
-// evictionWindow, starts. A model found unloaded after its keep-alive
-// expired ends the count. p.mu is held.
-func (p *Planner) unloadedLocked(now time.Time) (Outcome, bool) {
-	held := func() Outcome {
-		return Outcome{Status: StatusUnavailable, Reason: fmt.Sprintf("Ollama unloaded %s within its keep-alive "+
-			"%d times, for other models; curio loads it again from %s", p.model, evictionsToHold,
-			p.clock(p.evictionHoldUntil))}
-	}
-	if now.Before(p.evictionHoldUntil) {
-		return held(), true
-	}
-	evicted := !p.keptUntil.IsZero() && now.Before(p.keptUntil)
-	expired := !p.keptUntil.IsZero() && !evicted
-	p.keptUntil = time.Time{} // one unload counts once
-	switch {
-	case expired:
-		p.evictions = 0
-		return Outcome{}, false
-	case !evicted:
-		return Outcome{}, false
-	case p.evictions == 0 || now.Sub(p.firstEviction) > evictionWindow:
-		p.evictions, p.firstEviction = 1, now
-	default:
-		p.evictions++
-	}
-	p.log.Debug("search understanding: the planner's model was unloaded within its keep-alive",
-		"model", p.model, "evictions", p.evictions)
-	if p.evictions < evictionsToHold {
-		return Outcome{}, false
-	}
-	p.evictions = 0
-	p.evictionHoldUntil = now.Add(evictionHold).Round(0)
-	p.recordLocked("evicted", fmt.Errorf("unloaded within its keep-alive %d times", evictionsToHold))
-	p.noteLocked("evicted", "search understanding: Ollama keeps unloading the planner's model for other models; "+
-		"searches use their words while it isn't loaded again", nil, "hold", evictionHold,
-		"until", p.evictionHoldUntil)
-	return held(), true
-}
-
-// notPulled says the planner's model is missing, and how to get it.
-func (p *Planner) notPulled() string { return p.model + " isn't pulled — run curio up" }
-
-// clock is t as a reason names it: the time of day in the planner's
-// location.
-func (p *Planner) clock(t time.Time) string { return t.In(p.loc).Format("15:04") }
 
 // failed is the Outcome of a plan the model didn't give: a reply it can't
 // use is invalid (the error never quotes the reply, which can hold the
@@ -543,143 +290,26 @@ func (p *Planner) clock(t time.Time) string { return t.In(p.loc).Format("15:04")
 // plan made, at DEBUG after.
 func (p *Planner) failed(err error) Outcome {
 	if ia, ok := errors.AsType[*invalidAnswer](err); ok {
-		p.note("invalid:"+ia.rule, "search understanding: the planner's answer couldn't be used", errors.New(ia.reason))
+		p.gate.Note("invalid:"+ia.rule, "search understanding: the planner's answer couldn't be used", errors.New(ia.reason))
 		return Outcome{Status: StatusInvalid, Reason: ia.reason}
 	}
 	switch {
 	case errors.Is(err, generator.ErrTruncated):
-		p.note("invalid:truncated", "search understanding: the planner's answer couldn't be used", err)
+		p.gate.Note("invalid:truncated", "search understanding: the planner's answer couldn't be used", err)
 		return Outcome{Status: StatusInvalid, Reason: fmt.Sprintf("the answer ran past %d tokens", maxPlanTokens)}
 	case errors.Is(err, generator.ErrNotJSON):
-		p.note("invalid:json", "search understanding: the planner's answer couldn't be used", generator.ErrNotJSON)
+		p.gate.Note("invalid:json", "search understanding: the planner's answer couldn't be used", generator.ErrNotJSON)
 		return Outcome{Status: StatusInvalid, Reason: "the answer isn't JSON"}
 	case errors.Is(err, context.DeadlineExceeded):
-		p.note("timeout", "search understanding: a plan took longer than its timeout", err)
+		p.gate.Note("timeout", "search understanding: a plan took longer than its timeout", err)
 		return Outcome{Status: StatusTimeout, Reason: fmt.Sprintf("understanding took longer than %s", p.timeout)}
 	case errors.Is(err, generator.ErrModelMissing):
-		p.note("unavailable:generate", "search understanding: the planner's model is unavailable", err)
-		return Outcome{Status: StatusUnavailable, Reason: p.notPulled()}
+		p.gate.Note("unavailable:generate", "search understanding: the planner's model is unavailable", err)
+		return Outcome{Status: StatusUnavailable, Reason: p.gate.NotPulled()}
 	default:
-		p.note("unavailable:generate", "search understanding: the planner's model is unavailable", err)
+		p.gate.Note("unavailable:generate", "search understanding: the planner's model is unavailable", err)
 		return Outcome{Status: StatusUnavailable, Reason: err.Error()}
 	}
-}
-
-// note records a planner failure of cause and logs it: at WARN the first
-// time since the last plan made, at DEBUG after. It carries the model and
-// why, never the question, a rewrite or a name.
-func (p *Planner) note(cause, msg string, err error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.recordLocked(cause, err)
-	p.noteLocked(cause, msg, err)
-}
-
-// noteLocked logs a failure of cause as note does, with args after the
-// model and cause. p.mu is held.
-func (p *Planner) noteLocked(cause, msg string, err error, args ...any) {
-	level := slog.LevelDebug
-	if !p.logged[cause] {
-		level = slog.LevelWarn
-	}
-	p.logged[cause] = true
-	attrs := append([]any{"model", p.model, "cause", cause}, args...)
-	if err != nil {
-		attrs = append(attrs, "err", err)
-	}
-	p.log.Log(context.Background(), level, msg, attrs...)
-}
-
-// recordLocked keeps err as the planner's last failure, of cause, for
-// State. p.mu is held.
-func (p *Planner) recordLocked(cause string, err error) {
-	p.failure = Failure{Cause: cause, At: p.now()}
-	if err != nil {
-		p.failure.Err = err.Error()
-	}
-}
-
-// startLocked starts the background work unless it runs already or the
-// lifetime has ended (the daemon is then waiting for that work to stop):
-// loading the model when warm, then checking it while the verdict is
-// unknown, and freeing an unfit model's memory. p.mu is held.
-func (p *Planner) startLocked(warm bool) {
-	if p.running || p.lifetime.Err() != nil {
-		return
-	}
-	p.running = true
-	p.work.Go(func() {
-		defer func() {
-			p.mu.Lock()
-			p.running = false
-			p.mu.Unlock()
-		}()
-		if warm && !p.warm() {
-			return
-		}
-		p.mu.Lock()
-		unknown := p.verdict == verdictUnknown
-		p.mu.Unlock()
-		if !unknown {
-			return
-		}
-		// The check keeps its verdict and logs it; searches read it.
-		if r := p.check(p.lifetime); r.failed != "" {
-			p.unload()
-		}
-	})
-}
-
-// warm loads the model on the daemon's context, reporting whether it did.
-func (p *Planner) warm() bool {
-	p.log.Info("search understanding: loading the planner's model", "model", p.model)
-	end := p.use()
-	defer end()
-	err := p.warmer.Warm(p.lifetime, p.keepAlive)
-	if p.lifetime.Err() != nil {
-		return false
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if err != nil {
-		p.warmErr, p.warmErrAt = err, p.now()
-		p.recordLocked("unavailable:load", err)
-		reason := "searches use their words"
-		if errors.Is(err, generator.ErrModelMissing) {
-			reason = "it isn't pulled: run curio up; searches use their words"
-		}
-		p.noteLocked("unavailable:load", "search understanding: loading the planner's model failed; "+reason, err,
-			"retry_in", retryAfter)
-		return false
-	}
-	p.warmErr = nil
-	p.keptUntil = p.now().Add(p.keptFor())
-	return true
-}
-
-// unload frees an unfit model's memory, unless another role writes with
-// it: an unfit model would otherwise sit loaded for its keep-alive,
-// beside the embedder, for nothing.
-func (p *Planner) unload() {
-	if p.shared || p.warmer == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(p.lifetime, unloadBound)
-	defer cancel()
-	end := p.use()
-	defer end()
-	err := p.warmer.Unload(ctx)
-	if p.lifetime.Err() != nil {
-		return
-	}
-	if err != nil {
-		p.log.Warn("search understanding: couldn't unload the unfit planner's model", "model", p.model, "err", err)
-		return
-	}
-	p.mu.Lock()
-	p.keptUntil = time.Time{}
-	p.mu.Unlock()
-	p.log.Info("search understanding: unloaded the unfit planner's model", "model", p.model)
 }
 
 // Check runs the fitness check now, on ctx, and keeps its verdict as the
@@ -695,61 +325,28 @@ func (p *Planner) Check(ctx context.Context) (string, error) {
 	case p.withheld != "":
 		return "", errors.New(p.withheld)
 	}
-	r := p.check(ctx)
-	return r.failed, r.unreached
+	return p.gate.CheckNow(ctx)
 }
 
-// checkResult is what a fitness check found: the probe the model failed,
-// or the failure that kept a probe from reaching it.
-type checkResult struct {
-	failed    string
-	unreached error
-}
-
-// check runs the fitness check: each probe through the prompt, the schema
-// and the strict decoding, its raw answer compared before any guard. A
-// model that answers a probe wrong, or whose provider refuses the request
-// itself, is unfit for the life of the process; one that couldn't be
-// reached, or that the provider couldn't serve, leaves the verdict
-// unknown, to be tried again after retryAfter. It records and logs the
-// verdict.
-func (p *Planner) check(ctx context.Context) checkResult {
+// runCheck runs the fitness check's probes, the gate's Options.Check:
+// each through the prompt, the schema and the strict decoding, its raw
+// answer compared before any guard, stopping at the first the model fails
+// or can't be asked. A model that answers a probe wrong, or whose
+// provider refuses the request itself, is unfit; one that couldn't be
+// reached, or that the provider couldn't serve, isn't judged.
+func (p *Planner) runCheck(ctx context.Context) modelgate.Verdict {
 	for _, pr := range probes {
 		a, err := p.probe(ctx, pr.question)
-		if cerr := ctx.Err(); cerr != nil {
-			return checkResult{unreached: cerr}
-		}
 		switch {
+		case ctx.Err() != nil:
+			return modelgate.Verdict{Probe: pr.name, Err: ctx.Err()}
 		case err != nil && !unfitBy(err):
-			// Retried a minute apart while it lasts: warned of once.
-			p.mu.Lock()
-			p.checkErr, p.checkErrAt = err, p.now()
-			p.recordLocked("unavailable:check", err)
-			p.noteLocked("unavailable:check", "search understanding: couldn't check the planner's model; searches "+
-				"use their words", err, "probe", pr.name, "retry_in", retryAfter)
-			p.mu.Unlock()
-			return checkResult{unreached: fmt.Errorf("probe %q: %w", pr.name, err)}
+			return modelgate.Verdict{Probe: pr.name, Err: err}
 		case err != nil || !pr.fits(a):
-			reason := fmt.Sprintf("%s didn't pass the check %q", p.model, pr.name)
-			if err != nil {
-				reason = fmt.Sprintf("%s didn't pass the check %q: %v", p.model, pr.name, err)
-			}
-			reason += "; " + UnfitFix
-			p.mu.Lock()
-			p.verdict, p.unfitReason, p.checkedAt = verdictUnfit, reason, p.now()
-			p.recordLocked("unfit", errors.New(reason))
-			p.mu.Unlock()
-			p.log.Warn("search understanding: the planner's model failed its check; searches use their words "+
-				"("+UnfitFix+")", "model", p.model, "probe", pr.name)
-			return checkResult{failed: pr.name}
+			return modelgate.Verdict{Probe: pr.name, Unfit: true, Err: err}
 		}
 	}
-	p.mu.Lock()
-	p.verdict, p.checkErr, p.checkedAt = verdictFit, nil, p.now()
-	p.keptUntil = p.now().Add(p.keptFor())
-	p.mu.Unlock()
-	p.log.Info("search understanding: the planner's model passed its check", "model", p.model)
-	return checkResult{}
+	return modelgate.Verdict{}
 }
 
 // UnfitFix is what to do about a planner's model that failed its check.
@@ -760,7 +357,7 @@ const UnfitFix = "set generation.roles.planner.model to a model that passes, or 
 func (p *Planner) probe(ctx context.Context, question string) (answer, error) {
 	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
-	end := p.use()
+	end := p.gate.Use()
 	defer end()
 	raw, err := p.gen.GenerateJSON(ctx, renderPrompt(question, p.now().In(p.loc)), schema(), p.planOptions())
 	if err != nil {
@@ -785,11 +382,7 @@ func unfitBy(err error) bool {
 
 // Failure is the planner's last failure: what kind (Cause, as its log
 // records name it), when, and its error.
-type Failure struct {
-	Cause string
-	At    time.Time
-	Err   string
-}
+type Failure = modelgate.Failure
 
 // State is what the planner knows of its model, read from memory alone:
 // whether understanding is on, why no question is planned at all (Reason:
@@ -815,33 +408,21 @@ type State struct {
 
 // The fitness check's verdicts, as State says them.
 const (
-	CheckUnchecked = "unchecked"
-	CheckFit       = "fit"
-	CheckUnfit     = "unfit"
+	CheckUnchecked = modelgate.CheckUnchecked
+	CheckFit       = modelgate.CheckFit
+	CheckUnfit     = modelgate.CheckUnfit
 )
 
 // State reads the planner's state, asking the model nothing.
 func (p *Planner) State() State {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	now := p.now()
-	s := State{On: p.on, Model: p.model, Reason: p.offReason, Check: CheckUnchecked, Last: p.last,
-		LastAt: p.lastAt, Failure: p.failure}
+	g := p.gate.State()
+	s := State{On: p.on, Model: p.model, Reason: p.offReason, Check: g.Check, CheckedAt: g.CheckedAt, Unfit: g.Unfit,
+		TimeoutHoldUntil: g.TimeoutHoldUntil, EvictionHoldUntil: g.EvictionHoldUntil, Failure: g.Failure}
 	if p.withheld != "" {
 		s.Reason = p.withheld
 	}
-	switch p.verdict {
-	case verdictUnknown:
-	case verdictFit:
-		s.Check, s.CheckedAt = CheckFit, p.checkedAt
-	case verdictUnfit:
-		s.Check, s.CheckedAt, s.Unfit = CheckUnfit, p.checkedAt, p.unfitReason
-	}
-	if now.Before(p.timeoutHoldUntil) {
-		s.TimeoutHoldUntil = p.timeoutHoldUntil
-	}
-	if now.Before(p.evictionHoldUntil) {
-		s.EvictionHoldUntil = p.evictionHoldUntil
-	}
+	p.mu.Lock()
+	s.Last, s.LastAt = p.last, p.lastAt
+	p.mu.Unlock()
 	return s
 }

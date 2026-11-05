@@ -584,3 +584,103 @@ func TestNewOllama_Validation(t *testing.T) {
 	assert.Equal(t, "m", g.Model())
 	assert.Equal(t, ollama.DefaultBaseURL, g.client.BaseURL())
 }
+
+// logprobsReply answers with one token's probabilities, its alternatives
+// in the order given.
+func logprobsReply(top string) func(http.ResponseWriter, *http.Request, int, <-chan struct{}) {
+	return func(w http.ResponseWriter, _ *http.Request, _ int, _ <-chan struct{}) {
+		fmt.Fprintf(w, `{"response":"yes","done":true,"prompt_eval_count":42,"eval_count":1,`+
+			`"logprobs":[{"token":"yes","logprob":-0.1,"top_logprobs":%s}]}`, top)
+	}
+}
+
+// TestFirstTokens_Request pins what a FirstTokens body carries, from the
+// raw JSON so a missing key fails: one token, greedy, think false, the
+// generator's num_ctx, the keep-alive, logprobs with the top asked for,
+// and raw only when asked.
+func TestFirstTokens_Request(t *testing.T) {
+	for _, raw := range []bool{false, true} {
+		t.Run(fmt.Sprintf("raw %v", raw), func(t *testing.T) {
+			body := make(chan map[string]json.RawMessage, 1)
+			f := newFakeOllama(t, func(w http.ResponseWriter, r *http.Request, call int, release <-chan struct{}) {
+				var got map[string]json.RawMessage
+				assert.NoError(t, json.NewDecoder(r.Body).Decode(&got))
+				body <- got
+				logprobsReply(`[{"token":"yes","logprob":-0.1}]`)(w, r, call, release)
+			})
+			var u Usage
+			_, err := newGen(t, OllamaOptions{BaseURL: f.url}).FirstTokens(context.Background(), "judge this", raw,
+				20, Options{KeepAlive: 30 * time.Minute, MaxTokens: 99, Usage: &u})
+			require.NoError(t, err)
+			got := <-body
+			assert.JSONEq(t, `"judge this"`, string(got["prompt"]))
+			assert.JSONEq(t, `false`, string(got["stream"]))
+			assert.JSONEq(t, `false`, string(got["think"]))
+			assert.JSONEq(t, `true`, string(got["logprobs"]))
+			assert.JSONEq(t, `20`, string(got["top_logprobs"]))
+			assert.JSONEq(t, `"30m0s"`, string(got["keep_alive"]))
+			assert.JSONEq(t, `{"num_ctx":8192,"temperature":0,"num_predict":1}`, string(got["options"]),
+				"one token, greedy, whatever the options asked")
+			rawField, sent := got["raw"]
+			assert.Equal(t, raw, sent, "raw is sent only when asked")
+			if raw {
+				assert.JSONEq(t, `true`, string(rawField))
+			}
+			assert.NotContains(t, got, "format")
+			assert.Equal(t, 42, u.PromptTokens, "the usage is reported")
+		})
+	}
+}
+
+// TestFirstTokens_Replies: the alternatives come back in the provider's
+// order; a reply without them is ErrNoLogprobs, and a top outside [1, 20]
+// is refused before any request.
+func TestFirstTokens_Replies(t *testing.T) {
+	f := newFakeOllama(t, logprobsReply(`[{"token":"yes","logprob":-0.1},{"token":" Yes","logprob":-2.5},`+
+		`{"token":"no","logprob":-3}]`))
+	got, err := newGen(t, OllamaOptions{BaseURL: f.url}).FirstTokens(context.Background(), "p", false, 3, Options{})
+	require.NoError(t, err)
+	assert.Equal(t, []TokenChoice{{"yes", -0.1}, {" Yes", -2.5}, {"no", -3}}, got)
+
+	for _, body := range []string{`{"response":"yes","done":true}`,
+		`{"response":"yes","done":true,"logprobs":[]}`,
+		`{"response":"yes","done":true,"logprobs":[{"token":"yes","logprob":-0.1}]}`} {
+		f := newFakeOllama(t, func(w http.ResponseWriter, _ *http.Request, _ int, _ <-chan struct{}) {
+			fmt.Fprint(w, body)
+		})
+		_, err := newGen(t, OllamaOptions{BaseURL: f.url}).FirstTokens(context.Background(), "p", false, 5, Options{})
+		require.ErrorIs(t, err, ErrNoLogprobs, body)
+	}
+
+	for _, top := range []int{0, -1, MaxTopTokens + 1} {
+		f := newFakeOllama(t, logprobsReply(`[]`))
+		_, err := newGen(t, OllamaOptions{BaseURL: f.url}).FirstTokens(context.Background(), "p", false, top,
+			Options{})
+		require.Error(t, err, "top %d", top)
+		assert.Zero(t, f.calls.Load(), "top %d sends nothing", top)
+	}
+}
+
+// TestFirstTokens_Failures: a refusal is classified as any call's is (a
+// 400 is the request refused, a 404 the model missing), and a 5xx is
+// retried.
+func TestFirstTokens_Failures(t *testing.T) {
+	for _, tc := range []struct {
+		code int
+		want error
+	}{
+		{http.StatusBadRequest, ErrBadRequest},
+		{http.StatusNotFound, ErrModelMissing},
+		{http.StatusInternalServerError, ErrUnavailable},
+	} {
+		f := newFakeOllama(t, status(tc.code, `{"error":"top_logprobs must be between 0 and 20"}`))
+		_, err := newGen(t, OllamaOptions{BaseURL: f.url, Retries: 1}).FirstTokens(context.Background(), "p",
+			false, 5, Options{})
+		require.ErrorIs(t, err, tc.want, "HTTP %d", tc.code)
+		want := int32(1)
+		if tc.code >= http.StatusInternalServerError {
+			want = 2
+		}
+		assert.Equal(t, want, f.calls.Load(), "HTTP %d", tc.code)
+	}
+}

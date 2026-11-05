@@ -260,6 +260,52 @@ func (x *Summaries) GetSummary(ctx context.Context, tenantID, documentID string)
 	return out, nil
 }
 
+// currentSummariesSQL reads the summaries of the documents a JSON array
+// (?1) names, each by its unique key, that read their document's current
+// extraction and aren't of kind not_the_page; the tenant (?2) is checked
+// on each document found by its primary key, never walked.
+const currentSummariesSQL = `SELECT s.document_id, s.extraction_id, s.kind, s.site, s.author, s.about, s.entities,
+		s.claims, s.descriptions, s.model, s.prompt_version, s.input_hash, s.written_at
+	FROM document_summaries s JOIN documents d ON d.id = s.document_id
+	WHERE s.document_id IN (SELECT value FROM json_each(?1)) AND +d.tenant_id = ?2
+	  AND s.extraction_id = d.current_extraction_id AND s.kind <> '` + string(store.SummaryKindNotThePage) + `'`
+
+// CurrentSummaries implements store.SummaryStore.
+func (x *Summaries) CurrentSummaries(ctx context.Context, tenantID string, ids []string) (map[string]*store.Summary,
+	error) {
+	out := map[string]*store.Summary{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	list, err := json.Marshal(ids)
+	if err != nil {
+		return nil, fmt.Errorf("current summaries: encode the documents' IDs: %w", err)
+	}
+	rows, err := x.db.QueryContext(ctx, currentSummariesSQL, string(list), tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("current summaries: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var s store.Summary
+		var entities, claims, descriptions string
+		var writtenAt sql.NullString
+		if err := rows.Scan(&s.DocumentID, &s.ExtractionID, &s.Kind, &s.Site, &s.Author, &s.About, &entities,
+			&claims, &descriptions, &s.Model, &s.PromptVersion, &s.InputHash, &writtenAt); err != nil {
+			return nil, fmt.Errorf("current summaries: %w", err)
+		}
+		s.Entities, s.Claims, s.Descriptions = splitLines(entities), splitLines(claims), splitLines(descriptions)
+		if s.WrittenAt, err = parseNullTime(writtenAt); err != nil {
+			return nil, fmt.Errorf("summary of document %s: written_at: %w", s.DocumentID, err)
+		}
+		out[s.DocumentID] = &s
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("current summaries: %w", err)
+	}
+	return out, nil
+}
+
 // splitLines are the items of a one-a-line list, none for an empty one.
 func splitLines(list string) []string {
 	if list == "" {

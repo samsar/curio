@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -139,9 +140,10 @@ var farAway = at(1000)
 // query of testdata/queries.yaml at its place on the line (queryAt), each
 // bookmarked document's card at its own (cardAt), and any other text far
 // away. With answer set it also plans, as a planner model held in memory:
-// it loads on a generate request without a prompt, and answers one with a
-// prompt with answer's reply to the prompt's question, told the prompt's
-// today. It fails a test that asks it to pull.
+// it loads on a generate request without a prompt, unloads on one whose
+// keep_alive is 0, and answers one with a prompt with answer's reply to
+// the prompt's question, told the prompt's today. It fails a test that
+// asks it to pull.
 type fakeOllama struct {
 	url string
 
@@ -156,11 +158,21 @@ type fakeOllama struct {
 	// schema); summarized counts them.
 	summary    func(prompt string) string
 	summarized int
+	// reranks counts the reranker's calls, which it answers as a fit
+	// model does (rerankAnswer).
+	reranks int
+	// resident is what /api/ps lists, planModel unless a test sets it: a
+	// load adds its model, an unload removes it, counted in unloads, and
+	// evictAtRerank leaves it at the reranker's first call, as a model
+	// Ollama evicts.
+	resident      []string
+	unloads       []string
+	evictAtRerank string
 }
 
 func newFakeOllama(t *testing.T) *fakeOllama {
 	t.Helper()
-	f := &fakeOllama{models: []string{testModel}, failText: map[string]int{}}
+	f := &fakeOllama{models: []string{testModel}, failText: map[string]int{}, resident: []string{planModel}}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/tags":
@@ -168,7 +180,7 @@ func newFakeOllama(t *testing.T) *fakeOllama {
 		case "/api/embed":
 			f.embed(t, w, r)
 		case "/api/ps":
-			fmt.Fprint(w, `{"models":[{"name":"`+planModel+`","model":"`+planModel+`"}]}`)
+			f.ps(t, w)
 		case "/api/generate":
 			f.generate(t, w, r)
 		case "/api/pull":
@@ -200,6 +212,24 @@ func (f *fakeOllama) tags(t *testing.T, w http.ResponseWriter) {
 	}
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		t.Errorf("encode the tags: %v", err)
+	}
+}
+
+func (f *fakeOllama) ps(t *testing.T, w http.ResponseWriter) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	type model struct {
+		Name  string `json:"name"`
+		Model string `json:"model"`
+	}
+	resp := struct {
+		Models []model `json:"models"`
+	}{Models: []model{}}
+	for _, m := range f.resident {
+		resp.Models = append(resp.Models, model{Name: m, Model: m})
+	}
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		t.Errorf("encode the running models: %v", err)
 	}
 }
 
@@ -248,13 +278,26 @@ const planModel = "test-plan:1"
 
 func (f *fakeOllama) generate(t *testing.T, w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Model  string          `json:"model"`
-		Prompt *string         `json:"prompt"`
-		Format json.RawMessage `json:"format"`
+		Model     string          `json:"model"`
+		Prompt    *string         `json:"prompt"`
+		Format    json.RawMessage `json:"format"`
+		Logprobs  bool            `json:"logprobs"`
+		KeepAlive json.RawMessage `json:"keep_alive"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		t.Errorf("decode a generate request: %v", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Prompt != nil && (req.Logprobs || bytes.Contains(req.Format, []byte(`"order"`))) {
+		f.mu.Lock()
+		f.reranks++
+		if f.evictAtRerank != "" {
+			f.resident = slices.DeleteFunc(f.resident, func(m string) bool { return m == f.evictAtRerank })
+			f.evictAtRerank = ""
+		}
+		f.mu.Unlock()
+		fmt.Fprint(w, rerankAnswer(t, *req.Prompt, req.Logprobs))
 		return
 	}
 	if req.Model != planModel {
@@ -262,8 +305,17 @@ func (f *fakeOllama) generate(t *testing.T, w http.ResponseWriter, r *http.Reque
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if req.Prompt == nil && string(req.KeepAlive) == "0" {
+		f.unloads = append(f.unloads, req.Model)
+		f.resident = slices.DeleteFunc(f.resident, func(m string) bool { return m == req.Model })
+		fmt.Fprint(w, `{"response":"","done":true,"done_reason":"unload"}`)
+		return
+	}
 	if req.Prompt == nil {
 		f.loads++
+		if !slices.Contains(f.resident, req.Model) {
+			f.resident = append(f.resident, req.Model)
+		}
 		fmt.Fprint(w, `{"response":"","done":true,"done_reason":"load"}`)
 		return
 	}
@@ -298,6 +350,28 @@ func (f *fakeOllama) generate(t *testing.T, w http.ResponseWriter, r *http.Reque
 		t.Errorf("encode a plan: %v", err)
 	}
 	fmt.Fprintf(w, `{"response":%s,"done":true,"done_reason":"stop"}`, reply)
+}
+
+// holding sets what /api/ps lists, and the model that leaves it at the
+// reranker's first call ("" for none).
+func (f *fakeOllama) holding(evictAtRerank string, models ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.resident, f.evictAtRerank, f.unloads = models, evictAtRerank, nil
+}
+
+// unloaded are the models the fake was asked to unload, in order.
+func (f *fakeOllama) unloaded() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.unloads...)
+}
+
+// rerankCalls is how many calls the reranker made.
+func (f *fakeOllama) rerankCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.reranks
 }
 
 // questions are the questions the fake planned, in order.

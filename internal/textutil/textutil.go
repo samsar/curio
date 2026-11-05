@@ -34,6 +34,35 @@ func TruncateBytes(s string, n int) string {
 	return s[:cut]
 }
 
+// The densest rates measured of a writing model's tokenizer, in
+// quarter-tokens a byte (on Ollama 0.40.14, from prompt_eval_count over
+// synthetic text and a real library's pages, for qwen3:4b-instruct and
+// gemma4:26b): a token covers at least one byte of any text (a run of
+// digits, Korean syllables: one byte a token), and at least 1.34 bytes of
+// a run of ASCII letters (random base64, the densest letter-heavy text).
+// Counting each byte at its rate over-counts prose, at about 6 bytes a
+// token, five times over, and never under-counts a page.
+const (
+	LetterQuarters = 3
+	ByteQuarters   = 4
+)
+
+// TokenQuarters is how many quarter-tokens s costs a writing model at
+// most, at the densest rates measured: what a prompt that must fit the
+// model's context is cut by, since Ollama has no tokenize endpoint and
+// truncates an over-long prompt silently.
+func TokenQuarters(s string) int {
+	n := 0
+	for i := range len(s) {
+		if c := s[i]; ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') {
+			n += LetterQuarters
+		} else {
+			n += ByteQuarters
+		}
+	}
+	return n
+}
+
 // TruncateRunes returns the prefix of s holding at most n runes.
 func TruncateRunes(s string, n int) string {
 	if n <= 0 {

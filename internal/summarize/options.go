@@ -48,23 +48,9 @@ func OptionsFrom(c config.Config) Options {
 		OffByDefault: c.Summaries.Enabled == nil,
 		Model:        c.Generation.Role(config.RoleSummaries),
 		Shared:       c.SharesModel(config.RoleSummaries),
-		KeepAlive:    keepAlive(c),
+		KeepAlive:    c.KeepAliveOf(config.RoleSummaries),
 		Withheld:     withheld(c.Generation),
 	}
-}
-
-// keepAlive is the summaries' calls' keep-alive: the planner's
-// (search.understand_keep_alive_minutes) while the planner is in use and
-// writes with the same model, since every request names how long Ollama
-// keeps the model after it, and a page summarized between two searches
-// would otherwise cut the planner's warm window to Ollama's default of 5
-// minutes; 0 otherwise, which sends none and keeps that default, so the
-// pass frees its model a few minutes after its last page.
-func keepAlive(c config.Config) time.Duration {
-	if !c.SharesModelWith(config.RoleSummaries, config.RolePlanner) {
-		return 0
-	}
-	return time.Duration(c.Search.UnderstandKeepAliveMinutes) * time.Minute
 }
 
 // withheld is why pages may not go to the summaries' model, "" when they

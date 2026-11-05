@@ -1235,7 +1235,9 @@ components:
             labels, while insight is on and labels with an LLM; planner:
             search understanding, while search.understand is on; summaries:
             document summaries, while they are written: summaries.enabled
-            true, since they are off by default) and the model
+            true, since they are off by default; reranker: search
+            reranking, while search.rerank is true, or left out with a
+            model measured as the reranker) and the model
             it writes with: generation.roles' model for the role, or
             generation.model. Empty when no role is in use. It takes a
             restart to change.
@@ -1269,8 +1271,9 @@ components:
         embedder_hold: { $ref: "#/components/schemas/EmbedderHold" }
         reembed_brake: { $ref: "#/components/schemas/ReembedBrake" }
         understanding: { $ref: "#/components/schemas/UnderstandingHealth" }
+        reranking: { $ref: "#/components/schemas/RerankingHealth" }
         summaries: { $ref: "#/components/schemas/SummariesHealth" }
-      required: [status, pid, home, version, schema_version, embedding_model, embedding_dim, generation_model, generation_roles, ollama_reachable, upstreams, github_token, interests, document_fields, saved_dates, understanding, summaries]
+      required: [status, pid, home, version, schema_version, embedding_model, embedding_dim, generation_model, generation_roles, ollama_reachable, upstreams, github_token, interests, document_fields, saved_dates, understanding, reranking, summaries]
 
     SummariesHealth:
       description: >
@@ -2079,6 +2082,80 @@ components:
 
     # ---------- search ----------
 
+    RerankingHealth:
+      description: >
+        What the daemon's reranker knows of its model, read from its memory
+        alone: healthz never asks the model. Status stays ok whatever it
+        says.
+      type: object
+      properties:
+        "on": { type: boolean, description: "Whether searches may be reranked: search.rerank, or, left out, a model measured as the reranker" }
+        on_by_default:
+          type: boolean
+          description: >
+            Present (true) only when reranking is on because config.yaml
+            leaves search.rerank out and the model is measured as the
+            reranker (gemma4:26b while summaries are written and questions
+            understood).
+        model: { type: string, description: "The reranker role's model" }
+        reason:
+          type: string
+          description: >
+            Why no search is reranked at all, present only then: reranking
+            is off (search.rerank false), or off by default for a model
+            not measured as the reranker, or measured only with the
+            summaries, which aren't written; it reranks only understood
+            searches, and none is (search.understand off, or withheld);
+            its provider can't be asked as
+            its routes need (no structured output, or no token
+            probabilities); or questions and pages would leave this
+            machine (generation.base_url off loopback, or another provider)
+            for a server the reranker role doesn't name
+            (generation.roles.reranker).
+        check:
+          type: string
+          enum: [unchecked, fit, unfit]
+          description: >
+            The fitness check's verdict on the model, run before its first
+            rerank and kept until the daemon restarts.
+        checked_at: { type: string, format: date-time, description: "When the verdict was reached" }
+        unfit: { type: string, description: "Why the model is unfit, and the fix; present only then" }
+        last_status:
+          type: string
+          description: The last rerank's reranking.status, if any was asked since the daemon started.
+        last_at: { type: string, format: date-time, description: "When the last rerank was asked" }
+        timeout_hold_until:
+          type: string
+          format: date-time
+          description: >
+            Present only while reranks are held because 3 in a row took
+            longer than search.rerank_timeout_seconds: until then every
+            search keeps its first ranking at once, asking no model. The
+            hold lasts 2 minutes, twice as long each time it holds again,
+            at most 15, and a rerank in time ends the run.
+        eviction_hold_until:
+          type: string
+          format: date-time
+          description: >
+            Present only while the reranker doesn't load its model because
+            Ollama unloaded it within its keep-alive twice within an hour,
+            for other models.
+        last_failure:
+          type: object
+          description: The reranker's last failure since the daemon started.
+          properties:
+            cause:
+              type: string
+              description: >
+                What failed, as the daemon's log names it: timeout,
+                timeout:held, timeout:check, invalid:<rule>, unavailable:loaded,
+                unavailable:missing, unavailable:load, unavailable:check,
+                unavailable:generate, unfit or evicted.
+            at: { type: string, format: date-time }
+            error: { type: string }
+          required: [cause, at]
+      required: ["on"]
+
     SearchRequest:
       type: object
       properties:
@@ -2116,6 +2193,30 @@ components:
             Search by this plan, asking no model: a response's
             understanding.plan, for another page of its ranking, or with a
             filter taken out. Not with understand.
+        rerank:
+          type: boolean
+          description: >
+            Ask the reranker to reorder the head of the ranking (its first
+            search.rerank_depth documents) by reading each candidate;
+            reranking in the response says how it went. Every way it fails
+            keeps the first ranking. Omitted means false. A daemon from
+            before reranking refuses the field.
+        rerank_order:
+          type: array
+          minItems: 1
+          maxItems: 30
+          items: { type: string, minLength: 1, maxLength: 64 }
+          description: >
+            Order the head by these document IDs, asking no model: a
+            response's reranking.order, for another page of its ranking.
+            The IDs found among the ranking's first len(rerank_order) come
+            first, in this order, then the rest of those in the first
+            ranking's order, then the ranking's rest. Distinct IDs, none
+            empty, over 64 bytes (maxLength counts characters: a 64-byte
+            cap allows fewer of a multi-byte ID) or holding a control
+            character. Not with rerank, nor with understand: a later page
+            of an understood search sends the plan its first page
+            returned, so it tiles the same ranking.
       required: [query]
 
     SearchFilters:
@@ -2321,11 +2422,60 @@ components:
         vector_score: { type: number, description: "Absent when vector search didn't return the chunk" }
       required: [chunk_id, text]
 
+    Reranking:
+      type: object
+      description: >
+        How the head of the ranking was ordered: present exactly when the
+        request sent rerank or rerank_order.
+      properties:
+        status:
+          type: string
+          enum: [reranked, supplied, skipped, "off", cold, checking, unfit, timeout, unavailable, invalid, too_long]
+          description: >
+            reranked: the reranker's order is applied to the head.
+            supplied: the request's rerank_order is. Every other status
+            kept the first ranking whole: skipped, the query's kind isn't
+            reranked (a keyword search), or the head has fewer than two
+            candidates; off, reranking is off, off by default for an
+            unmeasured model, or its model can't be asked as its route
+            needs; cold, the reranker's model is loading, which this
+            request started; checking, the model is being checked before
+            its first rerank; unfit, it failed that check, for as long as
+            the daemon runs; timeout, the rerank took longer than
+            search.rerank_timeout_seconds, another search's rerank held
+            the model that long, or 3 reranks in a row ran out of time and
+            reranking is held for a while; unavailable, Ollama or the model
+            couldn't be reached or run, the model isn't pulled, Ollama
+            keeps unloading it, the candidates couldn't be read, or
+            questions and pages may not leave this machine for the server
+            configured; invalid, the model's answer couldn't be used;
+            too_long, the query is over 512 bytes, and wasn't sent.
+        reason:
+          type: string
+          description: Why the first ranking was kept, for any status but reranked and supplied.
+        model:   { type: string, description: "The reranker's model, when one was asked" }
+        method:  { type: string, enum: [listwise, pointwise], description: "How the model was asked" }
+        depth:   { type: integer, description: "How many of the ranking's first documents were read" }
+        took_ms: { type: integer, description: "How long reranking took, in milliseconds, the candidates' reads included" }
+        order:
+          type: array
+          items: { type: string }
+          description: >
+            Present for reranked and supplied: the head's document IDs as
+            applied. Send it back as rerank_order for another page.
+        stale:
+          type: integer
+          description: >
+            For supplied: how many of rerank_order's IDs weren't among the
+            ranking's first len(rerank_order) (deleted, or ranked lower
+            since); present only when some weren't.
+      required: [status, took_ms]
+
     SearchResponse:
       type: object
       properties:
         query:       { type: string }
-        took_ms:     { type: integer, description: "Time the search took, in milliseconds, understanding the query included" }
+        took_ms:     { type: integer, description: "Time the search took, in milliseconds, understanding the query and reranking its head included" }
         bm25_hits:   { type: integer, description: "How many distinct chunks BM25 returned before fusion, over the query's and its rewrites' lists" }
         vector_hits: { type: integer, description: "How many distinct chunks the vector index returned before fusion, over the query's and its rewrites' lists (0 when degraded, and with search.vector_weight 0, which skips the vector search)" }
         fields_hits: { type: integer, description: "How many distinct documents the fields list matched by the query's words (title, bookmark titles and folders, site, author), over every query of the search, each list read at most 200 deep (0 with search.fields_weight 0, which skips it)" }
@@ -2369,8 +2519,13 @@ components:
             or kept with include_undated; the count is the same either way,
             and on every page of every query with these filters.
         understanding: { $ref: "#/components/schemas/Understanding" }
+        reranking: { $ref: "#/components/schemas/Reranking" }
         items:
           type: array
+          description: >
+            The window [offset, offset+k) of the ranking: of the head as
+            the reranker or rerank_order ordered it, then the first
+            ranking's rest. Each score stays the first ranking's.
           items: { $ref: "#/components/schemas/SearchHit" }
       required: [query, took_ms, bm25_hits, vector_hits, fields_hits, title_hits, summary_hits, total, capped, items]
 

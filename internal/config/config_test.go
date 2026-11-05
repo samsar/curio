@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -544,11 +545,15 @@ func TestDefault_Roles(t *testing.T) {
 	d.Generation.Model = "gemma4:26b"
 	assert.Equal(t, []Role{RoleLabels, RolePlanner}, d.RolesInUse(), "off by default for every model")
 	d.Summaries.Enabled = new(true)
+	assert.Equal(t, []Role{RoleLabels, RolePlanner, RoleSummaries, RoleReranker}, d.RolesInUse(),
+		"the reranker on by default for gemma4:26b with the summaries")
+	d.Generation.Model = "qwen3:4b-instruct"
 	assert.Equal(t, []Role{RoleLabels, RolePlanner, RoleSummaries}, d.RolesInUse())
-	assert.Equal(t, []Role{RoleLabels, RolePlanner, RoleSummaries}, Roles())
+	assert.Equal(t, []Role{RoleLabels, RolePlanner, RoleSummaries, RoleReranker}, Roles())
 	assert.Equal(t, "interest labels", RoleLabels.UsedFor())
 	assert.Equal(t, "search understanding", RolePlanner.UsedFor())
 	assert.Equal(t, "document summaries", RoleSummaries.UsedFor())
+	assert.Equal(t, "search reranking", RoleReranker.UsedFor())
 	assert.Empty(t, Role("lables").UsedFor())
 }
 
@@ -597,6 +602,7 @@ func TestPullsAlone(t *testing.T) {
 	assert.True(t, RoleLabels.PullsAlone())
 	assert.False(t, RolePlanner.PullsAlone())
 	assert.False(t, RoleSummaries.PullsAlone())
+	assert.False(t, RoleReranker.PullsAlone())
 	assert.False(t, Role("lables").PullsAlone())
 }
 
@@ -623,6 +629,46 @@ func TestSharesModel(t *testing.T) {
 	assert.True(t, cfg.SharesModel(RolePlanner), "labels not in use, the summaries are")
 	cfg.Summaries.Enabled = new(false)
 	assert.False(t, cfg.SharesModel(RolePlanner), "neither labels nor summaries in use")
+}
+
+// TestKeepAliveOf_SharesModelShorter: the labels send no keep-alive, the
+// planner and the reranker search's, the summaries search's only beside
+// the planner or the reranker on their model; a role whose sharer sends
+// none or a shorter one is kept for Ollama's 5 minutes, as the planner
+// beside the labels always was, while sharers that send the same
+// keep-alive leave it whole.
+func TestKeepAliveOf_SharesModelShorter(t *testing.T) {
+	cfg := Default()
+	cfg.Search.Rerank = new(true)
+	cfg.Summaries.Enabled = new(true)
+	assert.Zero(t, cfg.KeepAliveOf(RoleLabels))
+	for _, r := range []Role{RolePlanner, RoleReranker, RoleSummaries} {
+		assert.Equal(t, 30*time.Minute, cfg.KeepAliveOf(r), r)
+	}
+	for _, r := range []Role{RolePlanner, RoleReranker, RoleSummaries} {
+		assert.True(t, cfg.SharesModelShorter(r), "beside the labels: %s", r)
+	}
+	assert.False(t, cfg.SharesModelShorter(RoleLabels), "no sharer sends less than none")
+
+	cfg.Insight.Labeling = "terms"
+	for _, r := range []Role{RolePlanner, RoleReranker, RoleSummaries} {
+		assert.False(t, cfg.SharesModelShorter(r), "every sharer sends search's keep-alive: %s", r)
+	}
+
+	cfg = Default()
+	cfg.Insight.Labeling = "terms"
+	cfg.Search.Understand = false
+	cfg.Summaries.Enabled = new(true)
+	cfg.Search.Rerank = new(true)
+	cfg.Generation.Roles = map[Role]ModelSpec{RoleReranker: {Model: "gemma4:26b"}}
+	assert.Zero(t, cfg.KeepAliveOf(RoleSummaries), "no planner or reranker on its model")
+	cfg.Search.Understand = true
+	assert.False(t, cfg.SharesModelShorter(RolePlanner), "the summaries send the planner's keep-alive")
+	assert.False(t, cfg.SharesModelShorter(RoleReranker), "a model of its own")
+
+	cfg.Search.UnderstandKeepAliveMinutes = 3
+	cfg.Insight.Labeling = "llm"
+	assert.True(t, cfg.SharesModelShorter(RolePlanner), "the labels send none")
 }
 
 // TestSharesModelWith: a role shares its model with one other, named,
@@ -763,7 +809,9 @@ func TestLoad_Roles(t *testing.T) {
 
 // TestRolesInUse: labels is in use only while insight is on and labels
 // with an LLM, the planner only while search understands questions,
-// whatever insight says, and the summaries only while they are turned on.
+// whatever insight says, the summaries only while they are turned on, and
+// the reranker, left out, with understanding and the summaries for its
+// measured model.
 func TestRolesInUse(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -772,10 +820,10 @@ func TestRolesInUse(t *testing.T) {
 		understand bool
 		want       []Role
 	}{
-		{"llm", true, "llm", true, []Role{RoleLabels, RolePlanner, RoleSummaries}},
+		{"llm", true, "llm", true, []Role{RoleLabels, RolePlanner, RoleSummaries, RoleReranker}},
 		{"llm, no understanding", true, "llm", false, []Role{RoleLabels, RoleSummaries}},
-		{"insight off", false, "llm", true, []Role{RolePlanner, RoleSummaries}},
-		{"term labels", true, "terms", true, []Role{RolePlanner, RoleSummaries}},
+		{"insight off", false, "llm", true, []Role{RolePlanner, RoleSummaries, RoleReranker}},
+		{"term labels", true, "terms", true, []Role{RolePlanner, RoleSummaries, RoleReranker}},
 		{"no labels, no understanding", true, "off", false, []Role{RoleSummaries}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -797,7 +845,7 @@ func TestLoad_RoleErrors(t *testing.T) {
 		name, yaml, want string
 	}{
 		{"an unknown role", "generation:\n  roles:\n    lables:\n      model: m:1\n",
-			`generation.roles: unknown role "lables"; the roles are: labels, planner, summaries`},
+			`generation.roles: unknown role "lables"; the roles are: labels, planner, summaries, reranker`},
 		{"unknown roles, the first in order", "generation:\n  roles:\n    zeta: {}\n    alpha: {}\n",
 			`unknown role "alpha"`},
 		{"another provider", "generation:\n  roles:\n    labels:\n      provider: openai\n",

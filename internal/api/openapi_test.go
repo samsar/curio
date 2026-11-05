@@ -25,6 +25,7 @@ import (
 	"github.com/samsar/curio/internal/insight"
 	"github.com/samsar/curio/internal/jobs"
 	"github.com/samsar/curio/internal/ollama"
+	"github.com/samsar/curio/internal/rerank"
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/summarize"
@@ -173,6 +174,25 @@ func TestOpenAPI_FailureCauseEnum(t *testing.T) {
 		want[i] = string(c)
 	}
 	assert.Equal(t, want, loadSpec(t).Components.Schemas["FailureCause"].Value.Enum)
+}
+
+// TestOpenAPI_StatusEnums: the spec names every understanding and
+// reranking status, in their order, so a new one can't reach the wire
+// unnoticed.
+func TestOpenAPI_StatusEnums(t *testing.T) {
+	enum := func(schema string) []any {
+		return loadSpec(t).Components.Schemas[schema].Value.Properties["status"].Value.Enum
+	}
+	reranking := make([]any, 0, len(rerank.Statuses()))
+	for _, s := range rerank.Statuses() {
+		reranking = append(reranking, string(s))
+	}
+	assert.Equal(t, reranking, enum("Reranking"))
+	understanding := make([]any, 0, len(understand.Statuses()))
+	for _, s := range understand.Statuses() {
+		understanding = append(understanding, string(s))
+	}
+	assert.Equal(t, understanding, enum("Understanding"))
 }
 
 // TestOpenAPI_StrictValidation: the validation the contract tests rely on
@@ -335,6 +355,20 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 			Last: understand.StatusTimeout, LastAt: now, TimeoutHoldUntil: now.Add(2 * time.Minute),
 			EvictionHoldUntil: now.Add(15 * time.Minute),
 			Failure:           understand.Failure{Cause: "evicted", At: now, Err: "unloaded within its keep-alive 2 times"}}}
+		// "kafka" is reranked by reversing its head; "kafka log" keeps its
+		// first ranking, timed out. Its state with every field set.
+		d.Reranker = stateReranker{fakeReranker: &fakeReranker{depth: 5, rerankFn: func(req rerank.Request) rerank.Outcome {
+			if req.Question != "kafka" {
+				return rerank.Outcome{Status: rerank.StatusTimeout, Reason: "reranking took longer than 7s",
+					Model: "gemma4:26b", Method: rerank.MethodPointwise, Depth: 5}
+			}
+			return reversed(req)
+		}}, state: rerank.State{On: true, ByDefault: true, Model: "gemma4:26b",
+			Reason: "questions and pages would leave this machine", Check: rerank.CheckUnfit, CheckedAt: now,
+			Unfit: `gemma4:26b didn't pass the check "a page remembered"`,
+			Last:  rerank.StatusTimeout, LastAt: now, TimeoutHoldUntil: now.Add(2 * time.Minute),
+			EvictionHoldUntil: now.Add(15 * time.Minute),
+			Failure:           rerank.Failure{Cause: "timeout:held", At: now, Err: "3 reranks in a row took longer than 7s"}}}
 		d.Drift = monitor
 		d.Bookmarks = unsavableBookmark{BookmarkStore: d.Bookmarks, url: "https://example.com/unsavable"}
 		d.YouTubeFetcher = "/opt/homebrew/bin/yt-dlp"
@@ -497,6 +531,14 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 			`"published_after":"2000-01-01","published_before":"2030-01-01","include_undated":true},`+
 			`"rewrites":["kafka log"],"names":["Kafka Guide"]}}`), http.StatusOK},
 		{"POST /v1/search", jsonBody(http.MethodPost, "/v1/search", `{"query":"kafka","plan":{"kind":"summary"}}`),
+			http.StatusBadRequest},
+		{"POST /v1/search", jsonBody(http.MethodPost, "/v1/search", `{"query":"kafka","rerank":true}`),
+			http.StatusOK},
+		{"POST /v1/search", jsonBody(http.MethodPost, "/v1/search", `{"query":"kafka log","k":3,"offset":2,`+
+			`"rerank":true}`), http.StatusOK},
+		{"POST /v1/search", jsonBody(http.MethodPost, "/v1/search", `{"query":"kafka","rerank_order":["gone"]}`),
+			http.StatusOK},
+		{"POST /v1/search", jsonBody(http.MethodPost, "/v1/search", `{"query":"kafka","rerank_order":[]}`),
 			http.StatusBadRequest},
 		{"GET /v1/failures", get("/v1/failures"), http.StatusOK},
 

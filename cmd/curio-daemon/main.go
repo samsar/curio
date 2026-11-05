@@ -28,6 +28,7 @@ import (
 	"github.com/samsar/curio/internal/jobs"
 	"github.com/samsar/curio/internal/keepawake"
 	"github.com/samsar/curio/internal/ollama"
+	"github.com/samsar/curio/internal/rerank"
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
 	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
@@ -478,6 +479,7 @@ type daemon struct {
 	scheduler  *insight.Scheduler // nil with insight off
 	savedDates *api.SavedDateClassifier
 	planner    *planner // nil while search.understand is off
+	reranker   *reranker
 	// hold holds the index and cards jobs back while the embedding model
 	// doesn't answer.
 	hold *jobs.EmbedderHold
@@ -566,6 +568,12 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 		if planner, err = newPlanner(ctx, cfg, foreground.Begin); err != nil {
 			return nil, err
 		}
+	}
+	// Built whether or not its role is in use: off, a search that asks to
+	// be reranked is told why, on healthz too.
+	reranker, err := newReranker(ctx, cfg, foreground.Begin)
+	if err != nil {
+		return nil, err
 	}
 	// Built whether or not summaries are on: off, it writes nothing, and
 	// the summarize jobs left from before drain without a call.
@@ -678,6 +686,7 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 		SummaryWriter:   writer,
 		SummaryFeed:     feed,
 		Foreground:      foreground,
+		Reranker:        reranker,
 		Log:             slog.Default(),
 	}
 	if scheduler != nil {
@@ -687,7 +696,8 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 		apiDeps.Planner = planner
 	}
 	return &daemon{apiDeps: apiDeps, pools: pools, drift: driftMonitor, keeper: keeper, scheduler: scheduler,
-		savedDates: savedDates, planner: planner, hold: hold, reembed: reembed, summaries: feed}, nil
+		savedDates: savedDates, planner: planner, reranker: reranker, hold: hold, reembed: reembed,
+		summaries: feed}, nil
 }
 
 // newSummaryWriter builds the summaries' writer, writing with the
@@ -725,6 +735,29 @@ func newPlanner(ctx context.Context, cfg config.Config, using func() func()) (*p
 	opts.Using = using
 	lifetime, stop := context.WithCancel(ctx)
 	return &planner{Planner: understand.New(lifetime, gen, opts), stop: stop}, nil
+}
+
+// reranker is search's reranker, and the end of its background work's
+// context, so serve stops it however serving ended.
+type reranker struct {
+	*rerank.Reranker
+	stop context.CancelFunc
+}
+
+// newReranker builds search's reranker, writing with the reranker role's
+// model, telling using of each call it makes of it (the summary pass yields
+// to them), off with its reason while the role isn't in use. Its
+// background work runs on a context of ctx, the daemon's lifetime, as the
+// planner's does.
+func newReranker(ctx context.Context, cfg config.Config, using func() func()) (*reranker, error) {
+	gen, err := generator.New(cfg.Generation.Role(config.RoleReranker))
+	if err != nil {
+		return nil, err
+	}
+	opts := rerank.OptionsFrom(cfg)
+	opts.Using = using
+	lifetime, stop := context.WithCancel(ctx)
+	return &reranker{Reranker: rerank.New(lifetime, gen, opts), stop: stop}, nil
 }
 
 // driftHold says how the embeddings drifted, as the monitor last reported
@@ -941,9 +974,9 @@ type pullTarget struct {
 // with embedding.auto_pull, then, with generation.auto_pull, the writing
 // model of each role in use that pulls alone (config.Role.PullsAlone),
 // each pulled once however many uses share it on one server. A role that
-// doesn't pull alone, the planner or the summaries, joins a target another
-// use pulls already, and pulls nothing of its own: curio up pulls its
-// model, with consent. A role not in use pulls nothing: its
+// doesn't pull alone, the planner, the summaries or the reranker, joins a
+// target another use pulls already, and pulls nothing of its own: curio
+// up pulls its model, with consent. A role not in use pulls nothing: its
 // multi-gigabyte model would serve no one.
 func pullTargets(cfg config.Config) []pullTarget {
 	var out []pullTarget
@@ -1065,8 +1098,8 @@ func indexing(queue store.JobStore) func(context.Context) (bool, error) {
 // classifications owed, the embedder hold's probes, the re-embed's feed and
 // the summary pass's alongside the API until ctx is cancelled or the API
 // fails, then shuts them down within the documented budget: the keeper
-// releases its hold as its context ends, and the planner's background work
-// stops with its own.
+// releases its hold as its context ends, and the planner's and the
+// reranker's background work stops with their own.
 func (d *daemon) serve(ctx context.Context, served *servingAPI) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -1101,6 +1134,8 @@ func (d *daemon) serve(ctx context.Context, served *servingAPI) error {
 		d.planner.stop()
 		d.planner.Wait()
 	}
+	d.reranker.stop()
+	d.reranker.Wait()
 	if stuck, drained := d.drain(&workers, workerDrainTimeout); !drained {
 		slog.Warn("jobs still running after the shutdown grace period; exiting anyway "+
 			"(the next start requeues them)", "grace", workerDrainTimeout, "job_ids", stuck)

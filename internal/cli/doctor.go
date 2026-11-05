@@ -207,6 +207,12 @@ func runOwnChecks(ctx context.Context, flags *rootFlags, d deps, r *doctorReport
 				status, detail, hint := understandingCheck(*u)
 				r.add("understanding", status, detail, hint)
 			}
+			// Whether search reranking reorders searches, as the reranker
+			// knows its model and the planner, whose plans it needs, its own.
+			if rr := health.Reranking; rr != nil {
+				status, detail, hint := rerankingCheck(*rr, health.Understanding)
+				r.add("reranking", status, detail, hint)
+			}
 			// Whether the daemon holds its index and cards jobs for an
 			// embedding model that doesn't answer: only while it does.
 			if h := health.EmbedderHold; h != nil {
@@ -353,10 +359,11 @@ func embedderHoldCheck(h client.EmbedderHold) (status checkStatus, detail, hint 
 		"wait for it, failing nothing", localTime(h.Since), h.Error), embedderFix
 }
 
-// The fitness check's verdicts as healthz says them: an unfit model, and
-// one not yet checked; and the summaries writer's failure cause for a
-// check that reached no verdict.
+// The fitness check's verdicts as healthz says them: a fit model, an
+// unfit one, and one not yet checked; and the summaries writer's failure
+// cause for a check that reached no verdict.
 const (
+	checkFit       = "fit"
 	checkUnfit     = "unfit"
 	checkUnchecked = "unchecked"
 	failureCheck   = "check"
@@ -395,7 +402,7 @@ func understandingCheck(u client.UnderstandingHealth) (status checkStatus, detai
 	case !u.TimeoutHoldUntil.IsZero():
 		return statusWarn, fmt.Sprintf("plans with %s kept taking longer than the timeout; searches use their "+
 			"words until %s", u.Model, localTime(u.TimeoutHoldUntil)), slowFix
-	case u.Check == "fit":
+	case u.Check == checkFit:
 		return statusOK, fmt.Sprintf("%s passed its check (%s)", u.Model, localTime(u.CheckedAt)), ""
 	}
 	return statusOK, u.Model + " not checked yet: the first understood search loads and checks it", ""

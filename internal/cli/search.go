@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -20,9 +21,10 @@ import (
 
 func newSearchCmd(env *daemonctl.Env) *cobra.Command {
 	var (
-		k       int
-		literal bool
-		filters client.SearchFilters
+		k        int
+		literal  bool
+		noRerank bool
+		filters  client.SearchFilters
 	)
 	cmd := &cobra.Command{
 		Use:   "search <query>",
@@ -32,7 +34,10 @@ func newSearchCmd(env *daemonctl.Env) *cobra.Command {
 			"generation.roles.planner): the dates, types and browser it states, other wordings, and\n" +
 			"the things it points at by description, all searched with its words. The first lines\n" +
 			"say what it understood, or why it searched your words alone (the model loading, say).\n" +
-			"--literal searches the words alone.\n\n" +
+			"It then reorders the first results with its reranker model (search.rerank,\n" +
+			"generation.roles.reranker), which reads each of them, and says so, or why they keep\n" +
+			"their first order. --no-rerank understands without reranking; --literal searches the\n" +
+			"words alone, neither understood nor reranked.\n\n" +
 			"Filters narrow the documents searched; every filter given applies, and the values of a\n" +
 			"repeated one are alternatives. Dates are a day (2024-03-01, midnight UTC) or an RFC 3339\n" +
 			"date-time with its zone (2024-03-01T00:00:00+01:00 for a local day); a window is\n" +
@@ -46,7 +51,8 @@ func newSearchCmd(env *daemonctl.Env) *cobra.Command {
 			if err := env.Controller.EnsureRunning(cmd.Context()); err != nil {
 				return err
 			}
-			req := client.SearchRequest{Query: strings.Join(args, " "), K: k, Understand: !literal}
+			req := client.SearchRequest{Query: strings.Join(args, " "), K: k, Understand: !literal,
+				Rerank: !literal && !noRerank}
 			if !filters.IsEmpty() {
 				req.Filters = &filters
 			}
@@ -57,7 +63,7 @@ func newSearchCmd(env *daemonctl.Env) *cobra.Command {
 			for _, w := range res.Warnings {
 				fmt.Fprintln(cmd.ErrOrStderr(), "warning:", w)
 			}
-			renderUnderstanding(cmd.OutOrStdout(), res.Understanding, time.Local)
+			renderHeader(cmd.OutOrStdout(), res.Understanding, res.Reranking, time.Local)
 			renderSearchResults(cmd.OutOrStdout(), res)
 			renderUndated(cmd.OutOrStdout(), res.Undated, filters.IncludeUndated)
 			return nil
@@ -65,7 +71,8 @@ func newSearchCmd(env *daemonctl.Env) *cobra.Command {
 	}
 	f := cmd.Flags()
 	f.IntVarP(&k, "k", "k", 0, "Number of results to return, 1-100 (default: the daemon's search.default_k)")
-	f.BoolVar(&literal, "literal", false, "Search the words alone, without understanding the question")
+	f.BoolVar(&literal, "literal", false, "Search the words alone, without understanding the question or reranking")
+	f.BoolVar(&noRerank, "no-rerank", false, "Understand the question, but keep the first order of the results")
 	f.StringSliceVar(&filters.ContentType, "type", nil,
 		"Filter by content type (article|repo|video|pdf|thread|unknown); repeatable")
 	f.StringSliceVar(&filters.Source, "source", nil,
@@ -85,44 +92,85 @@ func newSearchCmd(env *daemonctl.Env) *cobra.Command {
 	return cmd
 }
 
-// sendSearch sends req, and when the daemon predates understanding, searches
-// the words without it, saying so on stderr: right after an upgrade the
-// daemon running is the old one until it restarts, and every search would
-// otherwise fail.
+// refusable are the fields of a search request a daemon that predates
+// them refuses, in the order the request sends them, each with how to
+// drop it and the note that says so.
+var refusable = []struct {
+	field string
+	note  string
+	drop  func(*client.SearchRequest) bool
+}{
+	{"understand", "note: this curio-daemon predates understanding questions; searched your words (restart it: " +
+		"curio daemon stop)", func(r *client.SearchRequest) bool {
+		sent := r.Understand
+		r.Understand = false
+		return sent
+	}},
+	{"rerank", "note: this curio-daemon predates reranking; kept its first ranking (restart it: curio daemon " +
+		"stop)", func(r *client.SearchRequest) bool {
+		sent := r.Rerank
+		r.Rerank = false
+		return sent
+	}},
+}
+
+// sendSearch sends req, and when the daemon predates a field it sends
+// (understand, rerank), sends it again without that field, saying so on
+// stderr, at most once a field: right after an upgrade the daemon running
+// is the old one until it restarts, and every search would otherwise fail.
+// The decoder names the first field it doesn't know, so a daemon that
+// predates both is asked three times.
 func sendSearch(ctx context.Context, s searcher, req client.SearchRequest, stderr io.Writer) (
 	*client.SearchResponse, error) {
-	res, err := s.Search(ctx, req)
-	if req.Understand && predatesUnderstanding(err) {
-		fmt.Fprintln(stderr, "note: this curio-daemon predates understanding questions; searched your words "+
-			"(restart it: curio daemon stop)")
-		req.Understand = false
-		return s.Search(ctx, req)
+	dropped := map[string]bool{}
+	for {
+		res, err := s.Search(ctx, req)
+		retry := false
+		for _, f := range refusable {
+			if !dropped[f.field] && predates(err, f.field) && f.drop(&req) {
+				dropped[f.field], retry = true, true
+				fmt.Fprintln(stderr, f.note)
+				break
+			}
+		}
+		if !retry {
+			return res, err
+		}
 	}
-	return res, err
 }
 
-// predatesUnderstanding reports whether err is a daemon refusing the
-// understand field it doesn't know. Its strict decoder says so only in
-// text, which internal/api's decodeJSON words as `unknown field
-// "understand": ...`: the one error curio search tells apart by its words.
-func predatesUnderstanding(err error) bool {
+// predates reports whether err is a daemon refusing field, one it doesn't
+// know. Its strict decoder says so only in text, which internal/api's
+// decodeJSON words as `unknown field "<field>": ...`: the one error curio
+// search tells apart by its words.
+func predates(err error, field string) bool {
 	apiErr, ok := errors.AsType[*client.APIError](err)
 	return ok && apiErr.Status == http.StatusBadRequest &&
-		strings.HasPrefix(apiErr.Problem.Detail, `unknown field "understand"`)
+		strings.HasPrefix(apiErr.Problem.Detail, `unknown field "`+field+`"`)
 }
 
-// renderUnderstanding says, before the results, how the question was
-// understood: the plan's kind and filters in a line (its windows as days
-// in loc, the end inclusive), and what else it searched in a second when
-// there is any; or, when the words were searched alone, why. Nothing for a
-// search that didn't ask, or that found understanding off.
-func renderUnderstanding(w io.Writer, u *client.Understanding, loc *time.Location) {
+// renderHeader says, before the results, how the question was understood
+// and how the results were ordered, then a blank line; nothing when there
+// is nothing to say.
+func renderHeader(w io.Writer, u *client.Understanding, r *client.Reranking, loc *time.Location) {
+	lines := slices.Concat(understandingLines(u, loc), rerankingLines(r))
+	if len(lines) == 0 {
+		return
+	}
+	fmt.Fprint(w, strings.Join(lines, "\n")+"\n\n")
+}
+
+// understandingLines say how the question was understood: the plan's kind
+// and filters in a line (its windows as days in loc, the end inclusive),
+// and what else it searched in a second when there is any; or, when the
+// words were searched alone, why. None for a search that didn't ask, or
+// that found understanding off.
+func understandingLines(u *client.Understanding, loc *time.Location) []string {
 	switch {
 	case u == nil || u.Status == "off":
-		return
+		return nil
 	case u.Plan == nil:
-		fmt.Fprintf(w, "searched your words: %s\n\n", u.Reason)
-		return
+		return []string{"searched your words: " + u.Reason}
 	}
 	head := "understood"
 	if u.Model != "" {
@@ -132,7 +180,7 @@ func renderUnderstanding(w io.Writer, u *client.Understanding, loc *time.Locatio
 	for _, f := range planFilters(u.Plan.Filters) {
 		parts = append(parts, planlabel.Filter(f.field, f.values, f.after, f.before, loc))
 	}
-	fmt.Fprintf(w, "%s: %s\n", head, strings.Join(parts, " · "))
+	lines := []string{fmt.Sprintf("%s: %s", head, strings.Join(parts, " · "))}
 	var also []string
 	if len(u.Plan.Rewrites) > 0 {
 		also = append(also, "also searched: "+strings.Join(u.Plan.Rewrites, "; "))
@@ -141,9 +189,30 @@ func renderUnderstanding(w io.Writer, u *client.Understanding, loc *time.Locatio
 		also = append(also, "looked for: "+strings.Join(u.Plan.Names, ", "))
 	}
 	if len(also) > 0 {
-		fmt.Fprintln(w, strings.Join(also, " · "))
+		lines = append(lines, strings.Join(also, " · "))
 	}
-	fmt.Fprintln(w)
+	return lines
+}
+
+// rerankingLines say how the results were ordered: by the reranker, its
+// model, method, depth and time; by the order a first page was reranked
+// to, sent back, and how many of its documents left the head; or why they
+// kept their first order. None for a search that didn't ask, found
+// reranking off, or whose kind isn't reranked.
+func rerankingLines(r *client.Reranking) []string {
+	switch {
+	case r == nil || r.Status == "off" || r.Status == "skipped":
+		return nil
+	case r.Status == "reranked":
+		return []string{fmt.Sprintf("reranked (%s, %s, top %d, %.1f s)", r.Model, r.Method, r.Depth,
+			float64(r.TookMS)/1000)}
+	case r.Status == "supplied" && r.Stale > 0:
+		return []string{fmt.Sprintf("reranked as the first page was, by the order sent; %d of its documents "+
+			"left the head", r.Stale)}
+	case r.Status == "supplied":
+		return []string{"reranked as the first page was, by the order sent"}
+	}
+	return []string{"kept the first ranking: " + r.Reason}
 }
 
 // planFilter is one dimension a plan's filters set.

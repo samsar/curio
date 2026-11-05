@@ -19,6 +19,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -206,11 +207,34 @@ type Search struct {
 	// Validate doesn't refuse the sum: embed_timeout_seconds alone, valid
 	// before understanding existed, could make it.
 	UnderstandTimeoutSeconds int `yaml:"understand_timeout_seconds"`
-	// UnderstandKeepAliveMinutes is how long the planner's model stays
-	// loaded after a plan or a warm-up, so a search a few minutes after
-	// the last finds it warm (a cold load takes seconds). Default 30, at
-	// most a day.
+	// UnderstandKeepAliveMinutes is how long search's models, the
+	// planner's and the reranker's, stay loaded after a call or a warm-up,
+	// so a search a few minutes after the last finds them warm (a cold load
+	// takes seconds). Default 30, at most a day.
 	UnderstandKeepAliveMinutes int `yaml:"understand_keep_alive_minutes"`
+	// Rerank lets a search that asks for it (curio search's default when
+	// it understands, never search as you type or MCP) reorder the head of
+	// its ranking with a writing model (the reranker role), which reads
+	// each candidate's title, what it was saved as, its site, its summary
+	// and its best passage. True is on with any model, whose fitness check
+	// guards it; false is off; left out (nil) it is on only for a model
+	// measured as the reranker (RerankOn). The daemon never pulls the
+	// role's model for it alone. See docs/decisions.md "Reranking: a
+	// reranker role over the ranking's head, routed by the plan's kind".
+	Rerank *bool `yaml:"rerank"`
+	// RerankDepth is how many of the ranking's first documents are
+	// reranked: in [2, 30], so a listwise prompt of that many candidates
+	// fits the model's context by construction. Default 30, the grid's:
+	// listwise at 30 beat 20 on all queries' nDCG@10 (0.828 against 0.812
+	// with every query reranked) within the timeout.
+	RerankDepth int `yaml:"rerank_depth"`
+	// RerankTimeoutSeconds bounds one rerank; a search whose rerank takes
+	// longer keeps its first ranking. Default 7, in [1, 23]. With the
+	// plan's timeout, the query's embed and a second each for asking
+	// whether the two models are loaded it must stay under 25 s:
+	// rerank.OptionsFrom shortens it when they don't, or reranks nothing
+	// when no time is left. Validate doesn't refuse the sum.
+	RerankTimeoutSeconds int `yaml:"rerank_timeout_seconds"`
 	// RewriteWeight weighs a plan's rewrites against the question in every
 	// list, and NameWeight its names in the document lists alone (fields,
 	// cards and titles): each list's weight times this. Finite and not
@@ -324,6 +348,9 @@ const (
 	// RoleSummaries writes each fetched document's summary: what the page
 	// is, who made it, what it is about and the names it holds.
 	RoleSummaries Role = "summaries"
+	// RoleReranker reorders the head of a search's ranking by reading each
+	// candidate.
+	RoleReranker Role = "reranker"
 )
 
 // roles are every role, in the order they are listed and pulled: what
@@ -340,6 +367,7 @@ var roles = []struct {
 	}, true},
 	{RolePlanner, "search understanding", func(c Config) bool { return c.Search.Understand }, false},
 	{RoleSummaries, "document summaries", Config.SummariesOn, false},
+	{RoleReranker, "search reranking", Config.RerankOn, false},
 }
 
 // Roles lists every role.
@@ -363,11 +391,12 @@ func (r Role) UsedFor() string {
 }
 
 // PullsAlone reports whether the daemon pulls r's model on its own, with
-// generation.auto_pull. The planner's and the summaries' don't: each is on
-// by default, and a home that labels nothing with a writing model would
-// otherwise download gigabytes on its first start after an upgrade. Their
-// model is pulled by curio up, which asks first, or with the pull of
-// another role in use that writes with the same model.
+// generation.auto_pull. The planner's, the summaries' and the reranker's
+// don't: each can be on by default, and a home that labels nothing with a
+// writing model would otherwise download gigabytes on its first start
+// after an upgrade. Their model is pulled by curio up, which asks first,
+// or with the pull of another role in use that writes with the same
+// model.
 func (r Role) PullsAlone() bool {
 	for _, d := range roles {
 		if d.role == r {
@@ -388,6 +417,43 @@ func (c Config) SharesModel(r Role) bool {
 // with r's model on r's server.
 func (c Config) SharesModelWith(r, o Role) bool {
 	return slices.Contains(c.RolesInUse(), o) && c.sameModel(r, o)
+}
+
+// KeepAliveOf is how long r's requests ask Ollama to keep its model loaded
+// after them; 0 sends none, which leaves Ollama's default of 5 minutes.
+// The labels send none; the planner and the reranker search's keep-alive
+// (search.understand_keep_alive_minutes); the summaries that one while the
+// planner or the reranker is in use and writes with their model, so a page
+// summarized between two searches never cuts their warm window, and none
+// otherwise, so the pass frees its model a few minutes after its last page.
+func (c Config) KeepAliveOf(r Role) time.Duration {
+	search := time.Duration(c.Search.UnderstandKeepAliveMinutes) * time.Minute
+	switch r {
+	case RolePlanner, RoleReranker:
+		return search
+	case RoleSummaries:
+		if c.SharesModelWith(r, RolePlanner) || c.SharesModelWith(r, RoleReranker) {
+			return search
+		}
+	case RoleLabels:
+	}
+	return 0
+}
+
+// SharesModelShorter reports whether another role in use writes with r's
+// model on r's server and sends no keep-alive, or a shorter one than r's
+// (KeepAliveOf): its requests then shorten how long the model stays
+// loaded after r's, to Ollama's default of 5 minutes when it sends none.
+// A sharer sending r's own keep-alive leaves it as r set it.
+func (c Config) SharesModelShorter(r Role) bool {
+	mine := c.KeepAliveOf(r)
+	return slices.ContainsFunc(c.RolesInUse(), func(o Role) bool {
+		if !c.sameModel(r, o) {
+			return false
+		}
+		theirs := c.KeepAliveOf(o)
+		return theirs == 0 || theirs < mine
+	})
 }
 
 // sameModel reports whether o, another role than r, writes with r's model
@@ -467,9 +533,10 @@ func (g Generation) Role(r Role) ModelSpec {
 
 // RolesInUse lists the roles whose feature is on, in Roles' order: labels
 // while insight is enabled and labels its interests with an LLM, the
-// planner while search understands questions, and the summaries while
-// they are written (SummariesOn). A role not in use has no writing model
-// to build, pull or check.
+// planner while search understands questions, the summaries while they
+// are written (SummariesOn), and the reranker while searches may be
+// reranked (RerankOn). A role not in use has no writing model to build,
+// pull or check.
 func (c Config) RolesInUse() []Role {
 	var out []Role
 	for _, r := range roles {
@@ -553,6 +620,12 @@ func Default() Config {
 			UnderstandKeepAliveMinutes: 30,
 			RewriteWeight:              0.5,
 			NameWeight:                 1,
+			// Reranking is on by default only for a measured model
+			// (RerankOn): gemma4:26b while summaries are written, by the
+			// amended pick rule (decisions.md "Choosing the reranker
+			// (written before the grid runs)").
+			RerankDepth:          30,
+			RerankTimeoutSeconds: 7,
 			// The summary list is off: on the operator's library no weight
 			// passed the pick rule (decisions.md "Choosing the ranking
 			// defaults"). At 0.1 to 0.25 it held the top 10 level but cost
@@ -610,6 +683,18 @@ const maxUnderstandSeconds = 23
 
 // maxKeepAliveMinutes bounds search.understand_keep_alive_minutes: a day.
 const maxKeepAliveMinutes = 24 * 60
+
+// The bounds of search.rerank_depth and search.rerank_timeout_seconds:
+// at most 30 candidates, so a listwise prompt fits the model's context at
+// the densest text by construction, and at least 2, which is a ranking;
+// a rerank, a plan, the embed and the loaded checks stay under the 25 s an
+// understood search has within the CLI's 30 s (rerank.OptionsFrom holds
+// the sum).
+const (
+	minRerankDepth   = 2
+	maxRerankDepth   = 30
+	maxRerankSeconds = 23
+)
 
 // Load reads config.yaml from path. A missing file is not an error; the
 // defaults are returned. An empty or partial file overlays onto defaults.
@@ -767,6 +852,12 @@ func (c Config) Validate() error {
 	}
 	if k := c.Search.UnderstandKeepAliveMinutes; k < 1 || k > maxKeepAliveMinutes {
 		return fmt.Errorf("search.understand_keep_alive_minutes must be in [1, %d], got %d", maxKeepAliveMinutes, k)
+	}
+	if d := c.Search.RerankDepth; d < minRerankDepth || d > maxRerankDepth {
+		return fmt.Errorf("search.rerank_depth must be in [%d, %d], got %d", minRerankDepth, maxRerankDepth, d)
+	}
+	if t := c.Search.RerankTimeoutSeconds; t < 1 || t > maxRerankSeconds {
+		return fmt.Errorf("search.rerank_timeout_seconds must be in [1, %d], got %d", maxRerankSeconds, t)
 	}
 	if c.Fetcher.Web2MD.TimeoutSeconds <= 0 {
 		return fmt.Errorf("fetcher.web2md.timeout_seconds must be positive, got %d",
