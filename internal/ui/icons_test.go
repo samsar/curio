@@ -54,7 +54,7 @@ func usedIcons(t testing.TB) []string {
 	for _, cause := range append(store.FailureCauses(), "", "bogus") {
 		used = append(used, causeIcon(string(cause)))
 	}
-	for _, item := range navItems() {
+	for _, item := range navItems(false) {
 		used = append(used, item.Icon)
 	}
 	slices.Sort(used)

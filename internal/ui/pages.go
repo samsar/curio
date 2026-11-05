@@ -53,6 +53,9 @@ type Layout struct {
 	// Footer shows the footer naming the daemon's version and address:
 	// set by the Status page alone, where what curio runs as belongs.
 	Footer bool
+	// MapOff is config.yaml's insight.map: false, a lasting setting: the
+	// navigation's Interests opens their list, not a map that is off.
+	MapOff bool
 }
 
 // PanelError is why a panel's data couldn't be read: the message, and the
@@ -601,6 +604,11 @@ type Tab struct {
 	Counted bool
 }
 
+// ShowsTypes reports whether the page shows the type tabs: with a query,
+// or a type already chosen, which the tabs keep in sight. The home shows
+// the box alone.
+func (s Search) ShowsTypes() bool { return strings.TrimSpace(s.Query) != "" || s.Type != "" }
+
 // TypeTabs are the search's type filter: a link to the first page of this
 // query limited to each offered type, by the plan shown, the current one
 // marked. A type the page doesn't offer (thread, unknown) still limits the
@@ -771,9 +779,9 @@ func (h SearchHit) Saved() string {
 // was saved as is left (docmeta.Unavailable).
 func (h SearchHit) Unavailable() string { return docmeta.Unavailable(h.State) }
 
-// shownMatches is how many of a hit's matches its result shows; the rest
-// are a click away.
-const shownMatches = 2
+// shownMatches is how many of a hit's matches its result shows: the
+// best, and the rest a click away.
+const shownMatches = 1
 
 // ShownMatches are the matches the result shows.
 func (h SearchHit) ShownMatches() []Match { return h.Matches[:min(len(h.Matches), shownMatches)] }
@@ -860,18 +868,19 @@ type LibraryViews struct {
 }
 
 // libraryStates are the Library's state tabs, in their order; "" is every
-// state.
+// state. Failed and dead have none: the Failures tab beside Documents
+// lists them by why, and a page filtered to either (Status's legend, an
+// old bookmark) names it as a chip.
 var libraryStates = []struct {
 	label string
 	state store.DocState
 }{
 	{"All", ""}, {"Fetched", store.DocStateFetched}, {"Pending", store.DocStatePending},
-	{"Failed", store.DocStateFailed}, {"Dead", store.DocStateDead},
 }
 
 // StateTabs are the Library's state filter: a link to the first page of
 // each state under the page's other filters, the current one marked, each
-// with its count when the counts apply.
+// with its count when the counts apply. A state without a tab marks none.
 func (l Library) StateTabs() []Tab {
 	counted := l.CountsApply()
 	tabs := make([]Tab, 0, len(libraryStates))
@@ -953,11 +962,20 @@ type Filter struct {
 	Name, Value string
 }
 
+// The names of the Library's filters, as Filter.Name gives them.
+const (
+	filterState  = "state"
+	filterType   = "type"
+	filterHost   = "host"
+	filterFolder = "folder"
+	filterCause  = "cause"
+)
+
 // Active are the filters that filter something, in the form's order.
 func (f LibraryFilters) Active() []Filter {
 	var active []Filter
-	for _, filter := range []Filter{{"state", f.State}, {"type", f.ContentType}, {"host", f.Host},
-		{"folder", f.Folder}, {"cause", f.Cause}} {
+	for _, filter := range []Filter{{filterState, f.State}, {filterType, f.ContentType}, {filterHost, f.Host},
+		{filterFolder, f.Folder}, {filterCause, f.Cause}} {
 		if filter.Value != "" {
 			active = append(active, filter)
 		}
@@ -967,6 +985,86 @@ func (f LibraryFilters) Active() []Filter {
 
 // Filtered reports whether any filter filters something.
 func (f LibraryFilters) Filtered() bool { return len(f.Active()) > 0 }
+
+// Menued is how many of the filters the Filters menu holds (type, host
+// and folder) filter something, which its button counts: the state is a
+// tab, and a cause, which the Failures tab's links set, has no field.
+func (f LibraryFilters) Menued() int {
+	n := 0
+	for _, v := range []string{f.ContentType, f.Host, f.Folder} {
+		if v != "" {
+			n++
+		}
+	}
+	return n
+}
+
+// FilterChip is an active filter as a chip under the Library's state
+// tabs: what it is, its value, and the page without it.
+type FilterChip struct {
+	Label, Value string
+	// Code is the stored value a cause's chip shows beside its label.
+	Code string
+	Href string
+}
+
+// Chips are the page's active filters as chips, in the form's order: a
+// state only when it has no tab (failed, dead), since a tab already marks
+// the others, each linking to the page without it.
+func (l Library) Chips() []FilterChip {
+	active := l.Filters.Active()
+	chips := make([]FilterChip, 0, len(active))
+	for _, f := range active {
+		chip := FilterChip{Value: f.Value, Href: withoutFilterHref(l.Filters, f.Name)}
+		switch f.Name {
+		case filterState:
+			if stateTabbed(f.Value) {
+				continue
+			}
+			chip.Label = "State"
+		case filterType:
+			chip.Label = "Type"
+		case filterHost:
+			chip.Label = "Host"
+		case filterFolder:
+			chip.Label = "Folder"
+		case filterCause:
+			chip.Label, chip.Value, chip.Code = "Why it failed", causeLabel(f.Value), f.Value
+		}
+		chips = append(chips, chip)
+	}
+	return chips
+}
+
+// stateTabbed reports whether state has a state tab.
+func stateTabbed(state string) bool {
+	for _, s := range libraryStates {
+		if string(s.state) == state {
+			return true
+		}
+	}
+	return false
+}
+
+// ClearAll is the Library without its filters, when two or more chips
+// show; "" otherwise, where a chip's own link does it.
+func (l Library) ClearAll() string {
+	if len(l.Chips()) < 2 {
+		return ""
+	}
+	return clearFiltersHref(l.Filters)
+}
+
+// OrderSwitch is the time column's head: the order in effect, newest
+// first, as a link to the other order.
+func (l Library) OrderSwitch() Link {
+	if l.Filters.Saved() {
+		return Link{Href: otherOrderHref(l.Filters), Label: "Saved",
+			Title: "Newest saves first. Sort by last updated"}
+	}
+	return Link{Href: otherOrderHref(l.Filters), Label: "Updated",
+		Title: "Most recently updated first. Sort by recently saved"}
+}
 
 // LibraryRow is one row of the list: a document, or in the Recently saved
 // order a save and its document. LastError and FailureCause are set only
@@ -1490,39 +1588,13 @@ type SavedTime struct {
 // store.SavedDate's values is no exact one.
 func (s SavedTime) Exact() bool { return s.Date == string(store.SavedDateExact) }
 
-// approx reports whether At is an upper bound of when it was saved.
-func (s SavedTime) approx() bool { return s.Date == string(store.SavedDateApprox) }
-
-// What says what an inexact time is: "saved by" its upper bound, or
-// "date unknown".
-func (s SavedTime) What() string {
-	if s.approx() {
-		return "saved by"
-	}
-	return "date unknown"
-}
-
-// Then is what an unknown date's time is, "imported", and "" for an
-// approximate one, whose time follows What.
-func (s SavedTime) Then() string {
-	if s.approx() {
-		return ""
-	}
-	return "imported"
-}
-
-// Shown is the time an inexact date shows: the upper bound, or when curio
-// imported the bookmark.
-func (s SavedTime) Shown() time.Time {
-	if s.approx() {
-		return s.At
-	}
-	return s.Imported
-}
+// Approx reports whether At is an upper bound of when it was saved,
+// which a list shows as "~" and how long ago.
+func (s SavedTime) Approx() bool { return s.Date == string(store.SavedDateApprox) }
 
 // Why is an inexact time's title: what the time means.
 func (s SavedTime) Why() string {
-	if s.approx() {
+	if s.Approx() {
 		return "Saved on or before " + when(s.At) + ": first seen by a later import of the browser's bookmarks, " +
 			"or copied with its folder then"
 	}
@@ -1564,10 +1636,6 @@ const (
 	InterestCardMembers = 3
 )
 
-// ChangesNoticeFor is how long after a rebuild the Interests page tells
-// what it split, merged or dissolved.
-const ChangesNoticeFor = 7 * 24 * time.Hour
-
 func (v Interests) page() int { return max(v.Page, 1) }
 
 // Pages is how many pages the run's top-level groups fill.
@@ -1596,11 +1664,12 @@ func (v Interests) Pager() *Pager {
 		Noun: noun, Href: v.pageHref})
 }
 
-// Views is the Interests' subnav, the List current.
+// Views is the Interests' view switch, the List current.
 func (Interests) Views() InterestsViews { return InterestsViews{} }
 
-// InterestsViews is the Interests' subnav (the interests-subnav partial):
-// the List of the interests and their Map, the current one marked.
+// InterestsViews is the Interests' view switch (the interests-views
+// partial): their Map, the first view, and their List, the current one
+// marked.
 type InterestsViews struct {
 	OnMap bool
 }
@@ -1640,6 +1709,18 @@ func (v Interests) pageHref(page int) string {
 		run = v.Run.ID
 	}
 	return interestsPageHref(page, run)
+}
+
+// UnsortedLink is the way to Unsorted in the line under the title, with
+// how many documents it lists (those the run left unsorted and those
+// placed there since); nil before the first rebuild and when it lists
+// none.
+func (v Interests) UnsortedLink() *Link {
+	r := v.Run
+	if r == nil || r.Unsorted+r.NewUnsorted <= 0 {
+		return nil
+	}
+	return &Link{Href: unsortedHref(1, r.ID), Label: num(r.Unsorted+r.NewUnsorted) + " unsorted"}
 }
 
 // UnsortedCard is the Interests' card of the documents in no interest: how
@@ -1767,6 +1848,18 @@ func (b Rebuild) ShowsState() bool {
 	return true
 }
 
+// Current reports whether the rebuild's line says the interests are
+// current: it shows the state, and the state is current, or one this
+// build doesn't know, which reads as current. Its line is then when the
+// last rebuild ran, the rest on hover.
+func (b Rebuild) Current() bool {
+	switch b.State.State {
+	case rebuildsNone, rebuildsDue, rebuildsHeld, rebuildsFailing:
+		return false
+	}
+	return b.ShowsState()
+}
+
 // Action is the Rebuild button's.
 func (Rebuild) Action() Action { return rebuildAction() }
 
@@ -1805,10 +1898,8 @@ type InterestRun struct {
 	// Total is how many top-level groups it has: its areas, or its
 	// interests in the flat shape.
 	Total int
-	// Changes are what it did to the interests before it, and Recent is
-	// set while it finished less than ChangesNoticeFor ago.
+	// Changes are what it did to the interests before it.
 	Changes RunChanges
-	Recent  bool
 }
 
 // HasAreas reports whether the run groups its interests in areas.
@@ -1818,68 +1909,6 @@ func (r InterestRun) HasAreas() bool { return r.Shape == string(store.InterestSh
 // its loose fits and the unsorted aside.
 func (r InterestRun) Members() int { return max(r.Documents-r.Loose-r.Unsorted, 0) }
 
-// The tones of the coverage bar's parts, each a fill- and swatch- class
-// over app.css's tokens: the accent, its border's, the neutral dot and the
-// bar's track.
-const (
-	toneAccent       = "accent"
-	toneAccentBorder = "accent-border"
-	toneNeutral      = "neutral"
-	toneTrack        = "track"
-)
-
-// CoveragePart is a part of the coverage bar and its legend: how many
-// documents it counts, what it calls them, and its tone.
-type CoveragePart struct {
-	Count     int
-	One, Many string
-	Tone      string
-}
-
-// Label is what the part calls its count.
-func (p CoveragePart) Label() string {
-	if p.Count == 1 {
-		return p.One
-	}
-	return p.Many
-}
-
-// Coverage are the parts of the run's documents and of those placed since,
-// in the bar's order: members, loose fits, new, and unsorted, which the
-// track is left to show.
-func (r InterestRun) Coverage() []CoveragePart {
-	return []CoveragePart{
-		{Count: r.Members(), One: "in an interest", Many: "in an interest", Tone: toneAccent},
-		{Count: r.Loose, One: "loose fit", Many: "loose fits", Tone: toneAccentBorder},
-		{Count: r.New, One: "new since the rebuild", Many: "new since the rebuild", Tone: toneNeutral},
-		{Count: r.Unsorted, One: "unsorted", Many: "unsorted", Tone: toneTrack},
-	}
-}
-
-// CoverageTotal is what the bar's parts are shares of: the run's documents
-// and those placed since.
-func (r InterestRun) CoverageTotal() int { return r.Documents + r.New }
-
-// Bar is the coverage bar.
-func (r InterestRun) Bar() []BarSegment { return coverageBar(r.Coverage(), r.CoverageTotal()) }
-
-// Legend is the bar's legend, in its order: the members and the unsorted,
-// and the loose fits and new documents when there are any.
-func (r InterestRun) Legend() []CoveragePart {
-	var out []CoveragePart
-	for _, p := range r.Coverage() {
-		if p.Count > 0 || p.Tone == toneAccent || p.Tone == toneTrack {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-// ShowsChanges reports whether the page tells what the run changed: it
-// finished less than ChangesNoticeFor ago, and split, merged or dissolved
-// an interest.
-func (r InterestRun) ShowsChanges() bool { return r.Recent && r.Changes.Notable() }
-
 // RunChanges is what a rebuild did to the interests before it: how many it
 // split, merged, moved and dissolved, and how many it created; and to how
 // many it did nothing but keep them.
@@ -1887,9 +1916,13 @@ type RunChanges struct {
 	Kept, Split, Merged, Moved, Dissolved, Created int
 }
 
-// Notable reports whether the rebuild split, merged or dissolved an
-// interest: names the reader knew changed.
-func (c RunChanges) Notable() bool { return c.Split+c.Merged+c.Dissolved > 0 }
+// Changed reports whether the rebuild changed interests the reader knew:
+// it did more than keep them, and it isn't the first grouping, whose
+// interests are all new.
+func (c RunChanges) Changed() bool {
+	before := c.Kept + c.Split + c.Merged + c.Moved + c.Dissolved
+	return before > 0 && c.Split+c.Merged+c.Moved+c.Dissolved+c.Created > 0
+}
 
 // Summary counts what the rebuild changed, each count only when it has
 // one: "5 interests split, 1 merged, 2 moved, 9 new"; "" for nothing.
@@ -1942,16 +1975,6 @@ func (in Interest) Parent() *InterestRef {
 		return nil
 	}
 	return &InterestRef{ID: in.ParentID, Label: in.ParentLabel, Area: true}
-}
-
-// Largest is the size of an area's largest interest listed, which their
-// bars are scaled to: 0 for none.
-func (in Interest) Largest() int {
-	largest := 0
-	for _, c := range in.Children {
-		largest = max(largest, c.Size)
-	}
-	return largest
 }
 
 // MoreChildren is how many of an area's interests its card leaves out.
@@ -2452,7 +2475,7 @@ func (r MapRun) HasAreas() bool { return r.Shape == string(store.InterestShapeAr
 // Ready reports whether there is a map to draw.
 func (p MapPage) Ready() bool { return p.State == MapReady }
 
-// Views is the Interests' subnav, the Map current.
+// Views is the Interests' view switch, the Map current.
 func (MapPage) Views() InterestsViews { return InterestsViews{OnMap: true} }
 
 // ByGroup reports whether the page opens on the By group view.
@@ -2497,9 +2520,11 @@ type ErrorPage struct {
 	Back *Link
 }
 
-// Link is a link a page offers: its address, built in Go, and its label.
+// Link is a link a page offers: its address, built in Go, its label, and
+// its title when it has one.
 type Link struct {
 	Href, Label string
+	Title       string
 }
 
 // Lead is the sentence the error page leads with: Sentence, or what the

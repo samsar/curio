@@ -166,7 +166,7 @@ func TestInterestMapPage_HostileSelection(t *testing.T) {
 	root := mapRoot(t, resp.body)
 	require.NotNil(t, root)
 	assert.Equal(t, "interest:"+id, nodeAttr(root, "data-select"))
-	assert.Equal(t, "similarity", nodeAttr(root, "data-view"))
+	assert.Equal(t, "groups", nodeAttr(root, "data-view"), "By group, the default")
 	assert.NotContains(t, resp.body, "<script>alert")
 }
 
@@ -201,9 +201,26 @@ func TestShowOnMap_Links(t *testing.T) {
 				assert.Equal(t, []string{want}, got, path)
 			}
 		}
-		// The subnav's Map leads to the map's page whatever its state.
+		// The view switch's Map leads to the map's page whatever its state;
+		// the navigation's Interests opens the list while the map is off.
 		page := s.do(t, request{method: http.MethodGet, path: "/ui/interests"}).body
-		assert.Contains(t, page, `<a href="/ui/interests/map">Map</a></nav>`)
+		assert.Regexp(t, `<a href="/ui/interests/map"><svg[^>]*>.*?</svg>Map</a>`, page)
+		nav := `<a href="/ui/interests/map" aria-current="page"><svg class="icon"`
+		if mapOff {
+			nav = `<a href="/ui/interests" aria-current="page"><svg class="icon"`
+		}
+		for _, path := range []string{"/ui/interests", "/ui/library", "/ui/"} {
+			body := s.do(t, request{method: http.MethodGet, path: path}).body
+			_, main, found := strings.Cut(body, `<nav aria-label="Main">`)
+			require.True(t, found, path)
+			main, _, _ = strings.Cut(main, "</nav>")
+			if path == "/ui/interests" {
+				assert.Contains(t, main, nav, "%s, map off %v", path, mapOff)
+			} else {
+				assert.Contains(t, main, strings.Replace(nav, ` aria-current="page"`, "", 1), "%s, map off %v", path,
+					mapOff)
+			}
+		}
 	}
 }
 

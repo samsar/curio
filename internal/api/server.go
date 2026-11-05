@@ -252,6 +252,7 @@ func newRouter(deps Deps, origin localOrigin, pages dashboard) (chi.Router, erro
 		r.Put("/queue", deps.handleUpdateQueue)
 	})
 	if pages.enabled() {
+		pages.mapOff = deps.MapOff
 		pageHandlers{d: deps, pages: pages}.routes(r)
 	}
 	var err error
