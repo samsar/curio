@@ -448,11 +448,20 @@ func navItems(mapOff bool) []NavItem {
 	}
 	for i := range items {
 		items[i].Href = navHref(items[i].Nav)
-		if items[i].Nav == NavInterests && !mapOff {
-			items[i].Href = mapHref(MapQuery{})
+		if items[i].Nav == NavInterests {
+			items[i].Href = interestsHref(mapOff)
 		}
 	}
 	return items
+}
+
+// interestsHref is where a link to the Interests as a whole goes, as the
+// navigation's does: their map (By group), or their list with the map off.
+func interestsHref(mapOff bool) string {
+	if mapOff {
+		return navHref(NavInterests)
+	}
+	return mapHref(MapQuery{})
 }
 
 // outbound is u when it is an http or https URL, which a page may link
