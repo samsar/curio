@@ -891,7 +891,12 @@ svg.stackbar rect { shape-rendering: crispEdges; }
 
 /* Search -------------------------------------------------------------------- */
 
-.search-hero { position: relative; width: 100%; margin: var(--s2) 0 var(--s6); }
+/* The box and the results share one column, the golden section (0.618)
+   of the container, at its left edge: they line up with the logo and the
+   other pages' content, and the rest of the width stays open. A phone's
+   column is the container. */
+.search-page { --search-measure: 61.8%; }
+.search-hero { position: relative; width: 100%; max-width: var(--search-measure); margin: var(--s2) 0 var(--s6); }
 .searchbox { position: relative; }
 .searchbox > svg.icon { position: absolute; left: 1.05rem; top: 50%; transform: translateY(-50%); width: 1.25rem; height: 1.25rem; color: var(--text-3); pointer-events: none; }
 .searchbox input[type="search"] {
@@ -944,11 +949,13 @@ svg.stackbar rect { shape-rendering: crispEdges; }
 .htmx-request .htmx-indicator, .htmx-request.htmx-indicator { opacity: 1; }
 .spinner { width: 1rem; height: 1rem; border-radius: 50%; border: 2px solid var(--surface-3); border-top-color: var(--accent); animation: spin 0.8s linear infinite; }
 
-/* The results fill the page's container, as every page's content does;
-   their passages keep their reading measure (.snippet). A flex item with
-   auto margins would shrink to its min-content width, which a result's
-   one-line address makes wider than a phone. */
+/* The results fill the box's column (--search-measure); their passages
+   keep their reading measure (.snippet). A flex item with auto margins
+   would shrink to its min-content width, which a result's one-line
+   address makes wider than a phone. The column is the outer one's alone:
+   its lists (ol.results) fill it. */
 .results { width: 100%; }
+#results > .results { max-width: var(--search-measure); }
 /* The results' head: a quiet line, its count wrapping beside the toggle
    where it doesn't fit (a phone), never cut. */
 .results-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s3); margin-bottom: var(--s1); color: var(--text-3); font-size: var(--fs-xs); }
@@ -1416,6 +1423,7 @@ td .badge.fit-new { margin-top: var(--s1); }
   .grid-3, .grid-2, .interest-grid, .controls { grid-template-columns: minmax(0, 1fr); }
   .span-2 { grid-column: auto; }
   .page-head h1, .doc-head h1 { font-size: var(--fs-xl-sm); }
+  .search-page { --search-measure: 100%; }
   .searchbox input[type="search"] { padding-right: 3.25rem; height: 3rem; }
   .searchbox .btn .label { display: none; }
   .searchbox .btn { width: 2.4rem; padding: 0; }

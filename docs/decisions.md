@@ -16666,6 +16666,13 @@ muted line, which wraps beside Show scores where it doesn't fit, never
 cut. The keystroke, hx-sync,
 pager and search.js rules are unchanged, and so is the home's read count.
 
+Amended: the full width made the box a long bar. The box and the results
+now share one column, the golden section of the container (`--search-measure`,
+61.8%, about 45 rem at 1440 px), still at the container's left edge, so
+they keep lining up with the logo and the other pages; the box's end
+meets Show scores, and the interests line under the landing keeps the
+whole width. At 48 rem and under the column is the container.
+
 **Library.** One row: the state tabs All, Fetched and Pending, then a
 **Filters** button at its end. Failed and Dead left the tabs: the
 Failures tab beside Documents lists them, grouped by why. Their addresses
