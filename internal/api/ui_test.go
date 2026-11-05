@@ -530,8 +530,8 @@ func TestUI_Search(t *testing.T) {
 	assert.Contains(t, body, `<span class="path" title="https://example.com/kafka"><b>example.com</b> › kafka</span>`)
 	assert.NotContains(t, body, `rel="noopener noreferrer"`, "results link to their document's page, not out")
 	assert.Contains(t, body, "<mark>kafka</mark>")
-	assert.Contains(t, body, `<div class="result-foot"><span class="tag">article</span><span class="score">score 0.`,
-		"the hit's type and its score for Show scores; no badge for a hit both found")
+	assert.Contains(t, body, `<div class="result-foot"><span class="score">score 0.`,
+		"its score for Show scores; no type pill (the icon before the host says it), no badge for a hit both found")
 	assert.Contains(t, body, "<strong>1 document</strong> matches · ")
 	assert.Contains(t, body, ` ms</span><label class="toggle"><input type="checkbox" id="show-scores" hx-preserve="true">`+
 		` Show scores</label></div>`)
@@ -995,8 +995,9 @@ func TestUI_SearchHomeIsMinimal(t *testing.T) {
 	body := getPage(t, srv, "/ui/", http.StatusOK)
 	uitest.AssertInert(t, body)
 	assert.Contains(t, body, `<nav class="explore-line" aria-label="Your interests">`)
-	assert.Contains(t, body, `<div class="segmented" role="group" aria-label="Type">`)
-	for _, gone := range []string{"Lately saved", "doc-title", "<table", "new since the interests were rebuilt"} {
+	assert.Contains(t, body, `<div class="search-scope" id="search-scope"></div>`, "the box alone: no type tabs, the region kept for a swap")
+	for _, gone := range []string{"Lately saved", "doc-title", "<table", "new since the interests were rebuilt",
+		`aria-label="Type"`} {
 		assert.NotContains(t, body, gone)
 	}
 }
@@ -1094,9 +1095,9 @@ func TestUI_Library(t *testing.T) {
 	assert.Contains(t, all, `<a href="/ui/library?order=updated&amp;state=fetched">Fetched <span class="count">2</span></a>`)
 	assert.Contains(t, all, `<p class="lede">3 documents from 2 bookmarks.</p>`)
 	assert.Contains(t, all, `<option value="">Any type</option>`)
-	assert.Contains(t, all, `<label class="field field-order"><span>Order</span><select class="select" name="order">`+
-		`<option value="saved">Recently saved</option><option value="updated" selected>Last updated</option></select></label>`)
-	assert.Contains(t, all, `<th scope="col" class="c-when">Updated</th>`)
+	assert.NotContains(t, all, `<select class="select" name="order">`, "the order is the time column's head")
+	assert.Contains(t, all, `<input type="hidden" name="order" value="updated">`, "Apply keeps the order")
+	assert.Contains(t, all, `<th scope="col" class="c-when" aria-sort="descending"><a class="sort" href="/ui/library" title="Most recently updated first. Sort by recently saved"`)
 	assert.NotContains(t, all, "table-note")
 	assert.Contains(t, all, `<p class="pager-summary mt-4" id="showing">Showing 3 of 3 documents, most recently updated first.</p>`)
 	assertLibraryTable(t, all, 3)
@@ -1114,8 +1115,12 @@ func TestUI_Library(t *testing.T) {
 	assert.NotContains(t, stateTabsOf(t, pdf), `class="count"`, "the whole library's counts don't count a filtered list")
 	assert.Contains(t, pdf, `<a id="subnav-failures" href="/ui/failures">Failures <span class="count">1</span></a>`,
 		"the Failures tab counts the whole library's failures, whatever the filters")
-	assert.Contains(t, pdf, `<a href="/ui/library?content_type=pdf&amp;host=arxiv.example&amp;order=updated&amp;state=failed">Failed</a>`,
+	assert.Contains(t, pdf, `<a href="/ui/library?content_type=pdf&amp;host=arxiv.example&amp;order=updated&amp;state=pending">Pending</a>`,
 		"a tab keeps the other filters")
+	assert.Contains(t, pdf, `<a class="chip" href="/ui/library?host=arxiv.example&amp;order=updated"`,
+		"a chip drops its filter alone")
+	assert.Contains(t, pdf, `<a class="clear-all" href="/ui/library?order=updated">Clear all</a>`)
+	assert.Contains(t, pdf, `Filters<span class="filter-count"> · 2</span></summary>`)
 	assert.Contains(t, pdf, `>Showing 2 documents, most recently updated first.</p>`)
 	header := regexp.MustCompile(`(?s)<form class="header-search".*?</form>`).FindString(pdf)
 	require.NotEmpty(t, header)
@@ -1124,13 +1129,15 @@ func TestUI_Library(t *testing.T) {
 	onlyFailed := filtered("state=failed")
 	assert.Contains(t, onlyFailed, failedDoc.ID)
 	assert.NotContains(t, onlyFailed, paper.ID)
-	assert.Contains(t, onlyFailed, `<a href="/ui/library?order=updated&amp;state=failed" aria-current="page">Failed <span class="count">1</span></a>`)
+	assert.NotContains(t, stateTabsOf(t, onlyFailed), `aria-current`, "failed has no tab")
+	assert.Contains(t, onlyFailed, `<a class="chip" href="/ui/library?order=updated" title="Remove the filter: State failed"`,
+		"a state without a tab is a chip, which Status's legend and old bookmarks land on")
 	assert.Contains(t, onlyFailed, `>Showing 1 of 1 document, most recently updated first.</p>`)
 
 	// Apply sends the form's fields: the hidden state keeps the tab.
 	assert.Contains(t, onlyFailed, `<input type="hidden" name="state" value="failed">`)
 	applied := filtered("state=failed&content_type=&host=arxiv.example&folder=")
-	assert.Contains(t, applied, `<a href="/ui/library?host=arxiv.example&amp;order=updated&amp;state=failed" aria-current="page">Failed</a>`)
+	assert.Contains(t, applied, `<a class="chip" href="/ui/library?host=arxiv.example&amp;order=updated" title="Remove the filter: State failed"`)
 	assert.Contains(t, applied, failedDoc.ID)
 	assert.NotContains(t, applied, paper.ID)
 	inFolder := filtered("folder=/Research")
@@ -1150,7 +1157,7 @@ func TestUI_Library(t *testing.T) {
 	for _, query := range []string{"order=updated", "order=updated&content_type=&host=&folder=",
 		"order=updated&source=bogus"} {
 		body := getPage(t, srv, "/ui/library?"+query, http.StatusOK)
-		assert.Contains(t, body, `<th scope="col" class="c-when">Updated</th>`, "%s: Last updated", query)
+		assert.Contains(t, body, `<th scope="col" class="c-when" aria-sort="descending"><a class="sort" href="/ui/library" title="Most recently updated first. Sort by recently saved"`, "%s: Last updated", query)
 		assert.Contains(t, body, `>Showing 3 of 3 documents, most recently updated first.</p>`, query)
 	}
 	// Without an order, or naming the default, the Library lists saves,
@@ -1159,9 +1166,9 @@ func TestUI_Library(t *testing.T) {
 	for _, path := range []string{"/ui/library", "/ui/library?order=", "/ui/library?order=saved",
 		"/ui/library?order=saved&content_type=&host=&folder=", "/ui/library?source=bogus"} {
 		body := getPage(t, srv, path, http.StatusOK)
-		assert.Contains(t, body, `<th scope="col" class="c-when">Saved</th>`, "%s: Recently saved", path)
-		assert.Contains(t, body, `<option value="saved">Recently saved</option><option value="updated">Last updated</option>`,
-			path)
+		assert.Contains(t, body, `<th scope="col" class="c-when" aria-sort="descending"><a class="sort" href="/ui/library?order=updated"`,
+			"%s: Recently saved", path)
+		assert.NotContains(t, body, `name="order"`, path)
 		assert.Contains(t, body, `>Showing 2 of 2 saves.</p>`, path)
 	}
 }
@@ -1202,11 +1209,12 @@ func TestUI_LibrarySaved(t *testing.T) {
 	}
 	assert.Equal(t, []string{paper.ID, blocked.ID, paper.ID, bare.ID}, linked,
 		"newest saved first, the paper once per save, the save without a document unlinked")
-	assert.Contains(t, body, `<option value="saved">Recently saved</option><option value="updated">Last updated</option>`)
-	assert.Contains(t, body, `<th scope="col" class="c-when">Saved</th>`)
+	assert.NotContains(t, body, `name="order"`)
+	assert.Contains(t, body, `<th scope="col" class="c-when" aria-sort="descending"><a class="sort" href="/ui/library?order=updated"`)
+	assert.Contains(t, body, `>Saved<span aria-hidden="true"> ↓</span></a></th>`)
 	assert.Contains(t, body, `<col class="c-when c-saved">`)
 	for _, saved := range []time.Duration{time.Hour, 24 * time.Hour, 48 * time.Hour, 72 * time.Hour, 96 * time.Hour} {
-		assert.Contains(t, body, `<td class="c-when when">saved <time datetime="`+now.Add(-saved).Format(time.RFC3339)+`"`)
+		assert.Contains(t, body, `<td class="c-when when"><time datetime="`+now.Add(-saved).Format(time.RFC3339)+`"`)
 	}
 	assert.Contains(t, body, `<a class="doc-title" href="/ui/documents/`+paper.ID+`" title="A paper">A paper</a>`+"\n"+
 		`<span class="doc-sub"><span class="host" title="https://arxiv.example/paper">arxiv.example/paper</span>`+
@@ -1342,9 +1350,10 @@ func attr(n *xhtml.Node, key string) string {
 
 // TestUI_SavedDates: a save shows its time as its saved date says, in the
 // Library's Recently saved rows and on its document's page: an exact one as
-// saved then, an approximate one as saved by then, and an unknown one as
-// such, by when curio imported it, its title saying why; the rows are
-// still in saved_at's order.
+// when (with "saved" on a line of its own, not in the Saved column), an
+// approximate one as "~" and how long ago, and an unknown one as such, by
+// when curio imported it, its title saying why; the rows are still in
+// saved_at's order.
 func TestUI_SavedDates(t *testing.T) {
 	srv := apitest.Start(t)
 	now := time.Now().UTC().Truncate(time.Second)
@@ -1357,28 +1366,33 @@ func TestUI_SavedDates(t *testing.T) {
 		WHEN 'safari' THEN 'unknown' ELSE 'exact' END, created_at = ?`, imported.Format("2006-01-02T15:04:05.000Z"))
 	require.NoError(t, err)
 
-	exact := `saved <time datetime="` + now.Add(-time.Hour).Format(time.RFC3339) + `"`
-	approx := `<span class="saved-time" title="Saved on or before ` + now.Add(-48*time.Hour).Local().Format("2006-01-02 15:04") +
-		`: first seen by a later import of the browser&#39;s bookmarks, or copied with its folder then">` +
-		`<span class="saved-what">saved by</span> <span class="saved-when"><time datetime="` +
-		now.Add(-48*time.Hour).Format(time.RFC3339) + `">2 d ago</time></span></span>`
-	unknown := `<span class="saved-time" title="No known save date: its source keeps none, or a browser&#39;s bulk ` +
-		`import or sync stamped it. curio imported it ` + imported.Local().Format("2006-01-02 15:04") + `">` +
-		`<span class="saved-what">date unknown</span><span class="saved-sep"> ·</span> <span class="saved-when">` +
-		`imported <time datetime="` + imported.Format(time.RFC3339) + `">3 h ago</time></span></span>`
+	exactAt := `<time datetime="` + now.Add(-time.Hour).Format(time.RFC3339) + `"`
+	approxWhy := `title="Saved on or before ` + now.Add(-48*time.Hour).Local().Format("2006-01-02 15:04") +
+		`: first seen by a later import of the browser&#39;s bookmarks, or copied with its folder then">`
+	approxAt := `<time datetime="` + now.Add(-48*time.Hour).Format(time.RFC3339) + `">2 d ago</time>`
+	unknownWhy := `title="No known save date: its source keeps none, or a browser&#39;s bulk ` +
+		`import or sync stamped it. curio imported it ` + imported.Local().Format("2006-01-02 15:04") + `">`
+	importedAt := `<time datetime="` + imported.Format(time.RFC3339) + `">3 h ago</time>`
+	line := []string{"saved " + exactAt, `<span class="saved-time" ` + approxWhy + `saved ~` + approxAt + `</span>`,
+		`<span class="saved-time" ` + unknownWhy + `date unknown · imported ` + importedAt + `</span>`}
+	column := []string{exactAt, `<span class="saved-time" ` + approxWhy + `~` + approxAt + `</span>`,
+		`<span class="saved-time saved-unknown" ` + unknownWhy + `<span class="saved-what">date unknown</span> ` +
+			`<span class="saved-when">imported ` + importedAt + `</span></span>`}
 
 	page := getPage(t, srv, "/ui/documents/"+doc.ID, http.StatusOK)
-	for _, words := range []string{exact, approx, unknown} {
+	for _, words := range line {
 		assert.Contains(t, page, `<div class="when">`+words, "the document's bookmarks")
 	}
 	library := getPage(t, srv, "/ui/library", http.StatusOK)
-	for _, words := range []string{exact, approx, unknown} {
+	for i, words := range column {
 		assert.Contains(t, library, `<td class="c-when when">`+words, "the Recently saved rows")
-		assert.Contains(t, library, `<span class="doc-saved">`+words, "and their line on a phone")
+		assert.Contains(t, library, `<span class="doc-saved">`+line[i], "and their line on a phone")
 	}
-	assert.Less(t, strings.Index(library, exact), strings.Index(library, approx), "newest saved first")
-	assert.Less(t, strings.Index(library, `<td class="c-when when">`+approx),
-		strings.Index(library, `<td class="c-when when">`+unknown), "by saved_at, the unknown one too")
+	assert.NotContains(t, library, "saved by", "an upper bound reads as ~")
+	assert.Less(t, strings.Index(library, `<td class="c-when when">`+column[0]),
+		strings.Index(library, `<td class="c-when when">`+column[1]), "newest saved first")
+	assert.Less(t, strings.Index(library, `<td class="c-when when">`+column[1]),
+		strings.Index(library, `<td class="c-when when">`+column[2]), "by saved_at, the unknown one too")
 	assert.NotContains(t, getPage(t, srv, "/ui/library?order=updated", http.StatusOK), "saved-time",
 		"the Last updated order shows documents' times")
 }
@@ -1550,9 +1564,9 @@ func TestUI_LibraryCountsDegrade(t *testing.T) {
 	assert.ErrorIs(t, errs[0]["err"].(error), errInjected)
 }
 
-// TestUI_LibraryCause: a cause filter, in either order, is a line under the
-// toolbar naming it by its label and code, whose Clear keeps every other
-// filter and the order; the page it leads to has no line.
+// TestUI_LibraryCause: a cause filter, in either order, is a chip under the
+// toolbar naming it by its label, its code on hover, whose link keeps every other
+// filter and the order; the page it leads to has no chip.
 func TestUI_LibraryCause(t *testing.T) {
 	srv := apitest.Start(t)
 	blocked := srv.AddFailedDocument(t, "https://blocked.example/a", store.FailureCauseAntiBot)
@@ -1566,13 +1580,13 @@ func TestUI_LibraryCause(t *testing.T) {
 		"order=updated&cause=anti_bot&host=blocked.example&limit=7": "/ui/library?host=blocked.example&limit=7&order=updated",
 	} {
 		body := getPage(t, srv, "/ui/library?"+query, http.StatusOK)
-		line := regexp.MustCompile(`<p class="cause-line">.*</p>`).FindString(body)
-		assert.Equal(t, `<p class="cause-line"><span class="muted">Why they failed:</span> <strong>Blocked by bot protection</strong> `+
-			`<code>anti_bot</code> <a id="clear-cause" href="`+html.EscapeString(cleared)+
-			`" aria-label="Clear the cause filter">Clear</a></p>`, line, query)
-		assert.NotContains(t, getPage(t, srv, cleared, http.StatusOK), "cause-line", "%s: cleared", query)
+		assert.Contains(t, body, `<a class="chip" href="`+html.EscapeString(cleared)+
+			`" title="Remove the filter: Why it failed Blocked by bot protection (anti_bot)" `+
+			`aria-label="Remove the filter: Why it failed Blocked by bot protection">`+
+			`<span class="chip-label"><span class="chip-name">Why it failed:</span> Blocked by bot protection</span>`, query)
+		assert.NotContains(t, getPage(t, srv, cleared, http.StatusOK), "Why it failed:", "%s: cleared", query)
 	}
-	assert.NotContains(t, getPage(t, srv, "/ui/library?host=blocked.example", http.StatusOK), "cause-line")
+	assert.NotContains(t, getPage(t, srv, "/ui/library?host=blocked.example", http.StatusOK), "Why it failed:")
 }
 
 // TestUI_Failures: the Library's Failures tab over the real API, under the
@@ -1903,7 +1917,8 @@ func TestUI_Interests(t *testing.T) {
 	assert.Contains(t, list, "<b>4</b> documents")
 	assert.Contains(t, list, `<b>0.70</b> alike</span>`, "cohesion, a number")
 	assert.Contains(t, list, `<a href="/ui/documents/`+a.ID+`" title="Kafka partitions">Kafka partitions</a>`)
-	assert.Contains(t, list, "1 interest curio found in your library, largest first.</p>", "the run's count, all shown")
+	assert.Contains(t, list, `<p class="page-line page-parts"><span>1 interest</span><span>4 of 4 documents in an interest</span></p>`,
+		"the run's count, all shown; nothing unsorted, no link to Unsorted")
 	assert.Contains(t, list, `title="https://example.com/c">example.com/c</a>`, "a card lists 3 members")
 	assert.NotContains(t, list, "example.com/d", "and no more")
 	assert.NotContains(t, list, `class="pager"`, "one page")
@@ -1927,7 +1942,7 @@ func TestUI_Interests(t *testing.T) {
 	gone := get(t, srv, "/ui/interests/no-such-interest")
 	require.Equal(t, http.StatusNotFound, gone.status)
 	uitest.AssertInert(t, gone.body)
-	assert.Contains(t, gone.body, `<a href="/ui/interests" aria-current="page">`, "Interests current")
+	assert.Contains(t, gone.body, `<a href="/ui/interests/map" aria-current="page">`, "Interests current")
 	assert.Contains(t, gone.body, "<h1>No such interest</h1>")
 	assert.Contains(t, gone.body, "Nothing in your interests has the ID <code>no-such-interest</code>.")
 	assert.Contains(t, gone.body, "It may be from before curio's interests were regrouped by an upgrade, "+
@@ -1957,18 +1972,18 @@ func TestUI_InterestsAreas(t *testing.T) {
 	area, kafka := run.Areas[0], run.Interests[0]
 
 	list := getPage(t, srv, "/ui/interests", http.StatusOK)
-	assert.Contains(t, list, `<p class="lede">2 areas holding 8 interests in your library, largest first.</p>`)
+	assert.Contains(t, list, `<p class="page-line page-parts"><span>2 areas holding 8 interests</span><span>50 of 51 documents in an interest</span></p>`,
+		"the members: the loose fit aside")
 	assert.Contains(t, list, `<a href="/ui/interests/`+area+`">Streams &lt;and&gt; logs</a>`)
 	assert.Contains(t, list, `<span><b>7</b> interests</span>`)
 	assert.Contains(t, list, `<li><a href="/ui/interests/`+run.Interests[1]+`" title="Topic &lt;0&gt;">Topic &lt;0&gt;</a>`+
-		`<svg class="stackbar"`)
-	assert.Equal(t, 5+1, strings.Count(list, `</svg><span class="n">`), "5 interests a card, each with its bar")
+		`<span class="n">10</span></li>`)
+	assert.Equal(t, 5+1, strings.Count(list, `</a><span class="n">`), "5 interests a card, each with its size")
+	assert.NotContains(t, list, "stackbar", "no bars")
 	assert.Contains(t, list, `<a class="all" href="/ui/interests/`+area+`">+ 2 more interests →</a>`)
 	assert.Contains(t, list, `<a class="all" href="/ui/interests/`+run.Areas[1]+`">All 1 interest →</a>`, "all listed")
 	assert.Contains(t, list, `<span class="unlabeled">Unlabeled area</span>`)
 	assert.NotContains(t, list, "Kafka partitions", "an area card names interests, not documents")
-	assert.Contains(t, list, `<span class="n">50</span> in an interest`, "members")
-	assert.Contains(t, list, `<span class="n">1</span> loose fit <span class="pct">2%</span>`, "the loose fit")
 
 	page := getPage(t, srv, "/ui/interests/"+area, http.StatusOK)
 	assert.Regexp(t, `<h1><svg class="icon"[^>]*>.*?</svg>Streams &lt;and&gt; logs</h1>`, page)
@@ -2021,7 +2036,7 @@ func TestUI_InterestsGrouping(t *testing.T) {
 	require.Equal(t, http.StatusGone, gone.status)
 	uitest.AssertInert(t, gone.body)
 	assert.Contains(t, gone.body, "<title>Kafka &lt;streams&gt; · curio</title>")
-	assert.Contains(t, gone.body, `<a href="/ui/interests" aria-current="page">`, "Interests current")
+	assert.Contains(t, gone.body, `<a href="/ui/interests/map" aria-current="page">`, "Interests current")
 	assert.Contains(t, gone.body, `<nav class="crumbs" aria-label="Breadcrumb"><a href="/ui/interests">Interests</a></nav>`)
 	assert.Contains(t, gone.body, "<h1>Kafka &lt;streams&gt;</h1>")
 	assert.Regexp(t, `<p class="lede">It split into these on <time datetime="[^"]+" title="[^"]+">\w{3} \d+, \d{4}</time>\.</p>`,
@@ -2053,7 +2068,7 @@ func TestUI_InterestsPages(t *testing.T) {
 
 	first := getPage(t, srv, "/ui/interests", http.StatusOK)
 	assert.Equal(t, 24, strings.Count(first, `<li class="card interest">`))
-	assert.Contains(t, first, `<p class="lede">30 interests curio found in your library, largest first.</p>`)
+	assert.Contains(t, first, `<p class="page-line page-parts"><span>30 interests</span>`)
 	assert.Contains(t, first, "Topic 23")
 	assert.NotContains(t, first, "Topic 24")
 	assert.Contains(t, first, `<span class="pager-summary">Interests 1–24 of 30</span>`)
@@ -2065,7 +2080,7 @@ func TestUI_InterestsPages(t *testing.T) {
 
 	second := getPage(t, srv, "/ui/interests?page=2&run="+run, http.StatusOK)
 	assert.Equal(t, 6, strings.Count(second, `<li class="card interest">`))
-	assert.Contains(t, second, "largest first. Page 2 of 2.</p>")
+	assert.Contains(t, second, "<span>page 2 of 2</span></p>")
 	assert.Contains(t, second, "Topic 24")
 	assert.Contains(t, second, `<span class="pager-summary">Interests 25–30 of 30</span>`)
 	assert.NotContains(t, second, `role="note"`, "the run it came from")
@@ -2078,8 +2093,8 @@ func TestUI_InterestsPages(t *testing.T) {
 		assert.Equal(t, ui.CSP, p.header.Get("Content-Security-Policy"), path)
 		assert.Equal(t, "nosniff", p.header.Get("X-Content-Type-Options"), path)
 		assert.Equal(t, "no-referrer", p.header.Get("Referrer-Policy"), path)
-		assert.Contains(t, p.body, `<p class="lede">30 interests curio found in your library, largest first.</p>`, path)
-		assert.Contains(t, p.body, `aria-label="Coverage"`, path)
+		assert.Contains(t, p.body, `<p class="page-line page-parts"><span>30 interests</span>`, path)
+		assert.NotContains(t, p.body, "<span>page ", "%s: no page number past the last", path)
 		assert.Contains(t, p.body, `id="rebuild-poll"`, path)
 		assert.Contains(t, p.body, "<p>This list has 2 pages.</p>", path)
 		assert.Contains(t, p.body, `<a class="btn" href="/ui/interests?page=2&amp;run=`+run+`">Last page</a>`, path)
@@ -2197,7 +2212,7 @@ func TestUI_InterestsEmptyRun(t *testing.T) {
 	srv.AddRun(t, apitest.RunSpec{})
 
 	page := getPage(t, srv, "/ui/interests", http.StatusOK)
-	assert.Contains(t, page, `<p class="lede">The last rebuild found no interests in your library.</p>`)
+	assert.Contains(t, page, `<p class="page-line">The last rebuild found no interests in your library.</p>`)
 	assert.Contains(t, page, "<h2>No interests in this run</h2>")
 	assert.NotContains(t, page, "largest first")
 }
@@ -2231,10 +2246,9 @@ func placedAgo(t *testing.T, srv *apitest.Server, run string, doc *store.Documen
 	require.NoError(t, err)
 }
 
-// TestUI_InterestsCoverage: the coverage bar draws the members, the loose
-// fits, the documents placed since and, left to the track, the unsorted,
-// as shares of the run's documents and those placed since; the legend
-// counts each in that order; cards count their loose fits and new
+// TestUI_InterestsCoverage: the line under the title counts the run's
+// members of its documents and leads to Unsorted, counting the documents
+// there, those placed since included; cards count their loose fits and new
 // documents; and Unsorted's card, after the last group, counts the
 // documents placed there since.
 func TestUI_InterestsCoverage(t *testing.T) {
@@ -2247,24 +2261,18 @@ func TestUI_InterestsCoverage(t *testing.T) {
 
 	page := getPage(t, srv, "/ui/interests", http.StatusOK)
 	uitest.AssertInert(t, page)
-	assert.Contains(t, page, `<rect class="fill-accent" x="0.000" y="0" width="37.500" height="10"/>`+
-		`<rect class="fill-accent-border" x="37.500" y="0" width="12.500" height="10"/>`+
-		`<rect class="fill-neutral" x="50.000" y="0" width="25.000" height="10"/></svg>`, "the unsorted, the track's last quarter")
-	assert.Contains(t, page, `<span class="n">3</span> in an interest <span class="pct">38%</span></span>`+
-		`<span class="item"><span class="swatch swatch-accent-border"></span><span class="n">1</span> loose fit <span class="pct">13%</span></span>`+
-		`<span class="item"><span class="swatch swatch-neutral"></span><span class="n">2</span> new since the rebuild <span class="pct">25%</span></span>`+
-		`<span class="item"><span class="swatch swatch-track"></span><span class="n">2</span> unsorted <span class="pct">25%</span></span>`)
-	assert.Regexp(t, `<span class="item run">Rebuilt [^<]+, regrouped from scratch · 6 documents</span>`, page)
+	assert.Contains(t, page, `<p class="page-line page-parts"><span>1 interest</span><span>3 of 6 documents in an interest</span>`+
+		`<span><a href="/ui/interests/unsorted?run=`+run.ID+`">3 unsorted →</a></span></p>`)
+	assert.NotContains(t, page, "stackbar", "no coverage bar")
 	assert.Contains(t, page, `<span><b>3</b> documents</span><span title="Loose fits are close to this interest without being grouped in it, and never name it"><b>1</b> loose fit</span><span class="new"><b>1</b> new</span>`)
 	assert.Contains(t, page, `<li class="card interest unsorted"><h2>`)
 	assert.Contains(t, page, `<a href="/ui/interests/unsorted?run=`+run.ID+`">Unsorted</a></h2>`+"\n"+
 		`<div class="stats"><span><b>2</b> documents</span><span class="new"><b>1</b> new</span></div>`)
 }
 
-// TestUI_InterestsChanged: for a week after a rebuild that split, merged
-// or dissolved interests the page says so and leads to the changes; not
-// after a week, not for a rebuild that only kept, moved or created them,
-// and not before the first.
+// TestUI_InterestsChanged: after a rebuild that changed the interests the
+// rebuild's line leads to the changes, its counts on hover, however long
+// ago; not for a rebuild that only kept them, and not before the first.
 func TestUI_InterestsChanged(t *testing.T) {
 	srv := apitest.Start(t)
 	assert.NotContains(t, getPage(t, srv, "/ui/interests", http.StatusOK), "What changed", "no run")
@@ -2276,10 +2284,9 @@ func TestUI_InterestsChanged(t *testing.T) {
 		apitest.Interest{Label: "Streams", Members: d[1:2]})
 	finishedAgo(t, srv, split.ID, 6*24*time.Hour)
 	page := getPage(t, srv, "/ui/interests", http.StatusOK)
-	assert.Regexp(t, `<p>Rebuilt on <time datetime="[^"]+" title="[^"]+">[^<]+</time>: 1 interest split, 2 new\. `+
-		`<a href="/ui/interests/changes">What changed →</a></p>`, page)
+	assert.Contains(t, page, `<a class="changes-link" href="/ui/interests/changes" title="1 interest split, 2 new">What changed →</a>`)
 	finishedAgo(t, srv, split.ID, 8*24*time.Hour)
-	assert.NotContains(t, getPage(t, srv, "/ui/interests", http.StatusOK), "What changed", "a week on")
+	assert.Contains(t, getPage(t, srv, "/ui/interests", http.StatusOK), "What changed", "a week on: still there, quietly")
 
 	srv.Rebuild(t, split)
 	assert.NotContains(t, getPage(t, srv, "/ui/interests", http.StatusOK), "What changed", "kept every one")
@@ -2422,7 +2429,7 @@ func TestUI_UnsortedPage(t *testing.T) {
 	first := get(t, srv, "/ui/interests/unsorted")
 	require.Equal(t, http.StatusOK, first.status)
 	uitest.AssertInert(t, first.body)
-	assert.Contains(t, first.body, `<a href="/ui/interests" aria-current="page">`)
+	assert.Contains(t, first.body, `<a href="/ui/interests/map" aria-current="page">`)
 	assert.Contains(t, first.body, `<p class="lede">60 documents are in no interest: not close enough to any yet.`)
 	assert.Contains(t, first.body, `<span class="badge plain fit-new">1 new since the rebuild</span>`)
 	assert.Equal(t, 50, strings.Count(first.body, `<tr class="fit-unsorted">`))
@@ -2489,7 +2496,7 @@ func TestUI_ChangesPage(t *testing.T) {
 	resp := get(t, srv, "/ui/interests/changes")
 	require.Equal(t, http.StatusOK, resp.status)
 	uitest.AssertInert(t, resp.body)
-	assert.Contains(t, resp.body, `<a href="/ui/interests" aria-current="page">`)
+	assert.Contains(t, resp.body, `<a href="/ui/interests/map" aria-current="page">`)
 	assert.Contains(t, resp.body, "<h2 id=\"events-0\">Dissolved</h2>")
 	assert.Contains(t, resp.body, `<a class="ref" href="/ui/interests/`+moved.Interests[3]+`" title="Bonds">Bonds</a> `+
 		`<span class="tag">retired</span> dissolved`)

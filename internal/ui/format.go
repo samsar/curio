@@ -334,25 +334,6 @@ func causeBar(cause string, n, most int) []BarSegment {
 	return barSegments([]barPart{{value: n, class: "fill-" + causeTone(cause)}}, most)
 }
 
-// coverageBar draws a run's coverage parts, in order, as shares of total,
-// each filled in its tone, but for the track's own: the part the bar
-// leaves over.
-func coverageBar(parts []CoveragePart, total int) []BarSegment {
-	bar := make([]barPart, 0, len(parts))
-	for _, p := range parts {
-		if p.Tone != toneTrack {
-			bar = append(bar, barPart{value: p.Count, class: "fill-" + p.Tone})
-		}
-	}
-	return barSegments(bar, total)
-}
-
-// childBar draws an area's interest of size documents as a bar scaled to
-// largest, its largest interest's size: none when either is 0 or less.
-func childBar(size, largest int) []BarSegment {
-	return barSegments([]barPart{{value: size, class: "fill-accent"}}, largest)
-}
-
 // fitClass is the class of a document of fit in the interests (a member,
 // a loose fit, unsorted, or placed since the rebuild), or "" for a value
 // that isn't one: a class never comes from a stored string.

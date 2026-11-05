@@ -57,8 +57,8 @@ func runPageHref(path string, page int, run string) string {
 // changesHref is the page of what the latest rebuild changed.
 func changesHref() string { return "/ui/interests/changes" }
 
-// The interest map's views, as its view parameter names them: By
-// similarity, the default, which links leave out, and By group.
+// The interest map's views, as its view parameter names them: By group,
+// the default, which links leave out, and By similarity.
 const (
 	MapViewSimilarity = "similarity"
 	MapViewGroups     = "groups"
@@ -109,8 +109,8 @@ func (s MapSelection) String() string {
 	return s.Kind + ":" + s.ID
 }
 
-// mapHref is the interest map showing q: the default view and the library
-// are left out, so the plain map is /ui/interests/map. static/map.js keeps
+// mapHref is the interest map showing q: the default view (By group) and
+// the library are left out, so the plain map is /ui/interests/map. static/map.js keeps
 // its address in this form as the view and selection change.
 func mapHref(q MapQuery) string {
 	const path = "/ui/interests/map"
@@ -118,7 +118,7 @@ func mapHref(q MapQuery) string {
 	if sel := q.Select.String(); sel != "" {
 		v.Set(mapSelectParam, sel)
 	}
-	if q.View != "" && q.View != MapViewSimilarity {
+	if q.View != "" && q.View != MapViewGroups {
 		v.Set(mapViewParam, q.View)
 	}
 	if len(v) == 0 {
@@ -128,15 +128,15 @@ func mapHref(q MapQuery) string {
 }
 
 // ParseMapQuery reads the interest map's query, as mapHref writes it: no
-// view is By similarity, and no selection the library. A view or a
+// view is By group, and no selection the library. A view or a
 // selection of another form is an error naming the forms there are,
 // answered before the page reads anything. A selection's ID is everything
 // after its first colon, so an ID may hold colons of its own.
 func ParseMapQuery(q url.Values) (MapQuery, error) {
-	out := MapQuery{View: MapViewSimilarity}
+	out := MapQuery{View: MapViewGroups}
 	switch view := q.Get(mapViewParam); view {
-	case "", MapViewSimilarity:
-	case MapViewGroups:
+	case "", MapViewGroups:
+	case MapViewSimilarity:
 		out.View = view
 	default:
 		return MapQuery{}, fmt.Errorf("%w: %s %q: want %s or %s", errMapView, mapViewParam, view, MapViewSimilarity,
@@ -366,10 +366,34 @@ func clearFiltersHref(f LibraryFilters) string {
 	return libraryHref(LibraryFilters{Order: f.Order}, "")
 }
 
-// clearCauseHref is the first page of the Library under f without its
-// cause filter: the other filters, the order and the page size kept.
-func clearCauseHref(f LibraryFilters) string {
-	f.Cause = ""
+// withoutFilterHref is the first page of the Library under f without its
+// filter named name (a Filter's Name): the other filters, the order and
+// the page size kept. A name that isn't a filter's changes nothing.
+func withoutFilterHref(f LibraryFilters, name string) string {
+	switch name {
+	case filterState:
+		f.State = ""
+	case filterType:
+		f.ContentType = ""
+	case filterHost:
+		f.Host = ""
+	case filterFolder:
+		f.Folder = ""
+	case filterCause:
+		f.Cause = ""
+	}
+	return libraryHref(f, "")
+}
+
+// otherOrderHref is the first page of the Library under f in the order it
+// isn't in: Last updated from Recently saved, and back. Its filters and
+// page size are kept, its cursor dropped, since a cursor is its order's.
+func otherOrderHref(f LibraryFilters) string {
+	if f.Saved() {
+		f.Order = OrderUpdated
+	} else {
+		f.Order = ""
+	}
 	return libraryHref(f, "")
 }
 
@@ -409,8 +433,13 @@ type NavItem struct {
 }
 
 // navItems is the pages' navigation, in its order, each item linking to
-// its navHrefs page, as an error page's Retry does.
-func navItems() []NavItem {
+// its navHrefs page, as an error page's Retry does, but Interests, which
+// opens on their map: the map is the Interests' first view, and the list
+// its other. With the map turned off in config (mapOff), a setting that
+// lasts, it opens the list. A map that isn't drawn yet, or failed, passes:
+// the map's page says why and leads to the list, so the link holds in
+// every state without reading any.
+func navItems(mapOff bool) []NavItem {
 	items := []NavItem{
 		{Nav: NavSearch, Label: "Search", Icon: "search"},
 		{Nav: NavLibrary, Label: "Library", Icon: "library"},
@@ -419,6 +448,9 @@ func navItems() []NavItem {
 	}
 	for i := range items {
 		items[i].Href = navHref(items[i].Nav)
+		if items[i].Nav == NavInterests && !mapOff {
+			items[i].Href = mapHref(MapQuery{})
+		}
 	}
 	return items
 }

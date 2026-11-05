@@ -8142,6 +8142,10 @@ from the system's; `:root[data-theme="light"]` and both dark blocks set
 `color-scheme` to match. See "Dashboard: a quieter home, saves first, a
 theme button".
 
+**Revised (2026-11-04):** the Interests' coverage bar is gone; the state
+bar on Status is the stacked SVG bar left. See "Dashboard: progressive
+disclosure".
+
 ---
 
 ## Dashboard: search is home, the Overview becomes Status
@@ -8264,6 +8268,11 @@ left out the dead links the card counts, and each cause to its card
 there (`/ui/failures#cause-<code>`), rather than to the Library of that
 cause, which answers 400 for a cause this build doesn't know. See
 "Dashboard: the Failures tab".
+
+**Revised (2026-11-04):** the search page uses the container every page
+does, not a 48 rem column: its box and results line up with the logo and
+the other pages' content, the passages keeping their 75ch measure. See
+"Dashboard: progressive disclosure".
 
 ---
 
@@ -8676,6 +8685,14 @@ saved, and Last updated is the one an address names (`order=updated`);
 `order=saved` still reads as the default. GET /v1/documents is
 unchanged. See "Dashboard: a quieter home, saves first, a theme
 button".
+
+**Revised (2026-11-04):** the Saved column shows an exact save's time
+alone ("3 d ago", the head says Saved), an upper bound as "~3 d ago",
+and an unknown date, quieter, as "date unknown" over "imported" and
+when, in a 9 rem column; the document page and a phone's line keep
+"saved", as "saved ~3 d ago" for an upper bound. The order is the time
+column's head, a link to the other order, not a select. See "Dashboard:
+progressive disclosure".
 
 ---
 
@@ -11547,6 +11564,14 @@ words and names out as flex items, which shrink and cut the name.
 after: `internal/api` 16.2 s and 18.1 s (the new pages' tests start about
 25 more servers), `internal/ui` 49.5 s and 52.5 s.
 
+**Revised (2026-11-04):** the coverage card (its bar and legend) and the
+bars beside an area card's interests are gone: the list's first line
+under the title counts the members of the run's documents and leads to
+Unsorted, and a card's interests keep their counts. A card's description
+is two lines. The weeklong changes note is the rebuild line's **What
+changed →**, after any rebuild that changed known interests. See
+"Dashboard: progressive disclosure".
+
 ---
 
 ## Page text: not-found notices, parked domains and sign-in forms
@@ -12914,6 +12939,13 @@ tries).
   largest: a crowded view names what fits and leaves the rest to zooming
   in, and which names fit can differ with the screen's font metrics (at
   1440×1250 two area names show at DPR 1 that don't at DPR 2).
+
+**Revised (2026-11-04):** By group is the default view
+(`view=similarity` names the other, which `mapHref` writes; no view is
+By group), its tab first, and the navigation's Interests opens the map.
+The List | Map subnav is a Map | List switch beside the title
+(`interests-views`), on the list and the map. The page without a map
+leads to the list. See "Dashboard: progressive disclosure".
 
 ---
 
@@ -15908,6 +15940,12 @@ documents new since the rebuild are gone; the Library opens on the newest
 saves instead. See "Dashboard: a quieter home, saves first, a theme
 button".
 
+**Revised (2026-11-04):** the home is the box alone, with the interests
+line at the foot of the screen, and no type tabs until there is a query;
+the Library's state tabs are All, Fetched and Pending, failed and dead
+reached through the Failures tab or a chip. See "Dashboard: progressive
+disclosure".
+
 ---
 
 ## Summaries: one structured call per document, stored for the reranker
@@ -16592,6 +16630,135 @@ listener), so map.js is unchanged.
 on Status alone, the button on every page), `TestPages_Scripts` and
 `TestThemeScript` pin it; layout is checked by screenshots at 1440 and
 390, both themes and after a toggle.
+
+**Revised (2026-11-04):** the type tabs left the home (they show with a
+query or a chosen type), the interests line moved to the foot of the
+screen, and the Order select gave way to the time column's head;
+`?order=updated` round-trips as before. See "Dashboard: progressive
+disclosure".
+
+---
+
+## Dashboard: progressive disclosure
+
+**Decision:** the pages show the basics, and keep the rest one click
+away, with standard controls and no ornament. The owner: "I want it to
+look less busy, but for us to be able to progressively discover more as
+needed", and the last pass "didn't really change anything", so this one
+moves things, not only their weights. UI only: no /v1 change, and every
+page reads what it read before.
+
+**Search.** The page uses the container every page uses, not a 48 rem
+column, so the box and the results line up with the logo and with the
+Library's and Status's content; passages keep `.snippet`'s 75ch, titles
+and meta lines run wider. The home is the box alone, where results keep
+it (so a first keystroke doesn't move it), over a landing as tall as the
+screen less the header and main's padding, whose foot is the interests
+line: nothing scrolls on a desktop window or a phone, and the names are
+there without being in the way. The type tabs show only with a query, or
+a type the address already names (`Search.ShowsTypes`), so a chosen type
+stays in sight; `#search-scope` stays on the home, empty, because search
+as you type swaps it out of band. A result shows one passage, the best,
+and the rest behind its **N more passages** (`shownMatches` 1, was 2); its
+type pill went, since the icon before its host says the type, and the
+badge stays for the unusual match kinds. The results' head is one small
+muted line, which wraps beside Show scores where it doesn't fit, never
+cut. The keystroke, hx-sync,
+pager and search.js rules are unchanged, and so is the home's read count.
+
+**Library.** One row: the state tabs All, Fetched and Pending, then a
+**Filters** button at its end. Failed and Dead left the tabs: the
+Failures tab beside Documents lists them, grouped by why. Their addresses
+still work (`?state=failed` from Status's legend, old bookmarks): a state
+without a tab is a chip. Filters is a `<details>` styled as a button,
+whose panel (Type, Host, Folder, Apply) drops under it, anchored at its
+right, the button at the end of its line even when it wraps onto one of
+its own (a phone), so the panel opens on screen: declarative, and
+it works without JavaScript; a change doesn't submit, since actions.js
+sends only changes to /v1, and a second script for one form wasn't worth
+its rules. The button counts the filters its panel holds ("Filters · 2").
+Each active filter is a chip under the row (`Library.Chips`), a link built
+in Go (`withoutFilterHref`) that drops it alone and keeps the others, the
+order and the page size; a cause is one too, by its label with its code
+on hover, in place of the cause line and its Clear. **Clear all** shows
+with two chips or more, where one chip's own link does it. The order is
+the time column's head (`Library.OrderSwitch`): **Saved ↓** or **Updated
+↓**, `aria-sort="descending"`, its title saying what it switches to,
+linking to the other order through `otherOrderHref`, which keeps the
+filters and drops the cursor (a cursor is its order's). On a phone, where
+that column folds away, the Document head carries the same link. The
+default still names no order, and Last updated is `?order=updated`.
+The Order select is gone; the panel's form carries the order as a hidden
+input, as it carries the state, the cause and the page size. The Saved
+column shows an exact save's time alone ("3 d ago": the head says
+Saved), an upper bound as "~3 d ago", which read "saved by 5 d ago" on
+one line before, the title saying what it means, and an unknown date,
+quieter, as "date unknown" over "imported" and when; it is 9 rem. The
+document page and a phone's line under a save keep "saved", as "saved
+~3 d ago". The Type column is the icon and the type in quiet text, not a
+bordered tag.
+
+**Interests open on their map, By group.** The map is the view the owner
+wants hard to miss, and By group (areas as discs, interests as circles)
+is the one that reads at a glance; By similarity is the second tab. The
+default view is By group in `ParseMapQuery`, `mapHref` (which now writes
+`view=similarity` and leaves `groups` out) and map.js (its initial view,
+its `replaceState` address and its Home/End keys, three lines; the tabs'
+order in the template). The navigation's Interests links to
+`mapHref(MapQuery{})` and stays current on every page of theirs.
+`navHref(NavInterests)` is still the list: the error page's Start over,
+the breadcrumbs, the poller and the pager lead there. With the map turned
+off in config (`insight.map: false`), a setting that lasts, the
+navigation opens the list instead: the flag is config, carried into every
+page's `Layout.MapOff` (`navItems(mapOff)`), never a read. A map not drawn
+yet, or failed, passes: the map page already said why from its one read,
+and now also leads to the list with a button. Pointing the link at the
+list in those states too would need the map's state in every page's
+layout, and the scheduler's snapshot doesn't say whether the latest run
+drew a map; the map's own read does.
+
+**A Map | List switch beside the title** (`interests-views`: a segmented
+control of two links with Lucide's `map` and `list`, Map first, the
+current one `aria-current`) replaces the List | Map subnav on the list
+and the map. **The list is two quiet lines** under it, in place of the
+lede, the rebuild line, the changes callout and the coverage card: the
+first counts the run ("34 areas holding 209 interests · 4,502 of 5,013
+documents in an interest"), each part on one line and each dot drawn
+before a part (`.page-parts`), so a line that wraps on a phone starts
+with one rather than ending with one, and leads to Unsorted ("514 unsorted →", the
+run's and those placed there since); the second is the rebuild's state
+(the `rebuild-state` region; a current state says only "Rebuilt 1 h ago",
+how it rebuilt and when the next comes on hover and in a visually hidden
+span for a screen reader, with no live role, `Rebuild.Current`),
+**What changed →** when the run changed interests known before
+(`RunChanges.Changed`: neither a first grouping, all new, nor one that
+kept them all; its counts on hover), and at its end the action status and
+the Rebuild… button, small (the `rebuild-control` region). Each polled
+region is still on the page and in its answer once, and the region with
+the button holds nothing that changes with time; the changes link sits
+between the two regions, in neither. The confirm popover is unchanged.
+Area cards lose the bars beside their interests (counts stay), and a
+card's description is clamped to two lines. `InterestRun.Bar`, `Legend`,
+`Coverage`, `CoveragePart`, `coverageBar`, `childBar`, `Interest.Largest`,
+`ShowsChanges`, `InterestRun.Recent` and `ChangesNoticeFor` went with them.
+
+**A stray scrollbar.** `.subnav` (Documents | Failures) scrolls sideways
+on a narrow screen; its tabs' 2px underline overlapped its 1px border by
+a negative margin, which overflowed the box by a pixel, and
+`overflow-x: auto` made the other axis scroll too: a vertical scrollbar at
+the row's end wherever scrollbars always show (a mouse attached, or the
+macOS setting). The rule is now an inset shadow under the underline,
+inside the box, the margin is gone, and `overflow-y: hidden` guards it
+(`TestStylesheet`). The segmented controls don't scroll (they wrap).
+
+**How to revisit:** `TestSearch_TypeTabsOnDemand`,
+`TestUI_SearchHomeIsMinimal`, `TestSearchHit_Matches`,
+`TestLibrary_Chips`, `TestLibrary_StateTabs`, `TestLibrary_OrderSwitch`,
+`TestWithoutFilterHref`, `TestOtherOrderHref`, `TestUI_SavedDates`,
+`TestInterests_Views`, `TestInterests_Changes`, `TestNavItems`,
+`TestPages_Navigation`, `TestParseMapQuery`, `TestMapHref` and
+`TestMapPage_None` pin it; layout was checked by screenshots at 1440 and
+390 px, both themes, scrollbars shown.
 
 ---
 

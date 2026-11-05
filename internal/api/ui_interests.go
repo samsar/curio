@@ -58,7 +58,7 @@ func (h pageHandlers) interests(w http.ResponseWriter, r *http.Request) {
 			h.writePageError(w, r, err, ui.NavNone)
 			return
 		}
-		vm.Page, vm.Run = page, interestRun(resp, time.Now())
+		vm.Page, vm.Run = page, interestRun(resp)
 		for _, in := range resp.Items {
 			vm.Interests = append(vm.Interests, interestView(in))
 		}
@@ -73,9 +73,8 @@ func (h pageHandlers) interests(w http.ResponseWriter, r *http.Request) {
 }
 
 // interestRun is the run a page of interests comes from, nil before the
-// first is done; at now, whether it is recent enough for the page to tell
-// what it changed.
-func interestRun(resp InterestListResponse, now time.Time) *ui.InterestRun {
+// first is done.
+func interestRun(resp InterestListResponse) *ui.InterestRun {
 	if resp.RunID == "" {
 		return nil
 	}
@@ -84,7 +83,6 @@ func interestRun(resp InterestListResponse, now time.Time) *ui.InterestRun {
 		NewUnsorted: resp.NumNewUnsorted, Total: resp.Total}
 	if resp.ComputedAt != nil {
 		run.ComputedAt = *resp.ComputedAt
-		run.Recent = now.Sub(run.ComputedAt) < ui.ChangesNoticeFor
 	}
 	if b := resp.Rebuild; b != nil {
 		run.Kind, run.Changes = b.Kind, runChanges(*b)

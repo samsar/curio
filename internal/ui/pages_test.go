@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -36,6 +37,17 @@ func byID(doc *html.Node, id string) *html.Node {
 }
 
 // children are n's element children named tag.
+// withClass are doc's elements whose class list holds class.
+func withClass(doc *html.Node, class string) []*html.Node {
+	var out []*html.Node
+	for n := range doc.Descendants() {
+		if n.Type == html.ElementNode && slices.Contains(strings.Fields(attrValue(n, "class")), class) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 func children(n *html.Node, tag string) []*html.Node {
 	var out []*html.Node
 	for c := range n.ChildNodes() {
@@ -90,7 +102,8 @@ func TestLibrary_Table(t *testing.T) {
 	assert.Contains(t, out, `<span class="sep narrow">·</span><span class="narrow">article</span>`, "the type, on a phone")
 	assert.Contains(t, out, `<span class="narrow"><time datetime="`, "the time, on a phone")
 	assert.Contains(t, out, `<span class="badge state-dead">dead</span>`)
-	assert.Contains(t, out, `<span class="tag"><svg class="icon"`, "the type with its icon")
+	assert.Contains(t, out, `<td class="c-type"><span class="type"><svg class="icon"`, "the type with its icon, no pill")
+	assert.NotContains(t, out, `<span class="tag">`)
 	assert.Contains(t, out, `>Load 50 more</a></div>`)
 
 	lib.NextCursor = ""
@@ -173,14 +186,14 @@ func TestLibrary_Saved(t *testing.T) {
 				Source: "chrome"},
 		}}
 	out := render(t, r, PageLibrary, lib)
-	assert.Contains(t, out, `<option value="saved">Recently saved</option><option value="updated">Last updated</option>`,
-		"the default order first, chosen")
-	assert.Contains(t, out, `<th scope="col" class="c-when">Saved</th>`)
+	assert.NotContains(t, out, `name="order"`, "no Order select, and the default names no order")
+	assert.Contains(t, out, `<th scope="col" class="c-when" aria-sort="descending"><a class="sort" href="/ui/library?order=updated"`)
+	assert.Contains(t, out, `>Saved<span aria-hidden="true"> ↓</span></a></th>`)
 	assert.Contains(t, out, `<col class="c-when c-saved">`)
-	assert.Contains(t, out, `<td class="c-when when">saved <time datetime="`+datetime(saved)+`"`, "an exact save")
-	assert.Contains(t, out, `<td class="c-when when"><span class="saved-time" title="No known save date: `+
+	assert.Contains(t, out, `<td class="c-when when"><time datetime="`+datetime(saved)+`"`, "an exact save, without saved")
+	assert.Contains(t, out, `<td class="c-when when"><span class="saved-time saved-unknown" title="No known save date: `+
 		`its source keeps none, or a browser&#39;s bulk import or sync stamped it. curio imported it `+when(imported)+
-		`"><span class="saved-what">date unknown</span><span class="saved-sep"> ·</span> <span class="saved-when">`+
+		`"><span class="saved-what">date unknown</span> <span class="saved-when">`+
 		`imported <time datetime="`+datetime(imported)+`">3 h ago</time></span></span></td>`,
 		"an unknown one, by when curio imported it")
 	assert.Contains(t, out, `<span class="doc-saved">saved <time`, "a phone's line says the same")
@@ -197,7 +210,7 @@ func TestLibrary_Saved(t *testing.T) {
 		`a page saved in two browsers is listed twice. A save without a known date, from a source that keeps none `+
 		`or a browser's bulk import, is marked so and listed by the time it carries.</p>`))
 	assert.Contains(t, out, `<p class="pager-summary mt-4" id="showing">Showing 2 of 7,497 saves.</p>`)
-	assert.Contains(t, out, `<a href="/ui/library?state=failed">Failed <span class="count">2,150</span></a>`,
+	assert.Contains(t, out, `<a href="/ui/library?state=pending">Pending <span class="count">0</span></a>`,
 		"the tabs keep the order, the default, and count documents")
 
 	for _, f := range []LibraryFilters{{State: "failed"}, {ContentType: "pdf"}, {Host: "example.com"},
@@ -225,13 +238,13 @@ func TestLibrary_Saved(t *testing.T) {
 
 	lib.Filters.Order = OrderUpdated
 	out = render(t, r, PageLibrary, lib)
-	assert.Contains(t, out, `<option value="saved">Recently saved</option><option value="updated" selected>Last updated</option>`)
+	assert.Contains(t, out, `<input type="hidden" name="order" value="updated">`, "Apply keeps the order")
 	assert.Contains(t, out, "<h2>No documents match</h2>")
 	assert.Contains(t, out, `<a class="btn" href="/ui/library?order=updated">Clear filters</a>`, "it keeps the order")
 }
 
 // interestsPage is page of a run of 222 interests, its cards as many as
-// the page holds of them; the coverage bar's proportions are attributes.
+// the page holds of them.
 func interestsPage(page int) Interests {
 	v := Interests{Layout: Layout{Title: "Interests", Nav: NavInterests}, Page: page,
 		Run: &InterestRun{ID: "run-1", ComputedAt: time.Now(), Kind: "warm", Shape: "flat", Documents: 3142,
@@ -243,21 +256,18 @@ func interestsPage(page int) Interests {
 	return v
 }
 
-// TestInterests_Pages: the lede counts the run's interests, and past the
+// TestInterests_Pages: the line under the title counts the run's
+// interests and the documents in one, leads to Unsorted, and past the
 // first page says which page it is; the pager under the cards counts the
 // cards shown of the run's, and every link between pages names the run.
 func TestInterests_Pages(t *testing.T) {
 	r := newRenderer(t)
 	out := render(t, r, PageInterests, interestsPage(1))
-	assert.Contains(t, out, `<p class="lede">222 interests curio found in your library, largest first.</p>`)
-	assert.NotContains(t, out, "largest;")
+	assert.Contains(t, out, `<p class="page-line page-parts"><span>222 interests</span><span>1,951 of 3,142 documents in an interest</span>`+
+		`<span><a href="/ui/interests/unsorted?run=run-1">1,000 unsorted →</a></span></p>`)
 	assert.Equal(t, InterestsPageSize, strings.Count(out, `<li class="card interest">`))
-	assert.Contains(t, out, `<rect class="fill-accent" x="0.000" y="0" width="62.094" height="10"/>`+
-		`<rect class="fill-accent-border" x="62.094" y="0" width="6.079" height="10"/></svg>`)
-	assert.Contains(t, out, `<span class="item"><span class="swatch swatch-accent"></span><span class="n">1,951</span> in an interest <span class="pct">62%</span></span>`+
-		`<span class="item"><span class="swatch swatch-accent-border"></span><span class="n">191</span> loose fits <span class="pct">6%</span></span>`+
-		`<span class="item"><span class="swatch swatch-track"></span><span class="n">1,000</span> unsorted <span class="pct">32%</span></span>`)
-	assert.Regexp(t, `<span class="item run">Rebuilt \d{4}-\d\d-\d\d \d\d:\d\d, updated in place · 3,142 documents</span>`, out)
+	assert.NotContains(t, out, `aria-label="Coverage"`, "no coverage card")
+	assert.NotContains(t, out, "stackbar", "no bars")
 	assert.NotContains(t, out, "style=")
 	assert.Contains(t, out, `<span class="pager-summary">Interests 1–24 of 222</span>`)
 	assert.Contains(t, out, `<a href="/ui/interests?run=run-1" aria-label="Page 1" aria-current="page">1</a>`)
@@ -266,14 +276,14 @@ func TestInterests_Pages(t *testing.T) {
 	assert.NotContains(t, out, `role="note"`, "no rebuild since")
 
 	out = render(t, r, PageInterests, interestsPage(2))
-	assert.Contains(t, out, `<p class="lede">222 interests curio found in your library, largest first. Page 2 of 10.</p>`)
+	assert.Contains(t, out, `1,000 unsorted →</a></span><span>page 2 of 10</span></p>`)
 	assert.Contains(t, out, `<span class="pager-summary">Interests 25–48 of 222</span>`)
 	assert.Contains(t, out, `<a class="step" id="pager-prev" href="/ui/interests?run=run-1" rel="prev">`)
 
 	last := interestsPage(10)
 	assert.Len(t, last.Interests, 6)
 	out = render(t, r, PageInterests, last)
-	assert.Contains(t, out, "Page 10 of 10.</p>")
+	assert.Contains(t, out, "<span>page 10 of 10</span></p>")
 	assert.Contains(t, out, `<span class="pager-summary">Interests 217–222 of 222</span>`)
 	assert.Contains(t, out, `<span class="step" aria-disabled="true">Next`)
 	assert.Nil(t, last.OutOfRange())
@@ -281,7 +291,7 @@ func TestInterests_Pages(t *testing.T) {
 	all := interestsPage(1)
 	all.Run.Interests, all.Run.Total = InterestsPageSize, InterestsPageSize
 	out = render(t, r, PageInterests, all)
-	assert.Contains(t, out, "24 interests curio found in your library, largest first.</p>")
+	assert.Contains(t, out, `<p class="page-line page-parts"><span>24 interests</span>`)
 	assert.NotContains(t, out, `class="pager"`, "one page needs no pager")
 }
 
@@ -297,7 +307,7 @@ func TestInterests_RunChanged(t *testing.T) {
 	assert.Contains(t, out, `The interests were rebuilt since the page you came from, so this page lists the new `+
 		`run's. <a href="/ui/interests?run=run-1">Start again from page 1</a>.</p>`)
 	note := strings.Index(out, `role="note"`)
-	assert.Less(t, note, strings.Index(out, `aria-label="Coverage"`), "above the coverage")
+	assert.Less(t, note, strings.Index(out, `class="interest-grid"`), "above the cards")
 	assert.Greater(t, note, strings.Index(out, `id="rebuild-control"`), "outside the head's live regions")
 
 	page = interestsPage(1)
@@ -314,8 +324,8 @@ func TestInterests_RunChanged(t *testing.T) {
 	assert.NotContains(t, out, "lists the new run's")
 }
 
-// TestInterests_OutOfRange: a page past the last keeps the head, the
-// coverage and the rebuild, and in place of the cards says how many pages
+// TestInterests_OutOfRange: a page past the last keeps the head, its
+// lines and the rebuild, and in place of the cards says how many pages
 // there are, with the way to the first and last; a run without interests
 // and no run at all have one page.
 func TestInterests_OutOfRange(t *testing.T) {
@@ -324,8 +334,8 @@ func TestInterests_OutOfRange(t *testing.T) {
 	require.NotNil(t, page.OutOfRange())
 	page.Rebuild = Rebuild{Enabled: true, Shown: "run-1"}
 	out := render(t, r, PageInterests, page)
-	assert.Contains(t, out, `<p class="lede">222 interests curio found in your library, largest first.</p>`)
-	assert.Contains(t, out, `aria-label="Coverage"`)
+	assert.Contains(t, out, `<p class="page-line page-parts"><span>222 interests</span><span>1,951 of 3,142 documents in an interest</span>`+
+		`<span><a href="/ui/interests/unsorted?run=run-1">1,000 unsorted →</a></span></p>`, "no page number past the last")
 	assert.Contains(t, out, `id="rebuild"`)
 	assert.Contains(t, out, `id="rebuild-poll"`)
 	assert.Contains(t, out, "<h2>No page 11</h2>\n<p>This list has 10 pages.</p>")
@@ -348,9 +358,10 @@ func TestInterests_OutOfRange(t *testing.T) {
 	assert.Nil(t, Interests{Page: 1}.OutOfRange())
 }
 
-// TestInterests_Areas: in the areas shape the lede counts areas and
-// interests, each card is an area naming its largest interests and their
-// sizes, with the way to all of them, and the pager counts areas.
+// TestInterests_Areas: in the areas shape the line under the title counts
+// areas and interests, each card is an area naming its largest interests
+// and their sizes, without bars, with the way to all of them, and the
+// pager counts areas.
 func TestInterests_Areas(t *testing.T) {
 	r := newRenderer(t)
 	v := Interests{Layout: Layout{Title: "Interests", Nav: NavInterests}, Page: 1,
@@ -359,24 +370,18 @@ func TestInterests_Areas(t *testing.T) {
 		Interests: []Interest{{ID: "a1", Area: true, Label: "Tech <Skills>", Size: 628, NumChildren: 10, Cohesion: 0.35,
 			Children: []Interest{{ID: "i1", Label: "AI Agent Engineering", Size: 86}, {ID: "i2", Size: 45}}}}}
 	out := render(t, r, PageInterests, v)
-	assert.Contains(t, out, `<p class="lede">30 areas holding 187 interests in your library, largest first.</p>`)
+	assert.Contains(t, out, `<p class="page-line page-parts"><span>30 areas holding 187 interests</span><span>4,852 of 5,254 documents in an interest</span>`+
+		`<span><a href="/ui/interests/unsorted?run=run-1">402 unsorted →</a></span></p>`)
 	assert.Regexp(t, `<h2><svg class="icon"[^>]*>.*?</svg><a href="/ui/interests/a1">Tech &lt;Skills&gt;</a></h2>`, out,
 		"an area carries the layers icon")
 	assert.Contains(t, out, `<div class="stats"><span><b>628</b> documents</span><span><b>10</b> interests</span></div>`,
 		"no new document, no new count")
 	assert.Contains(t, out, `<ul class="members children"><li><a href="/ui/interests/i1" title="AI Agent Engineering">`+
-		`AI Agent Engineering</a><svg class="stackbar" viewBox="0 0 100 10" preserveAspectRatio="none" aria-hidden="true">`+
-		`<rect class="fill-track" x="0" y="0" width="100" height="10"/>`+
-		`<rect class="fill-accent" x="0.000" y="0" width="100.000" height="10"/></svg><span class="n">86</span></li>`)
+		`AI Agent Engineering</a><span class="n">86</span></li>`)
 	assert.Contains(t, out, `<li><a href="/ui/interests/i2" title="Unlabeled interest"><span class="unlabeled">Unlabeled interest</span></a>`+
-		`<svg class="stackbar" viewBox="0 0 100 10" preserveAspectRatio="none" aria-hidden="true">`+
-		`<rect class="fill-track" x="0" y="0" width="100" height="10"/>`+
-		`<rect class="fill-accent" x="0.000" y="0" width="52.326" height="10"/></svg><span class="n">45</span></li></ul>`,
-		"each bar scaled to the area's largest")
+		`<span class="n">45</span></li></ul>`, "each with its size, no bar")
 	assert.Contains(t, out, `<a class="all" href="/ui/interests/a1">+ 8 more interests →</a>`)
 	assert.Contains(t, out, `<span class="pager-summary">Areas 1–1 of 30</span>`)
-	assert.Contains(t, out, `<span class="n">4,852</span> in an interest`)
-	assert.Contains(t, out, `<span class="n">402</span> unsorted`)
 }
 
 // TestInterests_FirstGrouping: before the first rebuild is done, a rebuild
@@ -840,9 +845,10 @@ func TestLibrary_Tabs(t *testing.T) {
 	assert.Contains(t, out, `<div class="segmented" role="group" aria-label="State">`+
 		`<a href="/ui/library?order=updated">All <span class="count">7,467</span></a>`+
 		`<a href="/ui/library?order=updated&amp;state=fetched">Fetched <span class="count">4,498</span></a>`+
-		`<a href="/ui/library?order=updated&amp;state=pending">Pending <span class="count">0</span></a>`+
-		`<a href="/ui/library?order=updated&amp;state=failed" aria-current="page">Failed <span class="count">2,150</span></a>`+
-		`<a href="/ui/library?order=updated&amp;state=dead">Dead <span class="count">819</span></a></div>`)
+		`<a href="/ui/library?order=updated&amp;state=pending">Pending <span class="count">0</span></a></div>`,
+		"failed has no tab: the Failures tab lists them")
+	assert.Contains(t, out, `<a class="chip" href="/ui/library?order=updated" title="Remove the filter: State failed"`,
+		"a state without a tab is a chip")
 	assert.Contains(t, out, `<input type="hidden" name="state" value="failed">`)
 	assert.NotContains(t, out, `<select class="select" name="state"`)
 	assert.Contains(t, out, `<p class="lede">7,467 documents from 7,497 bookmarks.</p>`)
@@ -858,7 +864,7 @@ func TestLibrary_Tabs(t *testing.T) {
 		assert.Contains(t, out, `>Failures <span class="count">2,969</span></a>`,
 			"%+v: the subnav counts the whole library's failures", f)
 		assert.Contains(t, out, `>Showing 51 documents, most recently updated first.</p>`, "%+v", f)
-		assert.Contains(t, out, `aria-current="page">Failed</a>`, "%+v", f)
+		assert.Contains(t, out, `<span class="chip-name">State:</span> failed`, "%+v", f)
 	}
 
 	lib.Filters, lib.Counts = LibraryFilters{Order: OrderUpdated}, nil
@@ -894,15 +900,34 @@ func render1(t *testing.T, n *html.Node) string {
 	return b.String()
 }
 
-// TestSearchHit_Matches: a result shows its first two matches, and the
-// rest a click away.
+// TestSearch_TypeTabsOnDemand: the home is the box alone, its type tabs
+// left out (their region kept, empty, for search as you type to fill);
+// a query, or a type already chosen, shows them.
+func TestSearch_TypeTabsOnDemand(t *testing.T) {
+	r := newRenderer(t)
+	layout := Layout{Title: "Search", Nav: NavSearch}
+	home := render(t, r, PageSearch, Search{Layout: layout, Home: &SearchHome{}})
+	assert.Contains(t, home, `<div class="search-scope" id="search-scope"></div>`)
+	assert.NotContains(t, home, `aria-label="Type"`)
+	for name, s := range map[string]Search{
+		"a query":          {Layout: layout, Query: "kafka", Results: &SearchResults{}},
+		"a type, no query": {Layout: layout, Type: "pdf", Home: &SearchHome{}},
+	} {
+		out := render(t, r, PageSearch, s)
+		assert.Contains(t, out, `<div class="segmented" role="group" aria-label="Type">`, name)
+	}
+	assert.False(t, Search{Query: "  "}.ShowsTypes(), "a blank query is the home")
+}
+
+// TestSearchHit_Matches: a result shows its best match, and the rest a
+// click away.
 func TestSearchHit_Matches(t *testing.T) {
 	m := func(s string) Match { return Match{Segments: []Segment{{Text: s}}} }
 	hit := SearchHit{Matches: []Match{m("a"), m("b"), m("c")}}
-	assert.Equal(t, []Match{m("a"), m("b")}, hit.ShownMatches())
-	assert.Equal(t, []Match{m("c")}, hit.MoreMatches())
-	hit.Matches = hit.Matches[:2]
-	assert.Len(t, hit.ShownMatches(), 2)
+	assert.Equal(t, []Match{m("a")}, hit.ShownMatches())
+	assert.Equal(t, []Match{m("b"), m("c")}, hit.MoreMatches())
+	hit.Matches = hit.Matches[:1]
+	assert.Len(t, hit.ShownMatches(), 1)
 	assert.Empty(t, hit.MoreMatches())
 	hit.Matches = nil
 	assert.Empty(t, hit.ShownMatches())
@@ -1058,8 +1083,9 @@ func TestSearch_ResultsPage(t *testing.T) {
 	assert.Contains(t, out, `<div class="results-head"><span><strong>37 documents</strong> match · 12 ms</span>`+
 		`<label class="toggle"><input type="checkbox" id="show-scores" hx-preserve="true"> Show scores</label></div>`)
 	assert.Contains(t, out, `<mark>kafka</mark> partitions <span class="score">bm25 22.523 · vector 0.710</span></p>`)
-	assert.Contains(t, out, `<div class="result-foot"><span class="tag">article</span><span class="score">score 0.0328</span>`,
-		"no badge for the usual case, both")
+	assert.Contains(t, out, `<div class="result-foot"><span class="score">score 0.0328</span>`,
+		"no badge for the usual case, both, and no type pill: the icon before the host says it")
+	assert.NotContains(t, out, `<span class="tag">`)
 	assert.NotContains(t, out, "keyword &#43; meaning")
 	assert.Contains(t, out, `<span class="badge badge-accent plain">meaning only</span>`)
 	assert.NotRegexp(t, `(bm25|vector|score) \d`, regexp.MustCompile(`<span class="score">[^<]*</span>`).ReplaceAllString(out, ""),
@@ -1598,7 +1624,8 @@ func TestInterests_Rebuild(t *testing.T) {
 	}
 	assert.Contains(t, out, `<span class="action-status" id="rebuild-status" role="status" aria-live="polite"></span>`)
 	assert.Contains(t, out, `<span class="no-js muted">Rebuild them with <code>curio interests rebuild</code>.</span>`)
-	assert.Regexp(t, `<p class="interests-state tone-ok">rebuilt <time[^>]*>2 h ago</time>, updated in place · <span title="3 documents changed since; 20 make the next rebuild due">rebuilds after 17 more changes</span></p>`, out)
+	assert.Regexp(t, `<p class="interests-state" title="updated in place · rebuilds after 17 more changes">Rebuilt <time[^>]*>2 h ago</time><span class="visually-hidden">: updated in place; rebuilds after 17 more changes</span></p>`, out,
+		"current: when it ran, the rest on hover")
 	assert.Contains(t, out, `hx-get="/ui/interests?poll=rebuild&amp;run=r1" hx-trigger="every 30s, curio:changed from:body"`)
 
 	out, doc = page(Rebuild{Enabled: true, Queued: true, Hold: "outside_schedule", Shown: "r1", State: current})
@@ -1979,66 +2006,119 @@ func TestLibrary_Head(t *testing.T) {
 	assert.Contains(t, out, `<a id="subnav-failures" href="/ui/failures">Failures</a>`)
 }
 
-// TestLibrary_CauseLine: a cause filter, in either order, gets a line
-// under the toolbar naming it, with a link that clears it alone; the form
-// keeps it for Apply; no cause, no line.
-func TestLibrary_CauseLine(t *testing.T) {
+// TestLibrary_Chips: every active filter is a chip under the toolbar,
+// in either order, each linking to the page without it, the others and
+// the order kept: a state only when it has no tab, a cause by its label.
+// Clear all shows for two chips or more; the Filters button counts the
+// filters its panel holds; the form keeps the state, the cause and the
+// order for Apply; no filter, no chips.
+func TestLibrary_Chips(t *testing.T) {
 	r := newRenderer(t)
-	for _, order := range []string{"", OrderSaved} {
-		f := LibraryFilters{Order: order, Host: "blocked.example", Cause: "anti_bot"}
+	for _, order := range []string{"", OrderUpdated} {
+		f := LibraryFilters{Order: order, State: "failed", Host: "blocked.example", Cause: "anti_bot"}
 		for _, rows := range [][]LibraryRow{nil, {{DocumentID: "a", URL: "https://blocked.example/a", State: "failed"}}} {
-			out := render(t, r, PageLibrary, Library{Layout: Layout{Title: "Library", Nav: NavLibrary}, Filters: f,
-				Rows: rows, PageSize: 50})
+			l := Library{Layout: Layout{Title: "Library", Nav: NavLibrary}, Filters: f, Rows: rows, PageSize: 50}
+			out := render(t, r, PageLibrary, l)
 			doc := parse(t, out)
-			link := byID(doc, "clear-cause")
-			require.NotNil(t, link, order)
-			assert.Equal(t, clearCauseHref(f), attrValue(link, "href"), order)
-			assert.Contains(t, attrValue(link, "aria-label"), "Clear", order)
-			assert.Equal(t, "Clear", textOf(link))
-			assert.Contains(t, out, `<p class="cause-line"><span class="muted">Why they failed:</span> `+
-				`<strong>Blocked by bot protection</strong> <code>anti_bot</code> `, order)
+			var hrefs []string
+			for _, chip := range withClass(doc, "chip") {
+				hrefs = append(hrefs, attrValue(chip, "href"))
+			}
+			assert.Equal(t, []string{withoutFilterHref(f, filterState), withoutFilterHref(f, filterHost),
+				withoutFilterHref(f, filterCause)}, hrefs, order)
+			assert.Contains(t, out, `<span class="chip-label"><span class="chip-name">State:</span> failed</span>`)
+			assert.Contains(t, out, `<span class="chip-label"><span class="chip-name">Why it failed:</span> `+
+				`Blocked by bot protection</span>`)
+			assert.Contains(t, out, `title="Remove the filter: Why it failed Blocked by bot protection (anti_bot)"`)
+			assert.Contains(t, out, `<a class="clear-all" href="`+html.EscapeString(clearFiltersHref(f))+`">Clear all</a>`)
+			assert.Contains(t, out, `Filters<span class="filter-count"> · 1</span></summary>`, "the host alone")
 			assert.Contains(t, out, `<input type="hidden" name="cause" value="anti_bot">`, order)
-			assert.Less(t, strings.Index(out, `</form>`), strings.Index(out, `class="cause-line"`), "under the toolbar")
+			assert.Contains(t, out, `<input type="hidden" name="state" value="failed">`, order)
+			if order == OrderUpdated {
+				assert.Contains(t, out, `<input type="hidden" name="order" value="updated">`)
+			} else {
+				assert.NotContains(t, out, `name="order"`, "the default order names none")
+			}
+			assert.Less(t, strings.Index(out, `</details>`), strings.Index(out, `class="filter-chips"`),
+				"under the toolbar")
 		}
 	}
-	out := render(t, r, PageLibrary, Library{Layout: Layout{Title: "Library", Nav: NavLibrary},
-		Filters: LibraryFilters{Host: "blocked.example"}})
-	assert.NotContains(t, out, "cause-line")
-	assert.NotContains(t, out, "clear-cause")
+	tabbed := Library{Layout: Layout{Title: "Library", Nav: NavLibrary},
+		Filters: LibraryFilters{State: "fetched", ContentType: "repo"}}
+	assert.Equal(t, []FilterChip{{Label: "Type", Value: "repo", Href: "/ui/library?state=fetched"}}, tabbed.Chips(),
+		"a state with a tab is no chip")
+	assert.Empty(t, tabbed.ClearAll(), "one chip clears itself")
+	out := render(t, r, PageLibrary, Library{Layout: Layout{Title: "Library", Nav: NavLibrary}})
+	assert.NotContains(t, out, "filter-chips")
+	assert.NotContains(t, out, "filter-count")
 }
 
-// TestInterests_Changes: for a week after a rebuild that split, merged or
-// dissolved interests, a note counts what it changed, dates it, and leads
-// to the changes; never for one that only kept, moved or created them,
-// past the week, or without a run. The note sits outside the polled
-// regions.
+// TestLibrary_StateTabs: All, Fetched and Pending, counted; failed and
+// dead have none, and a page filtered to either marks none.
+func TestLibrary_StateTabs(t *testing.T) {
+	counts := &LibraryCounts{Documents: 10, ByState: map[string]int{"fetched": 6, "pending": 1, "failed": 2, "dead": 1}}
+	for state, current := range map[string]string{"": "All", "fetched": "Fetched", "pending": "Pending",
+		"failed": "", "dead": ""} {
+		l := Library{Filters: LibraryFilters{State: state}, Counts: counts}
+		var labels []string
+		marked := ""
+		for _, tab := range l.StateTabs() {
+			labels = append(labels, tab.Label)
+			if tab.Current {
+				marked = tab.Label
+			}
+		}
+		assert.Equal(t, []string{"All", "Fetched", "Pending"}, labels, state)
+		assert.Equal(t, current, marked, state)
+	}
+}
+
+// TestLibrary_OrderSwitch: the time column's head names the order in
+// effect and links to the other.
+func TestLibrary_OrderSwitch(t *testing.T) {
+	r := newRenderer(t)
+	rows := []LibraryRow{{DocumentID: "a", URL: "https://a.example/", State: "fetched", When: time.Now()}}
+	saved := Library{Layout: Layout{Title: "Library", Nav: NavLibrary}, Rows: rows, Filters: LibraryFilters{Host: "a.example"}}
+	out := render(t, r, PageLibrary, saved)
+	assert.Contains(t, out, `<th scope="col" class="c-when" aria-sort="descending"><a class="sort" `+
+		`href="/ui/library?host=a.example&amp;order=updated" title="Newest saves first. Sort by last updated" `+
+		`aria-label="Saved: Newest saves first. Sort by last updated">Saved<span aria-hidden="true"> ↓</span></a></th>`)
+	updated := saved
+	updated.Filters.Order = OrderUpdated
+	out = render(t, r, PageLibrary, updated)
+	assert.Contains(t, out, `<a class="sort" href="/ui/library?host=a.example" title="Most recently updated first. `+
+		`Sort by recently saved" aria-label="Updated: Most recently updated first. Sort by recently saved">Updated`)
+	assert.NotContains(t, out, `<select class="select" name="order"`, "no Order select")
+}
+
+// TestInterests_Changes: with a run that changed its interests, the
+// rebuild's line leads to what it changed, its counts on hover, outside
+// the line's live regions; a run that only kept them, or no run, has no
+// link.
 func TestInterests_Changes(t *testing.T) {
 	r := newRenderer(t)
-	at := time.Date(2026, 10, 9, 14, 3, 0, 0, time.UTC)
-	withChanges := func(recent bool, c RunChanges) Interests {
-		v := interestsPage(1)
-		v.Run.ComputedAt, v.Run.Recent, v.Run.Changes = at, recent, c
-		return v
+	v := interestsPage(1)
+	v.Run.Changes = RunChanges{Kept: 180, Split: 5, Merged: 1, Moved: 2, Created: 9}
+	out := render(t, r, PageInterests, v)
+	assert.Contains(t, out, `<a class="changes-link" href="/ui/interests/changes" `+
+		`title="5 interests split, 1 merged, 2 moved, 9 new">What changed →</a>`)
+	link := strings.Index(out, `class="changes-link"`)
+	assert.Greater(t, link, strings.Index(out, `id="rebuild-state"`))
+	assert.Less(t, link, strings.Index(out, `id="rebuild-control"`))
+	doc := parse(t, out)
+	for n := withClass(doc, "changes-link")[0]; n != nil; n = n.Parent {
+		assert.NotContains(t, []string{"rebuild-state", "rebuild-control"}, attrValue(n, "id"), "outside the regions")
 	}
-	out := render(t, r, PageInterests, withChanges(true, RunChanges{Kept: 180, Split: 5, Merged: 1, Moved: 2, Created: 9}))
-	assert.Contains(t, out, `<div class="callout callout-info mb-4" role="note">`)
-	assert.Contains(t, out, `<p>Rebuilt on <time datetime="2026-10-09T14:03:00Z" title="`+when(at)+`">`+localDay(at)+
-		`</time>: 5 interests split, 1 merged, 2 moved, 9 new. <a href="/ui/interests/changes">What changed →</a></p>`)
-	note := strings.Index(out, `What changed →`)
-	assert.Less(t, note, strings.Index(out, `aria-label="Coverage"`), "above the coverage")
-	assert.Greater(t, note, strings.Index(out, `id="rebuild-control"`), "outside the head's live regions")
-	assert.Contains(t, render(t, r, PageInterests, withChanges(true, RunChanges{Dissolved: 1})),
-		"Rebuilt on", "a dissolved interest alone")
-
-	for name, v := range map[string]Interests{
-		"older than a week":    withChanges(false, RunChanges{Split: 5}),
-		"kept, moved, created": withChanges(true, RunChanges{Kept: 10, Moved: 3, Created: 4}),
-		"no run":               {Layout: Layout{Title: "Interests", Nav: NavInterests}},
-	} {
-		assert.NotContains(t, render(t, r, PageInterests, v), "What changed", name)
-	}
+	v.Run.Changes = RunChanges{Kept: 3}
+	assert.NotContains(t, render(t, r, PageInterests, v), "What changed", "a run that only kept its interests")
+	assert.NotContains(t, render(t, r, PageInterests, Interests{Layout: Layout{Title: "Interests", Nav: NavInterests}}),
+		"What changed")
 	assert.Equal(t, "1 interest merged, 2 dissolved", RunChanges{Merged: 1, Dissolved: 2}.Summary())
 	assert.Empty(t, RunChanges{Kept: 3}.Summary())
+	assert.False(t, RunChanges{Created: 9}.Changed(), "a first grouping")
+	assert.False(t, RunChanges{Kept: 9}.Changed(), "kept them all")
+	assert.True(t, RunChanges{Kept: 9, Created: 1}.Changed())
+	assert.True(t, RunChanges{Dissolved: 1}.Changed())
 }
 
 // TestInterests_UnsortedCard: Unsorted's card is the last card on the last
@@ -2096,7 +2176,6 @@ func TestInterests_Cards(t *testing.T) {
 	assert.Contains(t, out, `<a class="all" href="/ui/interests/a1">All 2 interests →</a>`, "every one listed")
 	area.NumChildren = 6
 	assert.Equal(t, 4, area.MoreChildren())
-	assert.Equal(t, 70, area.Largest())
 }
 
 // TestInterestPage_Lineage: an area's or interest's page says what the
@@ -2435,8 +2514,8 @@ func TestMapPage_Ready(t *testing.T) {
 	uitest.AssertInert(t, out)
 	assert.Contains(t, out, "<title>Interest map · curio</title>")
 	assert.Contains(t, out, `<p class="lede">5,237 documents in 29 areas holding 182 interests, as the rebuild of `)
-	assert.Contains(t, out, `<nav class="subnav" aria-label="Interests views"><a href="/ui/interests">List</a>`+
-		`<a href="/ui/interests/map" aria-current="page">Map</a></nav>`)
+	assert.Regexp(t, `<nav class="segmented view-switch" aria-label="Interests views"><a href="/ui/interests/map" aria-current="page"><svg[^>]*>.*?</svg>Map</a>`+
+		`<a href="/ui/interests"><svg[^>]*>.*?</svg>List</a></nav>`, out)
 	doc := parse(t, out)
 	root := byID(doc, "interest-map")
 	require.NotNil(t, root)
@@ -2508,7 +2587,9 @@ func TestMapPage_None(t *testing.T) {
 		}
 		assert.NotContains(t, out, `id="interest-map"`, tc.page.State)
 		assert.NotContains(t, out, "d3-", tc.page.State)
-		assert.Contains(t, out, `<a href="/ui/interests/map" aria-current="page">Map</a>`, tc.page.State)
+		assert.Regexp(t, `<a href="/ui/interests/map" aria-current="page"><svg[^>]*>.*?</svg>Map</a>`, out, tc.page.State)
+		assert.Contains(t, out, `<a class="btn" href="/ui/interests">`, "%s: the way to the list", tc.page.State)
+		assert.Contains(t, out, `</svg>Show the list of interests</a>`, tc.page.State)
 	}
 	failed := page(MapFailed)
 	failed.Error = strings.Repeat("the map took too long ", 30)
@@ -2517,14 +2598,15 @@ func TestMapPage_None(t *testing.T) {
 	assert.NotEqual(t, failed.Error, shortError(failed.Error))
 }
 
-// TestInterests_Subnav: the Interests' head leads to their map, in the
-// whole page and never in a poll's answer.
-func TestInterests_Subnav(t *testing.T) {
+// TestInterests_Views: the Interests' title has the Map | List switch,
+// Map first, List current, in the whole page and never in a poll's answer.
+func TestInterests_Views(t *testing.T) {
 	r := newRenderer(t)
-	subnav := `<nav class="subnav" aria-label="Interests views"><a href="/ui/interests" aria-current="page">List</a>` +
-		`<a href="/ui/interests/map">Map</a></nav>`
+	views := regexp.MustCompile(`<div class="title-row"><h1>Interests</h1>\n<nav class="segmented view-switch" ` +
+		`aria-label="Interests views"><a href="/ui/interests/map"><svg[^>]*>.*?</svg>Map</a>` +
+		`<a href="/ui/interests" aria-current="page"><svg[^>]*>.*?</svg>List</a></nav></div>`)
 	page := interestsPage(1)
-	assert.Contains(t, render(t, r, PageInterests, page), subnav)
+	assert.Regexp(t, views, render(t, r, PageInterests, page))
 	page.Poll = PollRebuild
 	assert.NotContains(t, render(t, r, PageInterests, page), `aria-label="Interests views"`)
 }

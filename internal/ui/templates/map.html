@@ -1,6 +1,7 @@
 {{/*
-The interest map: the Interests' head, with Map current in their subnav,
-then, when the latest rebuild drew a map, the shell static/map.js draws it
+The interest map, the Interests' first view (the main navigation opens
+it, By group unless the address asks for By similarity): the Interests'
+head, with Map current in its Map | List switch, then, when the latest rebuild drew a map, the shell static/map.js draws it
 into, or else a card saying why there is none (no rebuild yet, one that
 drew no map, a map that failed, or the map turned off). Only a page with a
 map loads the map's scripts.
@@ -20,11 +21,11 @@ says the map is loading until it is drawn.
 
 {{define "content" -}}
 <div class="page-head"><div class="titles">
-<h1>Interests</h1>
+<div class="title-row"><h1>Interests</h1>
+{{template "interests-views" .Views}}</div>
 {{with .Run}}<p class="lede">{{count .Documents "document" "documents"}} {{if .HasAreas}}in {{count .Areas "area" "areas"}} holding {{count .Interests "interest" "interests"}}{{else}}in {{count .Interests "interest" "interests"}}{{end}}{{if not .FinishedAt.IsZero}}, as the rebuild of {{template "date" .FinishedAt}} grouped them{{end}}.</p>
 {{- else}}<p class="lede">Your library by similarity: every document a dot, near the documents most like it.</p>{{end}}
 </div></div>
-{{template "interests-subnav" .Views}}
 {{if .Ready}}{{template "map-shell" .}}{{else}}{{template "map-none" .}}{{end}}
 {{- end}}
 
@@ -37,8 +38,8 @@ canvas; and the details panel, a bottom sheet on a phone.
 <div class="interest-map js-only" id="interest-map" data-src="{{.Src}}" data-page="{{.PageHref}}" data-document-page="{{.DocumentPrefix}}" data-interest-page="{{.InterestPrefix}}" data-unsorted-page="{{.UnsortedPage}}" data-interests-page="{{.Views.ListHref}}" data-view="{{.Query.View}}"{{with .Selected}} data-select="{{.}}"{{end}}>
 <div class="map-toolbar">
 <div class="segmented map-tabs" role="tablist" aria-label="Map views">
-<button type="button" role="tab" id="map-tab-similarity" aria-controls="map-stage" aria-selected="{{if .ByGroup}}false{{else}}true{{end}}" tabindex="{{if .ByGroup}}-1{{else}}0{{end}}">By similarity</button>
 <button type="button" role="tab" id="map-tab-groups" aria-controls="map-stage" aria-selected="{{if .ByGroup}}true{{else}}false{{end}}" tabindex="{{if .ByGroup}}0{{else}}-1{{end}}">By group</button>
+<button type="button" role="tab" id="map-tab-similarity" aria-controls="map-stage" aria-selected="{{if .ByGroup}}false{{else}}true{{end}}" tabindex="{{if .ByGroup}}-1{{else}}0{{end}}">By similarity</button>
 </div>
 <div class="map-search">{{template "icon" "search"}}<input class="input" id="map-search" type="search" role="combobox" aria-expanded="false" aria-controls="map-hits" aria-autocomplete="list" autocomplete="off" spellcheck="false" placeholder="Find an area, interest or document" aria-label="Find an area, interest or document on the map">
 <ul class="map-hits" id="map-hits" role="listbox" aria-label="Matches"></ul></div>
@@ -73,7 +74,8 @@ canvas; and the details panel, a bottom sheet on a phone.
 Why there is no map, by the page's state: no rebuild yet (where rebuilds
 stand, or how to turn insight on), a rebuild that drew none, a map that
 failed (its error cut on one line, whole on hover), or the map turned
-off. Each says what draws it.
+off. Each says what draws it, and leads to the list, so the navigation's
+Interests is never a dead end.
 */}}
 {{define "map-none" -}}
 <div class="card"><div class="empty map-none">
@@ -96,5 +98,6 @@ off. Each says what draws it.
 <h2>The map is off</h2>
 <p>config.yaml turns it off (<code>insight.map: false</code>). Remove the setting, or set it to true, and restart the daemon: a rebuild then draws the map.</p>
 {{- end}}
+<p class="mt-2"><a class="btn" href="{{.Views.ListHref}}">{{template "icon" "list"}}Show the list of interests</a></p>
 </div></div>
 {{- end}}

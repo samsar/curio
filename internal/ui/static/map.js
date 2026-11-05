@@ -162,7 +162,7 @@
 
   // The map's state: the model, once read; the view shown; the selection, null for the library; the
   // documents a selected group stands out with; whether a failure stopped the map.
-  const state = {model: null, view: root.dataset.view === 'groups' ? 'groups' : 'similarity', sel: null,
+  const state = {model: null, view: root.dataset.view === 'similarity' ? 'similarity' : 'groups', sel: null,
     highlight: null, stopped: false};
   const views = {};
 
@@ -1320,7 +1320,7 @@
   // syncAddress keeps the address on the view and the selection as mapHref writes them, never adding to the history,
   // best effort: Safari and Firefox throw past a rate limit on replaceState, and that must never stop the map.
   function syncAddress() {
-    const view = state.view === 'similarity' ? '' : state.view;
+    const view = state.view === 'groups' ? '' : state.view;
     const query = new URLSearchParams(Object.entries({select: selectionParam(state.model, state.sel), view})
       .filter(([, value]) => value)).toString();
     try {
@@ -1390,7 +1390,7 @@
 
   // tabKeys move between the tabs, as the ARIA tabs pattern does: arrows, Home and End.
   function tabKeys(e) {
-    const to = {ArrowRight: 'other', ArrowLeft: 'other', Home: 'similarity', End: 'groups'}[e.key];
+    const to = {ArrowRight: 'other', ArrowLeft: 'other', Home: 'groups', End: 'similarity'}[e.key];
     if (to) {
       e.preventDefault();
       activate(to === 'other' ? (state.view === 'similarity' ? 'groups' : 'similarity') : to, true);

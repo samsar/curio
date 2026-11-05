@@ -143,12 +143,12 @@ func TestStylesheet(t *testing.T) {
 	assert.Equal(t, "hidden", declarations(ruleFor(t, rules, "", "table.data td").body)["overflow"],
 		"a cell's content stays in its column")
 	for col, width := range map[string]string{"col.c-type": "6.5rem", "col.c-when": "7.5rem",
-		"col.c-saved": "11rem", "col.c-sim": "6.5rem", "col.c-rank": "3.5rem", "col.c-nearest": "16rem"} {
+		"col.c-saved": "9rem", "col.c-sim": "6.5rem", "col.c-rank": "3.5rem", "col.c-nearest": "16rem"} {
 		assert.Equal(t, width, declarations(ruleFor(t, rules, "", col).body)["width"], col)
 	}
-	// A save's time takes two lines in its column: what it is, then when.
+	// An unknown save date takes two lines in its column: what it is, then
+	// when curio imported it.
 	assert.Equal(t, "block", declarations(ruleFor(t, rules, "", "table.data td.c-when .saved-what").body)["display"])
-	assert.Equal(t, "none", declarations(ruleFor(t, rules, "", "table.data td.c-when .saved-sep").body)["display"])
 	const phone = "@media (max-width: 48rem)"
 	for _, folded := range []string{"col.c-type", "col.c-when", "th.c-type", "td.c-type", "th.c-when", "td.c-when",
 		"col.c-nearest", "th.c-nearest", "td.c-nearest"} {
@@ -226,9 +226,23 @@ func TestStylesheet(t *testing.T) {
 		map[string]string{"display": where["display"], "flex-wrap": where["flex-wrap"], "min-width": where["min-width"]})
 	assert.Equal(t, "flex", declarations(ruleFor(t, rules, phone, ".nearest-sub").body)["display"])
 	assert.Equal(t, "0", declarations(ruleFor(t, rules, "", ".nearest-sub").body)["min-width"])
-	assert.Equal(t, "minmax(0, 1fr) 3rem 2.5rem",
+	assert.Equal(t, "minmax(0, 1fr) auto",
 		declarations(ruleFor(t, rules, "", ".interest .children > li").body)["grid-template-columns"],
-		"an area card's interest: its name gives way to its bar and size")
+		"an area card's interest: its name gives way to its size")
+	// The Library's state tabs and Filters, and the tab rows: no row overflows
+	// its box on the cross axis (a stray scrollbar where scrollbars always
+	// show); the subnav's rule is an inset shadow under the tabs' underline.
+	subnav := declarations(ruleFor(t, rules, "", ".subnav").body)
+	assert.Equal(t, "hidden", subnav["overflow-y"])
+	assert.Equal(t, "inset 0 -1px 0 var(--border)", subnav["box-shadow"])
+	assert.NotContains(t, subnav, "border-bottom")
+	assert.NotContains(t, declarations(ruleFor(t, rules, "", ".subnav a").body), "margin-bottom")
+	// The Filters button ends its line, wrapped or not, so its panel,
+	// anchored at its right, opens on screen; the results' head wraps,
+	// never cut; a line of parts puts its dot at a wrapped line's start.
+	assert.Equal(t, "auto", declarations(ruleFor(t, rules, "", ".filter-menu").body)["margin-left"])
+	assert.NotContains(t, declarations(ruleFor(t, rules, "", ".results-head > span").body), "text-overflow")
+	assert.Equal(t, `"·"`, declarations(ruleFor(t, rules, "", ".page-parts > * + *::before").body)["content"])
 	// The Interests' head and its rebuild line never grow past the screen.
 	for _, selector := range []string{".page-head .actions", ".rebuild-state"} {
 		box := declarations(ruleFor(t, rules, "", selector).body)

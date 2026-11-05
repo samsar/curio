@@ -72,7 +72,8 @@ page isn't updating, and it goes once the daemon is back.
 
 ## The pages
 
-The navigation is Search, Library, Interests and Status. The pages follow
+The navigation is Search, Library, Interests and Status; Interests opens
+their map (their list, with the map turned off in config.yaml). The pages follow
 your Mac's light or dark appearance until you pick one with the sun/moon
 button at the right of the header: it switches to the other theme, and
 the browser remembers the choice, until you pick the theme your Mac is
@@ -82,24 +83,24 @@ Every page but Search and the starting page has a search box in its
 header (on a wide window). Status's footer names the daemon's version
 and the address it listens on; no other page has a footer.
 
-- **Search** (`/ui/`, the home): a search box, with a type filter under
-  it (All, Articles, Repos, Videos, PDFs). With nothing typed, the box
-  says how many documents there are to search ("Search your 4,498
-  documents"). Under it, in the box's column, a quiet line naming your
-  six largest areas (or interests, in a library too small for areas),
-  each linking to its page, with a link to all of them, and nothing
-  else: the Library opens on your newest saves.
-  Type, and the same hybrid search as `curio search` runs as you type,
-  limited to the type chosen, which the address keeps
+- **Search** (`/ui/`, the home): the search box alone, as wide as every
+  page's content. With nothing typed, it says how many documents there
+  are to search ("Search your 4,498 documents"), and at the foot of the
+  window a quiet line names your six largest areas (or interests, in a
+  library too small for areas), each linking to its page, with a link to
+  all of them, and nothing else: the Library opens on your newest saves.
+  Type, and the same hybrid search as `curio search` runs as you type; a
+  type filter shows under the box (All, Articles, Repos, Videos, PDFs),
+  and limits the search to the type chosen, which the address keeps
   (`/ui/?q=kafka&content_type=pdf`). The results come 10 a page, with
   numbered pages under them, up to the best 100 (`&page=2`); typing or
   choosing another type starts again at page 1, and a page past the last
-  says how many pages there are. A line over them counts what matched
+  says how many pages there are. A small line over them counts what matched
   ("37 documents match"), or, past 100, says "100+ documents match ·
   showing the best 100", and the last page then says to refine the query
-  to see others. Each result shows where the page lives, its title, and
-  the first two passages that matched with the matched words highlighted
-  (the rest a click away); a badge says how it matched only when it is
+  to see others. Each result shows where the page lives, after an icon of
+  its type, its title, and the passage that matched best, with the
+  matched words highlighted (the others behind **N more passages**); a badge says how it matched only when it is
   the unusual case ("keyword only", "meaning only", "bookmark details"),
   not for the usual one, both. A search whose words nothing in the
   library holds, in a page's text, title, bookmark's title or folder,
@@ -161,18 +162,25 @@ and the address it listens on; no other page has a footer.
   understood, and so is any in a Safari before 16.4, which doesn't say
   where a request came from.
 - **Library**: your saves, newest saved first (**Recently saved**, the
-  order it opens in), or, with **Order** set to **Last updated**
-  (`/ui/library?order=updated`), every document, most recently updated
-  first; every link, the tabs, the filters and Load more keep the order
-  chosen. The state bar on Status and the Failures tab's links lead to
-  Last updated, which lists the documents they count. Tabs choose
-  the state (All, Fetched, Pending, Failed, Dead), each with its count
-  when the state is the only filter; with a type, host, folder or cause
-  chosen too, the counts are left out, since they count the whole
-  library.
-  Filters narrow it by type, host (`example.com`, exactly) and bookmark
-  folder (the folder and the folders under it), and Apply keeps the tab
-  chosen. Each row shows the title, in two lines at most (the whole on
+  order it opens in), or every document, most recently updated first
+  (**Last updated**, `/ui/library?order=updated`): the time column's
+  head, **Saved ↓** or **Updated ↓**, switches between them (on a phone,
+  whose time column folds away, the Document head carries the same
+  link), and every link, the tabs, the filters and Load more keep the
+  order chosen. The state bar on Status and the Failures tab's links lead
+  to Last updated, which lists the documents they count. Tabs choose the
+  state (All, Fetched, Pending), each with its count when the state is
+  the only filter; with a type, host, folder or cause chosen too, the
+  counts are left out, since they count the whole library. Failed and
+  dead documents are the Failures tab's; an address that names either
+  (`?state=failed`, where Status's legend leads) shows it as a chip.
+  **Filters**, at the right of the tabs, opens a panel that narrows the
+  list by type, host (`example.com`, exactly) and bookmark folder (the
+  folder and the folders under it); its **Apply** keeps the tab and the
+  order, and the button counts the filters it holds ("Filters · 2").
+  Every filter in effect is a chip under the tabs ("Host: github.com ×"),
+  whose link drops it alone and keeps the rest; with two or more,
+  **Clear all** drops them all. Each row shows the title, in two lines at most (the whole on
   hover), with where the page lives under it, its type and when it was
   saved (in Last updated, when it was last updated). A row reads as a bookmark: a fetched document, the usual
   case, shows no state, and any other has its state's badge at the head
@@ -190,26 +198,28 @@ and the address it listens on; no other page has a footer.
   through the rest, and the line under the table counts the rows shown
   ("Showing 100 of 2,150 documents" in Last updated). A `cause=` in the address
   (`/ui/library?order=updated&cause=anti_bot`, where Failures' links lead) narrows it
-  to the documents that failed for one cause: a line under the filters
-  names it, with **Clear**, which drops the cause and keeps everything
-  else, and paging, the tabs and filtering keep it. Above the filters,
+  to the documents that failed for one cause: a chip names it ("Why it
+  failed: Blocked by bot protection", its code on hover), whose link drops
+  the cause and keeps everything else, and paging, the tabs and filtering
+  keep it. Above the filters,
   **Documents** and **Failures** switch between the Library's two views;
   Failures shows how many documents failed or are dead, whatever the
   filters.
 
   In **Recently saved** a row is a save, one per bookmark, so a page
-  saved in two browsers is listed twice. The time column reads Saved, the line under a
+  saved in two browsers is listed twice. The line under a
   title adds the browser it was saved in on a wide window (hover it for
   the folder), and a note under the table says why a page can appear
   twice and that undated saves are marked and listed by the time they
-  carry. A save's time says how far it is known: "saved 3 d ago" for an
-  exact date; "saved by Mar 3, 2025" for an upper bound (a folder copied
-  whole, or a save a later import first found); and "date unknown ·
-  imported 2 h ago", when curio imported it, where the time is a
-  browser's bulk import stamp or the source keeps no date (Safari's
-  bookmarks, an HTML export without dates). Hover an inexact time for what
-  it means. On a phone, whose time column folds away, a save's time is a
-  line of its own under the page's address. An untitled page is named by
+  carry. A save's time says how far it is known: "3 d ago" in the
+  Saved column for an exact date; "~3 d ago" for an upper bound (a folder
+  copied whole, or a save a later import first found: saved then or
+  before); and, quieter, "date unknown" over "imported 2 h ago", when
+  curio imported it, where the time is a browser's bulk import stamp or
+  the source keeps no date (Safari's bookmarks, an HTML export without
+  dates). Hover an inexact time for what it means. On a phone, whose time
+  column folds away, a save's time is a line of its own under the page's
+  address ("saved 3 d ago", "saved ~3 d ago"), as on the document's page. An untitled page is named by
   that save's own title. The tabs, filters and Load more work in both
   orders, and the tabs count documents in both; the line under the table counts saves,
   "Showing 50 of 7,497 saves" with no filter at all, and "Showing 50
@@ -255,30 +265,32 @@ and the address it listens on; no other page has a footer.
   gigabyte of memory, and the text is shown as stored. Web and email
   addresses written out in the text without link markup show as text,
   not links: a GitHub README's bare URLs, say.
-- **Interests**: the topics the last rebuild found, in two views, **List**
-  and **Map**, under the head. The List: the topics, largest first, 24 a
-  page. A library of about 1,000 documents or more is grouped in two
-  levels: areas, each holding interests ("29 areas holding 182 interests
-  in your library"); a smaller one in interests alone. The head says how
-  many there are, and beside it where rebuilds stand: when the interests
-  were last rebuilt (regrouped from scratch, or updated in place) and
-  after how many more changes the next comes (hover for the counts); that a rebuild is due, and what it
+- **Interests**: the topics the last rebuild found, in two views, **Map**
+  (where the navigation's Interests opens) and **List**, switched by the
+  Map | List control beside the title. The List: the topics, largest
+  first, 24 a page. A library of about 1,000 documents or more is grouped
+  in two levels: areas, each holding interests; a smaller one in
+  interests alone. Two quiet lines under the title say the rest. The
+  first counts them and how much of the library they hold ("29 areas
+  holding 182 interests · 4,502 of 5,013 documents in an interest"), with
+  the way to **Unsorted** ("502 unsorted →"). The second says where
+  rebuilds stand: when the interests were last rebuilt (hover for
+  whether it regrouped from scratch or updated in place, and after how
+  many more changes the next comes); that a rebuild is due, and what it
   waits for (the library to settle, or a re-embedding to finish); queued,
   and why the queue holds it; running, and since when; held, while the
   embeddings may have drifted, with the fix (`curio reindex --all`); or
   failing, with the error (whole on hover) and when it is tried again.
-  **Rebuild…** groups the library again now, after a dialog that says
-  what that does, whatever that line says: a rebuild you ask for isn't
-  held, and it retries a failure at once; it is
-  disabled only while one is queued or running. For a week after a
-  rebuild that split, merged or dissolved interests, a note says how many
-  ("Rebuilt on Oct 9, 2026: 5 interests split, 1 merged, 9 new") and leads
-  to what changed. A bar shows where the run's documents, and those added
-  since, are: in an interest, a loose fit of one, new since the rebuild,
-  or unsorted, with their counts and shares under it. An area's card
-  counts its documents, its interests and those added since ("4 new"),
-  and lists its five largest interests, each with its size and a bar
-  against the largest, then "+ N more interests →" to the rest. An
+  After it, **What changed →** leads to what the last rebuild split,
+  merged, moved, dissolved or created (hover for the counts), when it
+  changed interests you knew. At its end, **Rebuild…** groups the library
+  again now, after a dialog that says what that does, whatever that line
+  says: a rebuild you ask for isn't held, and it retries a failure at
+  once; it is disabled only while one is queued or running. An area's
+  card counts its documents, its interests and those added since ("4
+  new"), gives its description in two lines (the whole on its page), and
+  lists its five largest interests, each with its size, then "+ N more
+  interests →" to the rest. An
   interest's card counts its documents, its loose fits (close to it
   without being grouped in it; hover for that) and its new ones,
   and shows a few of its documents (an untitled one named by its
@@ -294,15 +306,15 @@ and the address it listens on; no other page has a footer.
   is held or failing.
   With insight turned off in config.yaml (`insight.enabled: false`),
   there is no Rebuild, and the page says how to turn it on.
-- **Interest map** (`/ui/interests/map`), the Interests' Map: the last
-  rebuild's grouping drawn in your browser, in two tabs. **By
-  similarity** (the default) draws every document as a dot near the
+- **Interest map** (`/ui/interests/map`), the Interests' Map and the
+  first view the navigation opens: the last rebuild's grouping drawn in
+  your browser, in two tabs. **By group** (the default) draws each area
+  as a disc holding its interests' circles, sized by their documents,
+  each document a dot in its interest, and Unsorted as a dashed disc
+  beside them. **By similarity** draws every document as a dot near the
   documents most like it, coloured by its area (by its interest in a
   library too small for areas), and names the areas, then the interests
-  as you zoom in, then titles. **By group** draws each area as a disc
-  holding its interests' circles, sized by their documents, each
-  document a dot in its interest, and Unsorted as a dashed disc beside
-  them. A grey dot is unsorted, a hollow ring a loose fit, and a dot
+  as you zoom in, then titles. A grey dot is unsorted, a hollow ring a loose fit, and a dot
   ringed in the accent new since the rebuild. Scroll, pinch or use + and
   − to zoom, drag to pan, and double-click empty space (or the fit
   button, top right) to see the whole map again. A click selects: by
@@ -322,7 +334,7 @@ and the address it listens on; no other page has a footer.
   (arrows, Enter, Escape). Keys: `/` searches, Escape goes up a level,
   `0` shows the whole map, `+` and `-` zoom, and the arrows, Home and
   End move between the tabs. The address keeps the tab and the selection
-  (`/ui/interests/map?view=groups&select=interest:<id>`, `area:<id>`,
+  (`/ui/interests/map?view=similarity&select=interest:<id>`, `area:<id>`,
   `document:<id>` or `unsorted`), so a reload or Back shows the same; an
   ID no longer on the map shows the whole map and says so, and an area
   or interest's note links to its page, which says what became of it.
@@ -334,7 +346,8 @@ and the address it listens on; no other page has a footer.
   Without a map the page says why: no rebuild yet, the last rebuild drew
   none (a rebuild to draw it is due; Interests or `curio interests
   rebuild` draws one now), the map failed (with its error), or the map
-  is off (`insight.map: false` in config.yaml).
+  is off (`insight.map: false` in config.yaml), and leads to the list,
+  which shows the interests without a map.
 - **An area's page**: the area's summary (as everywhere the pages show
   a description, without the stock opening the writing model gives most
   of them, "A collection of resources covering…", "This group focuses
@@ -468,5 +481,5 @@ daemon (phase 1)", "Dashboard: formatting budgets for stored markdown",
 "Dashboard: a design language under the CSP", "Dashboard: actions through
 /v1, sent by a first-party module", "Dashboard: the Failures tab",
 "Dashboard: two-level interests", "Dashboard: the interest map",
-"Dashboard: the category standard" and "Local API: loopback only, no
-token, browsers shut out".
+"Dashboard: the category standard", "Dashboard: progressive disclosure"
+and "Local API: loopback only, no token, browsers shut out".

@@ -900,7 +900,7 @@ func TestUI_InterestsRebuild(t *testing.T) {
 	body = getPage(t, srv, "/ui/interests", http.StatusOK)
 	assert.Contains(t, body, "Kafka streams", "the latest done run's interests")
 	assert.NotContains(t, body, "failed", "a run a shutdown failed is no failure the scheduler counts")
-	assert.Regexp(t, `<p class="interests-state tone-ok">rebuilt <time[^>]*>just now</time> · <span title="0 documents changed since; 20 make the next rebuild due">rebuilds after 20 more changes</span></p>`,
+	assert.Regexp(t, `<p class="interests-state" title="rebuilds after 20 more changes">Rebuilt <time[^>]*>just now</time><span class="visually-hidden">: rebuilds after 20 more changes</span></p>`,
 		body)
 }
 
@@ -945,7 +945,7 @@ func TestUI_InterestsStates(t *testing.T) {
 			`>a rebuild is due \(300 documents changed\): waiting for the library to settle</p>`},
 		{"current", insight.Snapshot{State: insight.StateCurrent, LastRebuildAt: now.Add(-2 * time.Hour),
 			LastKind: store.RunKindWarm, Changed: 37, RebuildAt: 263},
-			`<p class="interests-state tone-ok">rebuilt <time[^>]*>2 h ago</time>, updated in place · <span title="37 documents changed since; 263 make the next rebuild due">rebuilds after 226 more changes</span></p>`},
+			`<p class="interests-state" title="updated in place · rebuilds after 226 more changes">Rebuilt <time[^>]*>2 h ago</time><span class="visually-hidden">: updated in place; rebuilds after 226 more changes</span></p>`},
 		{"none", insight.Snapshot{State: insight.StateNone, Changed: 7, RebuildAt: 20},
 			`>waiting for 20 indexed documents \(7 so far\)</p>`},
 		{"unknown", insight.Snapshot{State: insight.StateUnknown}, `<div class="rebuild-state" id="rebuild-state"></div>`},

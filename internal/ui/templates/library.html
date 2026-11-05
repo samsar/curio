@@ -12,42 +12,55 @@ A row reads as a bookmark: there is no State column, and a fetched
 document, the usual case, has no state badge; any other has its own, at
 the head of the line under its name (DocCell.Badge).
 
-The state tabs count the whole library's documents, so they show counts
-only when state is the one filter, in either order. The form carries the
-state as a hidden input: Apply keeps the tab. The order is a field of the
-form, and every link keeps it. A cause, which the Failures tab's links
-set, has no field: the form carries it hidden too, and a line under the
-toolbar names it, with a link that clears it alone.
+The toolbar is one row: the state tabs, All, Fetched and Pending, and at
+its end the Filters button, a <details> whose panel is the filter form
+(Type, Host, Folder, Apply), which works without JavaScript. Failed and
+dead have no tab: the Failures tab lists them by why. The state tabs
+count the whole library's documents, so they show counts only when state
+is the one filter, in either order. Under the row, each active filter is
+a chip whose link drops it alone, the others and the order kept, a
+state without a tab and a cause (which the Failures tab's links set)
+included, and Clear all when there are two or more; the button counts the
+filters its panel holds. The form carries the order, the state, the cause
+and the page size as hidden inputs: Apply keeps them.
+
+The time column's head is the order: Saved or Updated, newest first,
+linking to the other order; a phone, which folds that column away, shows
+the same link in the Document head. In the Recently saved order it shows each
+save's time as its saved date says (saved-column).
 */}}
 {{define "content" -}}
 {{template "library-head" .Head}}
-<form class="toolbar" action="{{navHref "library"}}" method="get">
+<div class="toolbar">
 <div class="segmented" role="group" aria-label="State">{{range .StateTabs}}<a href="{{.Href}}"{{if .Current}} aria-current="page"{{end}}>{{.Label}}{{if .Counted}} <span class="count">{{num .Count}}</span>{{end}}</a>{{end}}</div>
-<div class="grow"></div>
-<div class="filters">
+<details class="filter-menu">
+<summary class="btn">{{template "icon" "list-filter"}}Filters{{with .Filters.Menued}}<span class="filter-count"> · {{.}}</span>{{end}}</summary>
+<form class="filter-panel" action="{{navHref "library"}}" method="get">
 <label class="field"><span>Type</span><select class="select" name="content_type"><option value="">Any type</option>{{range contentTypes}}<option{{if eq . $.Filters.ContentType}} selected{{end}}>{{.}}</option>{{end}}</select></label>
 <label class="field"><span>Host</span><input class="input" name="host" value="{{.Filters.Host}}" placeholder="example.com"></label>
 <label class="field"><span>Folder</span><input class="input" name="folder" value="{{.Filters.Folder}}" placeholder="/Reading"></label>
-<label class="field field-order"><span>Order</span><select class="select" name="order"><option value="saved">Recently saved</option><option value="updated"{{if not .Filters.Saved}} selected{{end}}>Last updated</option></select></label>
+{{if not .Filters.Saved}}<input type="hidden" name="order" value="updated">{{end}}
 {{with .Filters.State}}<input type="hidden" name="state" value="{{.}}">{{end}}
 {{with .Filters.Cause}}<input type="hidden" name="cause" value="{{.}}">{{end}}
 {{with .Filters.Limit}}<input type="hidden" name="limit" value="{{.}}">{{end}}
-<button class="btn" type="submit">Apply</button>
-</div>
+<div class="filter-actions"><button class="btn btn-primary" type="submit">Apply</button></div>
 </form>
-{{with .Filters.Cause}}<p class="cause-line"><span class="muted">Why they failed:</span> <strong>{{causeLabel .}}</strong> <code>{{.}}</code> <a id="clear-cause" href="{{clearCauseHref $.Filters}}" aria-label="Clear the cause filter">Clear</a></p>
+</details>
+</div>
+{{with .Chips}}<div class="filter-chips" aria-label="Active filters" role="group">{{range .}}<a class="chip" href="{{.Href}}" title="Remove the filter: {{.Label}} {{.Value}}{{with .Code}} ({{.}}){{end}}" aria-label="Remove the filter: {{.Label}} {{.Value}}"><span class="chip-label"><span class="chip-name">{{.Label}}:</span> {{.Value}}</span>{{template "icon" "x"}}</a>{{end}}
+{{- with $.ClearAll}}<a class="clear-all" href="{{.}}">Clear all</a>{{end}}</div>
 {{end -}}
 {{if .Rows}}
 <div class="card table-card">
 <div class="table-scroll">
 <table class="data">
 <colgroup><col><col class="c-type"><col class="c-when{{if .Filters.Saved}} c-saved{{end}}"></colgroup>
-<thead><tr><th scope="col">Document</th><th scope="col" class="c-type">Type</th><th scope="col" class="c-when">{{if .Filters.Saved}}Saved{{else}}Updated{{end}}</th></tr></thead>
+<thead><tr><th scope="col">Document{{with .OrderSwitch}}<a class="sort sort-narrow" href="{{.Href}}" title="{{.Title}}" aria-label="{{.Label}}: {{.Title}}">· {{.Label}}<span aria-hidden="true"> ↓</span></a>{{end}}</th><th scope="col" class="c-type">Type</th><th scope="col" class="c-when" aria-sort="descending">{{with .OrderSwitch}}<a class="sort" href="{{.Href}}" title="{{.Title}}" aria-label="{{.Label}}: {{.Title}}">{{.Label}}<span aria-hidden="true"> ↓</span></a>{{end}}</th></tr></thead>
 <tbody id="rows">
 {{range .Rows}}<tr>
 <td>{{template "doc-cell" .Cell}}</td>
-<td class="c-type">{{with .ContentType}}<span class="tag">{{template "icon" (typeIcon .)}}{{.}}</span>{{end}}</td>
-<td class="c-when when">{{with .Saved}}{{template "saved-time" .}}{{else}}{{template "reltime" .When}}{{end}}</td>
+<td class="c-type">{{with .ContentType}}<span class="type">{{template "icon" (typeIcon .)}}{{.}}</span>{{end}}</td>
+<td class="c-when when">{{with .Saved}}{{template "saved-column" .}}{{else}}{{template "reltime" .When}}{{end}}</td>
 </tr>
 {{end}}</tbody>
 </table>

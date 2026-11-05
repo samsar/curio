@@ -42,6 +42,9 @@ type dashboard struct {
 	opts   UIOptions
 	render *ui.Renderer
 	listen string // the address the daemon listens on, which the pages name
+	// mapOff is config.yaml's insight.map: false, which the navigation
+	// follows (Deps.MapOff, set once the daemon is ready).
+	mapOff bool
 }
 
 // newDashboard builds the dashboard opts asks for, parsing its templates,
@@ -61,7 +64,7 @@ func (d dashboard) enabled() bool { return d.render != nil }
 
 // layout is the frame of a page titled title, under nav.
 func (d dashboard) layout(title string, nav ui.Nav) ui.Layout {
-	return ui.Layout{Title: title, Nav: nav, Version: version.String(), Listen: d.listen}
+	return ui.Layout{Title: title, Nav: nav, Version: version.String(), Listen: d.listen, MapOff: d.mapOff}
 }
 
 // redirectToDashboard answers / with the dashboard.

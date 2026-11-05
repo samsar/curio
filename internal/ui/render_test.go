@@ -171,7 +171,7 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 			Page:   2, RunChanged: true,
 			Run: &InterestRun{ID: evilAttr + evilScript, ComputedAt: at, Kind: evilScript, Shape: "areas",
 				Documents: 400, Areas: 30, Interests: 60, Loose: 1, Unsorted: 2, New: 3, NewUnsorted: 1, Total: 30,
-				Changes: RunChanges{Kept: 50, Split: 2, Merged: 1, Moved: 1, Dissolved: 1, Created: 4}, Recent: true},
+				Changes: RunChanges{Kept: 50, Split: 2, Merged: 1, Moved: 1, Dissolved: 1, Created: 4}},
 			Interests: []Interest{area, {ID: "unlabeled", Area: true, Size: 1, NumChildren: 1}},
 			Rebuild: Rebuild{Enabled: true, Running: true, StartedAt: at, Shown: evilAttr, Ready: true,
 				State: InterestsState{State: "held", HeldReason: evilScript}},
@@ -498,7 +498,7 @@ func interestsVariants(layout Layout, panelErr *PanelError, at time.Time) []any 
 		Unsorted: 2500, New: 12, NewUnsorted: 5, Interests: 1951, Total: 1951}
 	areas := &InterestRun{ID: evilAttr, ComputedAt: at, Kind: evilScript, Shape: "areas", Documents: 5254,
 		Unsorted: 402, Areas: 30, Interests: 187, Total: 30,
-		Changes: RunChanges{Kept: 180, Merged: 1, Created: 6}, Recent: true}
+		Changes: RunChanges{Kept: 180, Merged: 1, Created: 6}}
 	cards := func(n int) []Interest {
 		out := make([]Interest, 0, n)
 		for i := range n {
@@ -726,13 +726,14 @@ func partialSamples(t testing.TB) map[string][]any {
 		icons = append(icons, name)
 	}
 	return map[string][]any{
-		"understood":  understoodSamples(),
-		"panel-error": {&PanelError{Message: evilScript, RequestID: evilAttr}},
-		"icon":        icons,
-		"logo":        {nil},
-		"icons.html":  {nil},
-		"reltime":     {time.Time{}, at},
-		"saved-time":  append(anys(savedTimes(at)), SavedTime{}),
+		"understood":   understoodSamples(),
+		"panel-error":  {&PanelError{Message: evilScript, RequestID: evilAttr}},
+		"icon":         icons,
+		"logo":         {nil},
+		"icons.html":   {nil},
+		"reltime":      {time.Time{}, at},
+		"saved-time":   append(anys(savedTimes(at)), SavedTime{}),
+		"saved-column": append(anys(savedTimes(at)), SavedTime{}),
 		"doc-title": {DocRef{ID: evilAttr, Title: evilScript, URL: evilURL}, DocRef{ID: evilAttr, URL: evilURL},
 			DocRef{Title: evilScript, URL: evilURL}, DocRef{ID: evilAttr, Fallback: evilScript, URL: evilURL},
 			DocRef{Fallback: evilAttr + evilQuotes, URL: evilURL}},
@@ -745,7 +746,7 @@ func partialSamples(t testing.TB) map[string][]any {
 			DocCell{Ref: DocRef{URL: evilURL}}},
 		"library-head": {LibraryHead{Counts: &LibraryCounts{Documents: 3, Bookmarks: 4},
 			Views: LibraryViews{Failed: 2, Counted: true}}, LibraryHead{Views: LibraryViews{OnFailures: true}}},
-		"interests-subnav": {InterestsViews{}, InterestsViews{OnMap: true}},
+		"interests-views": {InterestsViews{}, InterestsViews{OnMap: true}},
 		"map-link": {"", mapHref(MapQuery{View: MapViewGroups, Select: MapSelection{Kind: MapSelectDocument,
 			ID: evilAttr + evilScript}})},
 		"library-subnav": {LibraryViews{},
@@ -753,8 +754,7 @@ func partialSamples(t testing.TB) map[string][]any {
 		"state-badge": {evilScript, "dead"},
 		"stackbar": {stateBar([]Count{{Name: "fetched", Count: 2}, {Name: "failed", Count: 1}}),
 			causeBar("dead_link", 819, 926), []BarSegment(nil),
-			[]BarSegment{{Class: evilAttr, X: evilScript, Width: evilQuotes}},
-			InterestRun{Documents: 5254, Loose: 5, Unsorted: 398, New: 60}.Bar(), childBar(45, 86), childBar(3, 0)},
+			[]BarSegment{{Class: evilAttr, X: evilScript, Width: evilQuotes}}},
 		"upstream-failure": {Upstream{Name: evilScript, LastFailure: at, LastFailureClass: evilScript}, Upstream{}},
 		"attention": {&HealthPanel{OllamaDetail: evilScript, Drift: &Drift{Fix: evilScript, Detail: evilAttr},
 			Upstreams: []Upstream{{Name: evilScript, Enabled: true, State: "failing"}}},
@@ -1051,19 +1051,24 @@ func TestPages_Layout(t *testing.T) {
 }
 
 // TestPages_Navigation: the navigation links to every page, in its order,
-// the current one marked, and to no page when none is current.
+// Interests to their map, the current one marked (Interests on every page
+// of theirs, the list's included), and to no page when none is current.
 func TestPages_Navigation(t *testing.T) {
 	r := newRenderer(t)
 	navRE := regexp.MustCompile(`<a href="([^"]+)"( aria-current="page")?><svg class="icon"`)
 	for page, data := range eachSample(t, r) {
 		var hrefs, current []string
-		for _, m := range navRE.FindAllStringSubmatch(render(t, r, page, data), -1) {
+		out := render(t, r, page, data)
+		start := strings.Index(out, `<nav aria-label="Main">`)
+		require.GreaterOrEqual(t, start, 0, page)
+		main := out[start : start+strings.Index(out[start:], "</nav>")]
+		for _, m := range navRE.FindAllStringSubmatch(main, -1) {
 			hrefs = append(hrefs, m[1])
 			if m[2] != "" {
 				current = append(current, m[1])
 			}
 		}
-		assert.Equal(t, []string{"/ui/", "/ui/library", "/ui/interests", "/ui/status"}, hrefs, page)
+		assert.Equal(t, []string{"/ui/", "/ui/library", "/ui/interests/map", "/ui/status"}, hrefs, page)
 		switch page {
 		case PageSearch:
 			assert.Equal(t, []string{"/ui/"}, current, page)
@@ -1072,7 +1077,7 @@ func TestPages_Navigation(t *testing.T) {
 		case PageLibrary, PageFailures, PageDocument:
 			assert.Equal(t, []string{"/ui/library"}, current, page)
 		case PageInterests, PageInterest, PageUnsorted, PageChanges, PageMap, PageRetired:
-			assert.Equal(t, []string{"/ui/interests"}, current, page)
+			assert.Equal(t, []string{"/ui/interests/map"}, current, page)
 		default:
 			assert.Empty(t, current, page)
 		}
