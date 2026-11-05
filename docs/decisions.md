@@ -16666,12 +16666,11 @@ muted line, which wraps beside Show scores where it doesn't fit, never
 cut. The keystroke, hx-sync,
 pager and search.js rules are unchanged, and so is the home's read count.
 
-Amended: the full width made the box a long bar. The box and the results
-now share one column, the golden section of the container (`--search-measure`,
-61.8%, about 45 rem at 1440 px), still at the container's left edge, so
-they keep lining up with the logo and the other pages; the box's end
-meets Show scores, and the interests line under the landing keeps the
-whole width. At 48 rem and under the column is the container.
+Amended: the full width made the box a long bar. The box is centred at
+80% of the container; the results keep its whole width. At 48 rem and
+under the box is the container. The home's "All N →" goes where the
+navigation's Interests goes (`interestsHref`): the map, or the list with
+the map off.
 
 **Library.** One row: the state tabs All, Fetched and Pending, then a
 **Filters** button at its end. Failed and Dead left the tabs: the

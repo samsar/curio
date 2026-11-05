@@ -804,7 +804,11 @@ func TestSearch_Results(t *testing.T) {
 		"a label cut at \" and \" only with two words before it")
 	assert.Contains(t, out, `<li><a href="/ui/interests/i3"><span class="unlabeled">Unlabeled interest</span></a></li>`)
 	assert.Equal(t, 6, strings.Count(out, `<li><a href="/ui/interests/`))
-	assert.Contains(t, out, `<a class="all" href="/ui/interests">All 222 →</a>`)
+	assert.Contains(t, out, `<a class="all" href="/ui/interests/map">All 222 →</a>`)
+	off := layout
+	off.MapOff = true
+	assert.Contains(t, render(t, r, PageSearch, Search{Layout: off, Home: &SearchHome{Interests: interests, AllInterests: 222}}),
+		`<a class="all" href="/ui/interests">All 222 →</a>`, "the list, with the map off")
 	assert.Less(t, strings.Index(out, "/ui/interests/i0"), strings.Index(out, "/ui/interests/i5"), "largest first")
 	assert.NotContains(t, render(t, r, PageSearch, Search{Layout: layout, Home: &SearchHome{}}), "Your interests")
 

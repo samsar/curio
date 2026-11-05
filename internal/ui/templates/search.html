@@ -97,7 +97,7 @@ text/template keeps a block's default over an empty define.
 {{with .Interests}}<nav class="explore-line" aria-label="Your interests"><span class="label">Your interests</span><ul>
 {{range $in := .}}<li>{{with $in.Label}}<a href="{{interestHref $in.ID}}" title="{{.}}">{{interestName .}}</a>{{else}}<a href="{{interestHref $in.ID}}"><span class="unlabeled">Unlabeled interest</span></a>{{end}}</li>
 {{end}}</ul>
-<a class="all" href="{{navHref "interests"}}">All {{num $.Home.AllInterests}} →</a>
+<a class="all" href="{{interestsHref $.Layout.MapOff}}">All {{num $.Home.AllInterests}} →</a>
 </nav>{{end}}
 </div>
 {{else}}<div class="results">
