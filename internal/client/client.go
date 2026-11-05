@@ -80,6 +80,9 @@ type Health struct {
 	// Understanding is what the daemon's planner knows of its model; nil
 	// from a daemon that predates saying so.
 	Understanding *UnderstandingHealth `json:"understanding,omitempty"`
+	// Reranking is what the daemon's reranker knows of its model; nil from
+	// a daemon that predates reranking.
+	Reranking *RerankingHealth `json:"reranking,omitempty"`
 	// Summaries is what the daemon's summaries writer knows of its model;
 	// nil from a daemon that predates summaries.
 	Summaries *SummariesHealth `json:"summaries,omitempty"`
@@ -128,6 +131,25 @@ type SummaryWriterFailure struct {
 // effect, and the last failure.
 type UnderstandingHealth struct {
 	On                bool                  `json:"on"`
+	Model             string                `json:"model,omitempty"`
+	Reason            string                `json:"reason,omitempty"`
+	Check             string                `json:"check,omitempty"`
+	CheckedAt         time.Time             `json:"checked_at,omitzero"`
+	Unfit             string                `json:"unfit,omitempty"`
+	LastStatus        string                `json:"last_status,omitempty"`
+	LastAt            time.Time             `json:"last_at,omitzero"`
+	TimeoutHoldUntil  time.Time             `json:"timeout_hold_until,omitzero"`
+	EvictionHoldUntil time.Time             `json:"eviction_hold_until,omitzero"`
+	LastFailure       *UnderstandingFailure `json:"last_failure,omitempty"`
+}
+
+// RerankingHealth mirrors api.RerankingHealth: whether search reranking
+// is on, its model, why no search is reranked at all, the fitness check's
+// verdict, the last rerank's status, the holds in effect, and the last
+// failure.
+type RerankingHealth struct {
+	On                bool                  `json:"on"`
+	OnByDefault       bool                  `json:"on_by_default,omitempty"`
 	Model             string                `json:"model,omitempty"`
 	Reason            string                `json:"reason,omitempty"`
 	Check             string                `json:"check,omitempty"`
@@ -590,13 +612,34 @@ func (c *Client) GetDocumentContent(ctx context.Context, id string) (string, err
 // Understand asks the daemon's planner what the query means, and Plan
 // searches by a plan a response's Understanding returned, asking no model;
 // send one or neither. Both are sent only when set: a daemon older than
-// understanding refuses either with its unknown-field 400.
+// understanding refuses either with its unknown-field 400. Rerank asks
+// the daemon's reranker to reorder the ranking's head, and RerankOrder
+// orders it by a response's Reranking.Order, asking no model; send one or
+// neither, each only when set, since a daemon older than reranking
+// refuses them the same way. The fields are sent in this order, so a
+// daemon refusing several names the first.
 type SearchRequest struct {
-	Query      string         `json:"query"`
-	K          int            `json:"k,omitempty"`
-	Filters    *SearchFilters `json:"filters,omitempty"`
-	Understand bool           `json:"understand,omitempty"`
-	Plan       *Plan          `json:"plan,omitempty"`
+	Query       string         `json:"query"`
+	K           int            `json:"k,omitempty"`
+	Filters     *SearchFilters `json:"filters,omitempty"`
+	Understand  bool           `json:"understand,omitempty"`
+	Plan        *Plan          `json:"plan,omitempty"`
+	Rerank      bool           `json:"rerank,omitempty"`
+	RerankOrder []string       `json:"rerank_order,omitempty"`
+}
+
+// Reranking mirrors api.Reranking: how the ranking's head was ordered.
+// Status is reranked or supplied with an Order, and otherwise why the
+// first ranking was kept, Reason saying more.
+type Reranking struct {
+	Status string   `json:"status"`
+	Reason string   `json:"reason,omitempty"`
+	Model  string   `json:"model,omitempty"`
+	Method string   `json:"method,omitempty"`
+	Depth  int      `json:"depth,omitempty"`
+	TookMS int64    `json:"took_ms"`
+	Order  []string `json:"order,omitempty"`
+	Stale  int      `json:"stale,omitempty"`
 }
 
 // Plan mirrors api.PlanJSON: what a search does for a query besides its
@@ -941,8 +984,10 @@ type SearchResponse struct {
 	// Undated is, for a search with a date filter, how many documents the
 	// filter couldn't judge; nil without one.
 	Undated *int `json:"undated,omitempty"`
-	// Understanding is set when the request sent Understand or Plan.
+	// Understanding is set when the request sent Understand or Plan, and
+	// Reranking when it sent Rerank or RerankOrder.
 	Understanding *Understanding `json:"understanding,omitempty"`
+	Reranking     *Reranking     `json:"reranking,omitempty"`
 	Items         []SearchHit    `json:"items"`
 }
 

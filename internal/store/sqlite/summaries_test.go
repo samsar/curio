@@ -539,3 +539,44 @@ func TestSummaries_SearchBlankAndWeighted(t *testing.T) {
 	assert.Empty(t, hits, "a blank query reads nothing")
 	assert.True(t, strings.Contains(summariesBM25, "0.5"), "every column is weighted: %s", summariesBM25)
 }
+
+// TestSummaries_CurrentSummaries: the batched read returns, by document,
+// the summaries that read their document's current extraction, whoever
+// wrote them; never one of an older extraction, one of kind not_the_page,
+// another tenant's, or an unknown document's. No IDs read nothing.
+func TestSummaries_CurrentSummaries(t *testing.T) {
+	e := newSummaryEnv(t)
+	current, ext := e.fetched("https://example.com/current", "Current")
+	require.NoError(t, e.sums.PutSummary(e.ctx, "local", summary(current, ext)))
+
+	outdated, ext := e.fetched("https://example.com/outdated", "Outdated")
+	byAnother := summary(outdated, ext)
+	byAnother.Model = "another:1b"
+	require.NoError(t, e.sums.PutSummary(e.ctx, "local", byAnother))
+	_, err := e.sums.OweSummaries(e.ctx, "local", store.SummaryScopeOutdated, writer)
+	require.NoError(t, err)
+
+	older, ext := e.fetched("https://example.com/older", "Older")
+	require.NoError(t, e.sums.PutSummary(e.ctx, "local", summary(older, ext)))
+	e.fetch(older, "Older, again", "", "")
+
+	wall, ext := e.fetched("https://example.com/wall", "Sign in")
+	notThePage := summary(wall, ext)
+	notThePage.Kind = store.SummaryKindNotThePage
+	require.NoError(t, e.sums.PutSummary(e.ctx, "local", notThePage))
+
+	none, _ := e.fetched("https://example.com/none", "None")
+
+	got, err := e.sums.CurrentSummaries(e.ctx, "local", []string{current, outdated, older, wall, none, "unknown"})
+	require.NoError(t, err)
+	want := summary(current, e.current(current))
+	assert.Equal(t, map[string]*store.Summary{current: &want, outdated: &byAnother}, got,
+		"current and outdated (owed included); never an older extraction's, not_the_page or none")
+
+	got, err = e.sums.CurrentSummaries(e.ctx, "other", []string{current})
+	require.NoError(t, err)
+	assert.Empty(t, got, "never another tenant's")
+	got, err = e.sums.CurrentSummaries(e.ctx, "local", nil)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]*store.Summary{}, got)
+}

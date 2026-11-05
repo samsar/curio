@@ -43,8 +43,9 @@ import (
 // embedding model doesn't answer, and ReembedBrake the re-embed's brake
 // while it stops the re-embed: each present only while it holds, and
 // neither changes Status. Understanding is what the planner knows of its
-// model, and Summaries what the summaries' writer knows of its, each from
-// memory alone; neither changes Status either.
+// model, Reranking what the reranker knows of its, and Summaries what the
+// summaries' writer knows of its, each from memory alone; none changes
+// Status either.
 type Health struct {
 	Status          string              `json:"status"`
 	PID             int                 `json:"pid"`
@@ -67,6 +68,7 @@ type Health struct {
 	EmbedderHold    *EmbedderHold       `json:"embedder_hold,omitempty"`
 	ReembedBrake    *ReembedBrake       `json:"reembed_brake,omitempty"`
 	Understanding   UnderstandingHealth `json:"understanding"`
+	Reranking       RerankingHealth     `json:"reranking"`
 	Summaries       SummariesHealth     `json:"summaries"`
 }
 
@@ -385,6 +387,7 @@ func (d Deps) health(ctx context.Context) (Health, error) {
 		EmbedderHold:    d.embedderHold(),
 		ReembedBrake:    d.reembedBrake(),
 		Understanding:   d.understanding(),
+		Reranking:       d.reranking(),
 		Summaries:       d.summaries(),
 	}, nil
 }

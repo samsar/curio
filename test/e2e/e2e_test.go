@@ -33,6 +33,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/samsar/curio/internal/cli"
 	"github.com/samsar/curio/internal/client"
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/curiohome"
@@ -94,6 +95,10 @@ type fakeOllama struct {
 	// summary answers a summary's prompt, the fitness check's pages
 	// included; nil plays an Ollama without the writing model for them.
 	summary func(prompt string) string
+	// reranks plays the reranker's model: listwise orders and first-token
+	// probabilities by how many of the question's words a page shares,
+	// which passes the reranker's fitness check.
+	reranks bool
 
 	mu                    sync.Mutex
 	digest, version, salt string
@@ -188,15 +193,24 @@ func (f *fakeOllama) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // prompt; one without a prompt loads the model.
 func (f *fakeOllama) generate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Prompt *string         `json:"prompt"`
-		Format json.RawMessage `json:"format"`
+		Prompt   *string         `json:"prompt"`
+		Format   json.RawMessage `json:"format"`
+		Logprobs bool            `json:"logprobs"`
 	}
-	if !assert.NoError(f.t, json.NewDecoder(r.Body).Decode(&req)) || (f.plan == nil && f.summary == nil) {
+	if !assert.NoError(f.t, json.NewDecoder(r.Body).Decode(&req)) || (f.plan == nil && f.summary == nil && !f.reranks) {
 		http.Error(w, `{"error":"model not found"}`, http.StatusNotFound)
 		return
 	}
 	if req.Prompt == nil {
 		fmt.Fprint(w, `{"response":"","done":true,"done_reason":"load"}`)
+		return
+	}
+	switch {
+	case f.reranks && req.Logprobs:
+		f.firstTokens(w, *req.Prompt)
+		return
+	case f.reranks && strings.Contains(string(req.Format), `"order"`):
+		f.order(w, *req.Prompt)
 		return
 	}
 	assert.NotEmpty(f.t, req.Format, "a plan or a summary is asked for under its schema")
@@ -214,6 +228,66 @@ func (f *fakeOllama) generate(w http.ResponseWriter, r *http.Request) {
 	reply, err := json.Marshal(answer)
 	assert.NoError(f.t, err)
 	fmt.Fprintf(w, `{"response":%s,"done":true,"done_reason":"stop"}`, reply)
+}
+
+// overlap is how many of question's words, by their first five letters,
+// text shares, the fitness check's pleas aside.
+func overlap(question, text string) int {
+	stems := func(s string) map[string]bool {
+		out := map[string]bool{}
+		for _, w := range strings.FieldsFunc(strings.ToLower(s), func(r rune) bool { return r < 'a' || r > 'z' }) {
+			if len(w) >= 3 {
+				out[w[:min(5, len(w))]] = true
+			}
+		}
+		return out
+	}
+	q, n := stems(question), 0
+	for w := range stems(text) {
+		if q[w] && w != "rank" && w != "answe" && w != "first" {
+			n++
+		}
+	}
+	return n
+}
+
+// order answers a listwise rerank: the candidates' numbers by their
+// overlap with the question, ties in their order.
+func (f *fakeOllama) order(w http.ResponseWriter, prompt string) {
+	_, rest, _ := strings.Cut(prompt, "\nQuestion: ")
+	question, list, _ := strings.Cut(rest, "\n\nCandidates:\n")
+	type scored struct{ n, overlap int }
+	var all []scored
+	for line := range strings.SplitSeq(strings.TrimSpace(list), "\n") {
+		var c map[string]any
+		if !assert.NoError(f.t, json.Unmarshal([]byte(line), &c)) {
+			http.Error(w, `{"error":"bad candidate"}`, http.StatusBadRequest)
+			return
+		}
+		all = append(all, scored{int(c["n"].(float64)), overlap(question, fmt.Sprint(c["title"], " ", c["about"],
+			" ", c["passage"]))})
+	}
+	slices.SortStableFunc(all, func(a, b scored) int { return b.overlap - a.overlap })
+	order := make([]int, len(all))
+	for i, s := range all {
+		order[i] = s.n
+	}
+	reply, err := json.Marshal(map[string][]int{"order": order})
+	assert.NoError(f.t, err)
+	quoted, err := json.Marshal(string(reply))
+	assert.NoError(f.t, err)
+	fmt.Fprintf(w, `{"response":%s,"done":true,"done_reason":"stop"}`, quoted)
+}
+
+// firstTokens answers a pointwise rerank: yes and no, likelier yes the
+// more of the question's words the page shares.
+func (*fakeOllama) firstTokens(w http.ResponseWriter, prompt string) {
+	_, rest, _ := strings.Cut(prompt, "\nQuestion: ")
+	question, page, _ := strings.Cut(rest, "\n\nPage:\n")
+	p := 1 / (1 + math.Exp(2-3*float64(overlap(question, page))))
+	fmt.Fprintf(w, `{"response":"yes","done":true,"done_reason":"length","logprobs":[{"token":"yes",`+
+		`"logprob":%g,"top_logprobs":[{"token":"yes","logprob":%g},{"token":"no","logprob":%g}]}]}`,
+		math.Log(p), math.Log(p), math.Log(1-p))
 }
 
 // embedRequest reads an /api/embed request as the daemon must send it:
@@ -500,6 +574,77 @@ func TestDaemon_UnderstandsAQuestion(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "supplied", page.Understanding.Status)
 	assert.Equal(t, asked, plans.Load(), "a supplied plan asks the model nothing")
+}
+
+// TestDaemon_ReranksASearch: curio search, understanding its question,
+// has its head reranked once the reranker's model is checked, and says so;
+// --no-rerank understands without reranking, and a page sent back with
+// the order asks the model nothing.
+func TestDaemon_ReranksASearch(t *testing.T) {
+	ctx := context.Background()
+	ollama, ollamaURL := serveOllama(t, digestA, "0.34.4")
+	ollama.plan = func(question string) string {
+		if a, ok := fitAnswers[question]; ok {
+			return a
+		}
+		return `{"kind":"list","names":[],"rewrites":[],"filters":{}}`
+	}
+	ollama.reranks = true
+	pages := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, strings.ReplaceAll(articleHTML(), "Zymurgy", "Zymurgy "+strings.Trim(r.URL.Path, "/")))
+	}))
+	t.Cleanup(pages.Close)
+	listen := freeLoopbackAddr(t)
+	home := newHome(t, listen, ollamaURL)
+	cfg, err := os.ReadFile(home.ConfigPath())
+	require.NoError(t, err)
+	reranked := strings.Replace(string(cfg), "search:\n  understand: false\n", "search:\n  rerank: true\n", 1)
+	reranked = strings.Replace(reranked, "generation:\n", "generation:\n  base_url: "+strconv.Quote(ollamaURL)+"\n", 1)
+	require.NoError(t, os.WriteFile(home.ConfigPath(), []byte(reranked), 0o600))
+	baseURL := "http://" + listen
+	ctl := daemonctl.New(home, daemonBin, baseURL)
+	t.Cleanup(func() {
+		if st, err := ctl.Status(context.Background()); err == nil && st.State == daemonctl.Running && st.PID > 0 {
+			_ = syscall.Kill(st.PID, syscall.SIGKILL)
+		}
+	})
+	require.NoError(t, ctl.EnsureRunning(ctx), logTail(home))
+	c := client.New(baseURL)
+	health, err := c.Healthz(ctx)
+	require.NoError(t, err)
+	assert.Contains(t, health.GenerationRoles, "reranker")
+
+	for _, path := range []string{"/brewing", "/cellars"} {
+		created, err := c.CreateBookmark(ctx, client.CreateBookmarkRequest{URL: pages.URL + path})
+		require.NoError(t, err)
+		require.Eventually(t, func() bool {
+			d, err := c.GetDocument(ctx, *created.Bookmark.DocumentID)
+			return err == nil && d.State == string(store.DocStateFetched)
+		}, 30*time.Second, 50*time.Millisecond, logTail(home))
+	}
+
+	const question = "notes on zymurgy and fermentation"
+	var res *client.SearchResponse
+	require.Eventually(t, func() bool {
+		res, err = c.Search(ctx, client.SearchRequest{Query: question, Understand: true, Rerank: true})
+		return err == nil && res.Reranking != nil && res.Reranking.Status == "reranked"
+	}, 30*time.Second, 100*time.Millisecond, logTail(home))
+	assert.Equal(t, "listwise", res.Reranking.Method, "a list's kind")
+	require.Len(t, res.Reranking.Order, 2)
+	page, err := c.Search(ctx, client.SearchRequest{Query: question, RerankOrder: res.Reranking.Order})
+	require.NoError(t, err)
+	assert.Equal(t, "supplied", page.Reranking.Status)
+
+	t.Setenv("CURIO_HOME", home.Path)
+	t.Setenv("CURIO_DAEMON_BIN", daemonBin)
+	var out, stderr strings.Builder
+	require.Zero(t, cli.Run(ctx, []string{"search", question}, &out, &stderr), stderr.String())
+	assert.Contains(t, out.String(), "reranked ("+config.Default().Generation.Model+", listwise, top 2, ")
+	out.Reset()
+	require.Zero(t, cli.Run(ctx, []string{"search", "--no-rerank", question}, &out, &stderr), stderr.String())
+	assert.Contains(t, out.String(), "understood")
+	assert.NotContains(t, out.String(), "reranked")
 }
 
 // getDashboard gets path from the daemon at baseURL, which must answer

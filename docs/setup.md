@@ -278,11 +278,14 @@ A model that can't turn thinking off answers the request with an error,
 and its interests get term labels; pick another.
 
 Each use of a writing model is a *role*, and `generation.roles` gives a
-role a model of its own. There are two roles: `labels`, the interest and
+role a model of its own. There are four roles: `labels`, the interest and
 area labels, in use while `insight.enabled` is true and `insight.labeling`
-is `llm`; and `planner`, which understands a search question, in use while
-`search.understand` is true (the default). A role is in use only while its
-feature is on; with neither, no writing model is built, pulled or
+is `llm`; `planner`, which understands a search question, in use while
+`search.understand` is true (the default); `summaries`, each page's
+summary, in use while `summaries.enabled` is true (see Document
+summaries); and `reranker`, which reorders a search's first results, in
+use while search reranking is on (see Search). A role is in use only while
+its feature is on; with none, no writing model is built, pulled or
 checked. Understanding is on whatever insight says. With
 `generation.auto_pull` the daemon pulls the labels' model, and the
 planner's only when it is the same one on the same server: a home with
@@ -325,7 +328,7 @@ here. Its keys, under `search`:
 |---|---|---|
 | `search.understand` | true | understand questions with the planner role; false turns it off |
 | `search.understand_timeout_seconds` | 5 | one plan, 1 to 23; a slower one searches the words |
-| `search.understand_keep_alive_minutes` | 30 | how long the planner's model stays loaded after a plan, 1 to 1440 |
+| `search.understand_keep_alive_minutes` | 30 | how long search's models, the planner's and the reranker's, stay loaded after a plan or a rerank, 1 to 1440 |
 | `search.rewrite_weight` | 0.5 | a plan's other wordings, as a share of each list's weight; 0 leaves them out |
 | `search.name_weight` | 1 | the things a plan names, searched in what documents were saved as (titles, folders, sites, cards); 0 leaves them out |
 
@@ -940,6 +943,93 @@ start; but its drift check re-embeds passages without their context, so
 after an Ollama upgrade it may report a drift, which `curio reindex
 --all` clears.
 
+### Reranking
+
+A search can have its first results reordered by the reranker role's
+model, which reads each of them: its title, what you saved it as, its
+site and author, its summary when one is written, and the passage search
+ranked best for it. `curio search` asks for it whenever it understands the
+question (`--no-rerank` understands without reranking, `--literal` does
+neither), and says on the line after the understood one how the results
+were ordered: `reranked (<model>, <method>, top <N>, <s> s)`, or why they
+kept their first order. The dashboard doesn't rerank yet, and MCP's
+`search_bookmarks` never does: its caller ranks what it reads.
+
+What the reranker is asked depends on the question's kind, as the planner
+read it: a topic, a question to answer or a pattern across pages is
+reranked; one page you remember, a question already in search words, and
+a search without a plan keep their first order (reranking the first cost
+every search's median latency, and the last lost bookmarks searched by
+their titles). A *listwise* call asks once for the
+candidates' numbers in order, under a schema that allows only those
+numbers; a *pointwise* call asks once a candidate whether it is the page
+wanted, and scores it by how likely the model's first word is yes against
+no. A Qwen3-Reranker build (a model whose name starts with
+`qwen3-reranker`) is asked pointwise alone, in its own template. Before
+its first rerank the model must pass a short check on made-up pages (a
+page remembered by description found, two relevant pages kept above one
+whose text asks to be ranked first, yes and no told apart); a model that
+fails it is never asked again until the daemon restarts, and is unloaded
+unless another role in use writes with it (by default every role writes
+with `generation.model`, so it stays loaded for the others).
+Every way a rerank fails (the model loading, being checked, unfit, too
+slow, unreachable, or answering what can't be used) keeps the first
+ranking whole, saying why. A rerank keeps the model loaded for
+`search.understand_keep_alive_minutes`, search's keep-alive, which the
+planner's model keeps too. Only one rerank asks the model at a time.
+
+| Key | Default | |
+|---|---|---|
+| `search.rerank` | left out | true reranks with any model (its check guards it); false never reranks; left out, reranks only with a model measured as the reranker: gemma4:26b while summaries are written and questions understood (see below) |
+| `search.rerank_depth` | 30 | how many of the first results are read and reordered, 2 to 30 |
+| `search.rerank_timeout_seconds` | 7 | one rerank, 1 to 23; a slower one keeps the first ranking |
+
+What a rerank sends the model is the question and those candidates' title,
+saved titles, site, author, summary and passage: your own words and your
+own pages. So, as with the planner, while `generation.base_url` is off
+this machine (or `generation.provider` isn't Ollama), nothing is sent
+until `generation.roles.reranker` names that base URL (or provider)
+itself, and `curio up` offers no model for it. Each field is cleaned
+before it is sent (no control characters, `<` and `>` written as `‹` and
+`›`, so no page can write the model's own template tokens), and the
+whole prompt is cut to fit the model's context, since Ollama truncates a
+longer one without a word.
+
+The plan's timeout and its loaded check, the query's embed, the rerank
+and the reranker's loaded check stay under 25 s, so `curio search`
+answers within its 30 s: with the defaults, 5 + 1 + 10 + 7 + 1 = 24.
+Past that the rerank gets what is left (the daemon's log says so at
+start), and with less than a second none is reranked, `curio doctor`
+saying why.
+
+**Which model.** Reranking left out is on only for a model measured as
+the reranker on a real library against the rule in docs/decisions.md
+("Choosing the reranker"), while search understanding is on, and one
+model is: gemma4:26b, `curio up`'s pick for 64 GB, which raised the owner's
+all-queries nDCG@10 from 0.762 to 0.796 reranking the topical kinds, with
+the summaries. Without them it fell under the bar, so with gemma4:26b
+reranking is on by default while summaries are written
+(`summaries.enabled: true`) and off otherwise; `curio doctor` and `curio
+up` say which, and how to turn it on. (As the rule was written before the
+grid, no model passed: planning alone keeps the known items' R@10 below
+1.000. The owner amended that bar to what planning keeps, as the S@1 bar
+already was.) With gemma4:26b on a 64 GB M4 Max an understood search
+answers in about 1.2 s at the median and 4.2 s at the 95th percentile, a
+reranked one's rerank taking up to about 3 s. `search.rerank: true`
+reranks with any model, its fitness check guarding it, and `false` never.
+Below 64 GB, where `curio up` picks a smaller writing model, no tier's
+model was measured as the reranker. A model of the reranker's own
+(`generation.roles.reranker.model`) is offered by `curio up`, with
+consent, when no other role writes with it.
+
+**Upgrading from 2.7.** Nothing changes until reranking is on: summaries
+are off by default, and reranking with them; a 2.7 `config.yaml` is taken
+as it is. A home on gemma4:26b that turns summaries on gets reranking
+too, `search.rerank: false` keeping it off. Going back to a 2.7, remove `search.rerank`,
+`search.rerank_depth`, `search.rerank_timeout_seconds` and
+`generation.roles.reranker` from `config.yaml` first: an older curio
+refuses keys and roles it doesn't know.
+
 ## Document summaries
 
 The daemon can ask the writing model for each page's summary, one page at
@@ -1055,6 +1145,7 @@ model not answering" under Troubleshooting).
 | `embedding.timeout_seconds` | 60 | one embed request (the indexer sends at most 8 chunks per request), including the time it waits behind other requests inside Ollama |
 | `search.embed_timeout_seconds` | 10 | embedding a search query; past it, search returns keyword-only results marked `degraded`. Keep it well under 30: the CLI and MCP give up on a request after 30 s, so a hung Ollama would surface as a client timeout instead |
 | `search.understand_timeout_seconds` | 5 | one plan of a search question, at most 23; past it, the search searches the question's words. It plus `search.embed_timeout_seconds` plus 1 stays under 25, for the same reason: past that the planner gets what the embed timeout leaves, and none below a second |
+| `search.rerank_timeout_seconds` | 7 | one rerank of a search's first results, at most 23; past it, they keep their first order. With the plan's timeout and its second, the embed's and a second for the reranker's loaded check it stays under 25 (5 + 1 + 10 + 7 + 1 = 24 by default): past that the rerank gets what is left, and none below a second |
 | `generation.timeout_seconds` | 120 | one LLM request; timeouts aren't retried. A role's `generation.roles.<role>.timeout_seconds` replaces it for that role |
 | `insight.labeling_timeout_seconds` | 900 | all LLM labeling in one rebuild of the interests; the rest get term labels |
 
@@ -1173,6 +1264,24 @@ the planner role doesn't name (above). The daemon reports the same on
 the model; `curio status` prints one line while it lasts. A search
 saying `<model> isn't pulled — run curio up` needs the model pulled:
 `curio up` offers it.
+
+**`reranking` warning in `curio doctor`** — search reranking is on, but
+searches keep their first ranking: the doctor line says why and the fix.
+The reranker's model failed its check (set
+`generation.roles.reranker.model` to one that passes, or `search.rerank:
+false`); reranks kept taking longer than `search.rerank_timeout_seconds`
+(a faster model, more time, or a smaller `search.rerank_depth`); Ollama
+kept unloading the model for others within its keep-alive (a smaller
+model, or turn reranking off); the check keeps failing to reach the model
+(Ollama's log says why); or questions and pages would leave this machine
+for a server the reranker role doesn't name (above); or no question is
+understood, which reranking needs (search understanding off, or the
+planner's own trouble: the `understanding` check says). `off by default
+for <model>` is no warning: that model isn't measured as the reranker,
+and `search.rerank: true` turns it on, or it was measured with the
+summaries, and `summaries.enabled: true` turns both on. The daemon reports the same on
+`/v1/healthz` (`reranking`), from what it has seen, without asking the
+model; `curio status` prints one line while no search can be reranked.
 
 **`curio home from an older curio`** — the home was made by a curio from
 before home formats: its vectors came from another embedding model, under

@@ -47,7 +47,11 @@ asks the daemon to understand the question (POST /v1/search's
 `understand`): its caller is already a language model, which writes the
 filters and other wordings itself, as the tool's descriptions guide it to.
 A second, local model would add its guesses to the caller's and seconds to
-a call, ten or so while it loads, of the 30 s a tool call has.
+a call, ten or so while it loads, of the 30 s a tool call has. For the
+same reasons it never asks the daemon to rerank the results, nor sends a
+reranked order back (`rerank`, `rerank_order`): the caller reads the
+results and ranks them itself, and a rerank would spend up to its 7 s of
+the call's budget on an order the caller then makes its own.
 
 ## Register with Claude Code
 

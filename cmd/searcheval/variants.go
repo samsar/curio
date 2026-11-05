@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -19,12 +20,15 @@ import (
 // configuration for it, from config.yaml's; its weights also say which
 // lists it ranks with, and so which documents it can return (reach). A
 // planned variant searches each query by its plan, the part of it mask
-// keeps, in place of the query file's filters; nil for the others.
+// keeps, in place of the query file's filters; nil for the others. A
+// reranked variant reranks its ranking's head as the daemon does a search
+// that asks.
 type variant struct {
 	name        string
 	description string
 	config      func(config.Config) search.Config
 	mask        func(understand.Plan) understand.Plan
+	reranked    bool
 }
 
 // env is what a variant builds its ranker from: the copy's stores, the
@@ -37,6 +41,7 @@ type env struct {
 	embedder search.Embedder
 	cfg      config.Config
 	plans    []queryPlan
+	rerank   *rerankRun
 	log      *slog.Logger
 }
 
@@ -49,11 +54,19 @@ type ranker interface {
 // ranking is a query's documents, best first, and how long each stage of
 // ranking them took, in the order the stages ran. A planned ranking also
 // has the query's plan, made before it, and the filters of it it applied.
+// hits are the engine's, its head's candidates for a reranked variant,
+// which also has its base ranking's documents, how its head was reranked,
+// and adjust: the time its total counts besides its calls' (a replayed
+// rerank's recorded time, less what replaying took).
 type ranking struct {
 	docs    []rankedDoc
 	stages  []stage
 	plan    *queryPlan
 	applied search.FilterRequest
+	hits    []search.Hit
+	base    []rankedDoc
+	rerank  *rerankQuery
+	adjust  time.Duration
 }
 
 // rankedDoc is a ranked document.
@@ -145,6 +158,21 @@ var variants = []variant{
 		config:      search.ConfigFrom,
 		mask:        func(p understand.Plan) understand.Plan { return understand.Plan{Kind: p.Kind, Names: p.Names} },
 	},
+	{
+		name: "hybrid-reranked",
+		description: "the daemon's search reranked as a search without a plan: its head read and reordered by " +
+			"config.yaml's reranker",
+		config:   search.ConfigFrom,
+		reranked: true,
+	},
+	{
+		name: "planned-reranked",
+		description: "the daemon's understood search reranked: its head read and reordered by config.yaml's " +
+			"reranker, routed by each plan's kind",
+		config:   search.ConfigFrom,
+		mask:     func(p understand.Plan) understand.Plan { return p },
+		reranked: true,
+	},
 }
 
 // only is the production configuration with the five lists weighted bm25,
@@ -160,11 +188,20 @@ func only(bm25, vector, fields, cards, titles float64) func(config.Config) searc
 
 // build is v's ranker over e.
 func (v variant) build(e env) ranker {
-	r := newEngineRanker(e, v.config(e.cfg))
+	engine := newEngineRanker(e, v.config(e.cfg))
+	var r ranker = engine
 	if v.planned() {
-		return plannedRanker{engine: r, plans: e.plans, mask: v.mask}
+		r = plannedRanker{engine: engine, plans: e.plans, mask: v.mask}
+	}
+	if v.reranked {
+		r = rerankedRanker{base: r, run: e.rerank}
 	}
 	return r
+}
+
+// anyReranked reports whether any of vs reranks.
+func anyReranked(vs []variant) bool {
+	return slices.ContainsFunc(vs, func(v variant) bool { return v.reranked })
 }
 
 // reach is which documents v's lists can return.
@@ -235,6 +272,7 @@ func (r engineRanker) search(ctx context.Context, req search.Request) (ranking, 
 	for i, hit := range res.Items {
 		out.docs[i] = rankedDoc{id: hit.Document.ID, url: hit.Document.URL}
 	}
+	out.hits = res.Items
 	return out, nil
 }
 

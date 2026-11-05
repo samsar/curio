@@ -22,8 +22,8 @@ import (
 // head (measured on Ollama 0.40.14), so the page is cut to guarantee fit:
 // the instructions, the page's fields, its text and maxAnswerTokens of
 // answer stay ctxMargin under numCtx, every byte counted at the densest
-// rate measured (decisions.md "Summaries: one structured call per
-// document, stored for the reranker").
+// rate measured (textutil.TokenQuarters; decisions.md "Summaries: one
+// structured call per document, stored for the reranker").
 const (
 	// numCtx is the context size every writing model's generator asks for
 	// (generator.NewOllama's default).
@@ -50,18 +50,6 @@ const (
 	maxTitleBytes = 300
 	maxURLBytes   = 300
 	maxSiteBytes  = 200
-)
-
-// The densest rates measured, in quarter-tokens a byte (on Ollama 0.40.14,
-// from prompt_eval_count over synthetic text and the owner's sample): a
-// token covers at least one byte of any text (a run of digits, Korean
-// syllables: one byte a token), and at least 1.34 bytes of a run of ASCII
-// letters (random base64, the densest letter-heavy text). Counting each
-// byte at its rate over-counts prose, at about 6 bytes a token, five
-// times over, and never under-counts a page.
-const (
-	letterQuarters = 3
-	byteQuarters   = 4
 )
 
 // Input is exactly what a page's summary is written from, as the prompt
@@ -127,22 +115,8 @@ func field(s string, limit int) string {
 // leaves once the instructions, in's fields at the densest rates, the
 // answer and the margin are counted.
 func pageTokens(in Input) int {
-	fields := (estimateQuarters(in.Title+in.URL+in.Site+in.ContentType) + 3) / 4
+	fields := (textutil.TokenQuarters(in.Title+in.URL+in.Site+in.ContentType) + 3) / 4
 	return numCtx - ctxMargin - instructionTokens - maxAnswerTokens - fields
-}
-
-// estimateQuarters is how many quarter-tokens s costs at most, at the
-// densest rates measured.
-func estimateQuarters(s string) int {
-	n := 0
-	for i := range len(s) {
-		if c := s[i]; ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') {
-			n += letterQuarters
-		} else {
-			n += byteQuarters
-		}
-	}
-	return n
 }
 
 // The markdown a page's text drops: images (spans), data URLs, autolinks
@@ -396,7 +370,7 @@ func nextDelimState(state uint8, c byte) uint8 {
 // paragraph with no break) still sends most of what the limits allow.
 func cut(text string, tokens int) string {
 	budget := 4 * max(tokens, 0)
-	if len(text) <= maxPageBytes && estimateQuarters(text) <= budget {
+	if len(text) <= maxPageBytes && textutil.TokenQuarters(text) <= budget {
 		return text
 	}
 	end, quarters := 0, 0
@@ -407,7 +381,7 @@ func cut(text string, tokens int) string {
 		} else {
 			next++
 		}
-		cost := estimateQuarters(text[end : end+next])
+		cost := textutil.TokenQuarters(text[end : end+next])
 		if end+next > maxPageBytes || quarters+cost > budget {
 			break
 		}
@@ -418,7 +392,7 @@ func cut(text string, tokens int) string {
 	}
 	for end < len(text) {
 		_, size := utf8.DecodeRuneInString(text[end:])
-		cost := estimateQuarters(text[end : end+size])
+		cost := textutil.TokenQuarters(text[end : end+size])
 		if end+size > maxPageBytes || quarters+cost > budget {
 			break
 		}

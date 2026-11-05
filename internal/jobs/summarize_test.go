@@ -705,7 +705,8 @@ func (e *summaryEnv) pendingAttempts() int {
 }
 
 // TestSummarizeJob_NoMarkdown: a page whose markdown is gone fails for
-// good.
+// good, and its failure says the markdown is missing in words that fit a
+// summary: nothing was to be indexed.
 func TestSummarizeJob_NoMarkdown(t *testing.T) {
 	e := newSummaryEnv(t, true)
 	doc := e.page("https://example.com/a", "text")
@@ -713,6 +714,8 @@ func TestSummarizeJob_NoMarkdown(t *testing.T) {
 	err := e.run(e.job(doc))
 	require.ErrorIs(t, err, ErrPermanent)
 	require.ErrorIs(t, err, ErrNoMarkdown)
+	assert.Contains(t, err.Error(), "no markdown to read")
+	assert.NotContains(t, strings.ReplaceAll(err.Error(), e.deps.ContentDir, ""), "index")
 }
 
 // TestSummarizeJob_Unfit: a model found unfit by the job's own check

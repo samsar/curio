@@ -1,0 +1,19 @@
+<|im_start|>system
+Judge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be "yes" or "no".<|im_end|>
+<|im_start|>user
+<Instruct>: Given a search question over a person's saved web pages, judge whether the page is one they want
+<Query>: how do I stop a consumer group from rebalancing
+<Document>: title: Tuning consumer group rebalances
+saved as: kafka rebalance notes
+site: Streamwise Notes
+author: Ada Example
+kind: article
+about: How timeouts cause rebalances.
+passage: A consumer that misses its heartbeat is removed from the group.
+descriptions: the rebalance tuning post
+names: Kafka<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+

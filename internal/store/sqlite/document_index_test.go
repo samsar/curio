@@ -495,3 +495,31 @@ func TestDocumentIndex_Site(t *testing.T) {
 	_, err = ix.Site(e.ctx, "local", "no-such-document")
 	require.ErrorIs(t, err, store.ErrNotFound)
 }
+
+// TestDocumentIndex_FieldsOf: the batched read returns, by document, the
+// fields its rows hold, never another tenant's or an unknown document's.
+// No IDs read nothing.
+func TestDocumentIndex_FieldsOf(t *testing.T) {
+	e := newFieldsEnv(t)
+	ix := NewDocumentIndex(e.db, vecDim)
+	a := *e.ingest("https://example.com/a", store.SourceChrome, "Saved as A", "/Bookmarks Bar/Reading/Queues").
+		DocumentID
+	e.fetch(a, "Queues under load", "Bo Example", "Example Times")
+	_, err := e.bms.Ingest(e.ctx, e.bookmark("https://example.com/a", store.SourceSafari, "Saved again", ""))
+	require.NoError(t, err)
+	b := *e.ingest("https://example.org/b", store.SourceChrome, "Only saved", "").DocumentID
+	other := &store.Document{TenantID: "other", URL: "https://example.net/c", Title: store.NullableString("Theirs")}
+	require.NoError(t, e.docs.Create(e.ctx, other))
+
+	got, err := ix.FieldsOf(e.ctx, "local", []string{a, b, other.ID, "unknown"})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]store.DocumentFields{
+		a: {Title: "Queues under load", BookmarkTitles: "Saved as A\nSaved again", Folders: "Reading / Queues",
+			SiteName: "Example Times", Host: "example.com", Author: "Bo Example"},
+		b: {BookmarkTitles: "Only saved", Host: "example.org"},
+	}, got)
+
+	got, err = ix.FieldsOf(e.ctx, "local", nil)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]store.DocumentFields{}, got)
+}

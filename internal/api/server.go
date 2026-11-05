@@ -58,7 +58,8 @@ type Deps struct {
 	GenerationModel string            // config.yaml's generation.model as the daemon loaded it, on healthz
 	GenerationRoles map[string]string // each role in use and the model it writes with, on healthz; nil reports none
 	Search          *search.Engine
-	Planner         Planner // understands a question for a search that asks; nil while search.understand is off
+	Planner         Planner  // understands a question for a search that asks; nil while search.understand is off
+	Reranker        Reranker // reorders a search's head when it asks; nil reports reranking off
 	Insights        store.InsightStore
 	InsightEnabled  bool                            // config insight.enabled: gates POST /v1/interests/rebuild, and "off" in the interests' state
 	MapOff          bool                            // config insight.map: false: GET /v1/interests/map answers 404 map_off

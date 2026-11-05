@@ -36,6 +36,7 @@ import (
 	"github.com/samsar/curio/internal/indexer"
 	"github.com/samsar/curio/internal/insight"
 	"github.com/samsar/curio/internal/jobs"
+	"github.com/samsar/curio/internal/rerank"
 	"github.com/samsar/curio/internal/store"
 	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
 	"github.com/samsar/curio/internal/store/sqlite/sqlitetest"
@@ -1153,6 +1154,26 @@ func TestPullTargets(t *testing.T) {
 			c.Generation.Model = "qwen3-embedding:0.6b"
 		}, []pullTarget{{baseURL: local, model: "qwen3-embedding:0.6b",
 			usedFor: "embeddings, interest labels, search understanding, document summaries", timeout: time.Minute}}},
+		{"the reranker on generation.model: it joins the labels' pull", func(c *config.Config) {
+			c.Search.Rerank = new(true)
+		}, []pullTarget{embeddings, {baseURL: local, model: "qwen3:4b-instruct",
+			usedFor: "interest labels, search understanding, document summaries, search reranking",
+			timeout: 2 * time.Minute}}},
+		{"the reranker on its own model: never pulled alone", func(c *config.Config) {
+			c.Search.Rerank = new(true)
+			c.Generation.Roles = map[config.Role]config.ModelSpec{config.RoleReranker: {Model: "example/reranker:q8"}}
+		}, []pullTarget{embeddings, writing}},
+		{"the reranker on its own server: nothing of its own", func(c *config.Config) {
+			c.Search.Rerank = new(true)
+			c.Generation.Roles = map[config.Role]config.ModelSpec{config.RoleReranker: {BaseURL: "http://127.0.0.1:11500"}}
+		}, []pullTarget{embeddings, writing}},
+		{"the reranker withheld, generation on another machine: it rides that pull, sending nothing", func(
+			c *config.Config) {
+			c.Search.Rerank = new(true)
+			c.Generation.BaseURL = "http://gpu-box.lan:11434"
+		}, []pullTarget{embeddings, {baseURL: "http://gpu-box.lan:11434", model: "qwen3:4b-instruct",
+			usedFor: "interest labels, search understanding, document summaries, search reranking",
+			timeout: 2 * time.Minute}}},
 		{"the labels role on its own server", func(c *config.Config) {
 			c.Generation.Roles = map[config.Role]config.ModelSpec{config.RoleLabels: {BaseURL: "http://127.0.0.1:11500/"}}
 		}, []pullTarget{embeddings, {baseURL: "http://127.0.0.1:11500", model: "qwen3:4b-instruct",
@@ -1190,6 +1211,70 @@ func TestGenerationRoles(t *testing.T) {
 	assert.Equal(t, map[string]string{"summaries": "gemma4:26b-a4b-it-qat"}, generationRoles(cfg))
 	cfg.Summaries.Enabled = new(false)
 	assert.Equal(t, map[string]string{}, generationRoles(cfg))
+	cfg.Search.Rerank = new(true)
+	cfg.Generation.Roles[config.RoleReranker] = config.ModelSpec{Model: "example/reranker:q8"}
+	assert.Equal(t, map[string]string{"reranker": "example/reranker:q8"}, generationRoles(cfg),
+		"the reranker while it is on")
+	cfg.Generation.BaseURL = "http://gpu-box.lan:11434"
+	require.NotEmpty(t, rerank.OptionsFrom(cfg).Withheld)
+	assert.Equal(t, map[string]string{"reranker": "example/reranker:q8"}, generationRoles(cfg),
+		"in use while withheld, as the planner is: healthz names the model it would write with")
+}
+
+// TestNewReranker: the reranker is built whatever its role: off with its
+// reason while the role isn't in use, and on, writing with the role's
+// model at its own server, its background work stopping with stop: a
+// warm-up in flight is abandoned, and Wait returns.
+func TestNewReranker(t *testing.T) {
+	off, err := newReranker(context.Background(), config.Default(), nil)
+	require.NoError(t, err)
+	_, out := off.Decide("kafka", understand.KindOne, true)
+	assert.Equal(t, rerank.StatusOff, out.Status)
+	assert.Contains(t, out.Reason, "off by default for qwen3:4b-instruct")
+	off.stop()
+	off.Wait()
+
+	loading := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/ps":
+			fmt.Fprint(w, `{"models":[]}`)
+		case "/api/tags":
+			fmt.Fprint(w, `{"models":[{"name":"gemma4:26b"}]}`)
+		case "/api/generate":
+			var req struct {
+				Model string `json:"model"`
+			}
+			assert.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			loading <- req.Model
+			<-r.Context().Done()
+		}
+	}))
+	t.Cleanup(srv.Close)
+	cfg := config.Default()
+	cfg.Search.Rerank = new(true)
+	cfg.Generation.BaseURL = "http://127.0.0.1:1"
+	cfg.Generation.Roles = map[config.Role]config.ModelSpec{config.RoleReranker: {Model: "gemma4:26b",
+		BaseURL: srv.URL}}
+
+	r, err := newReranker(context.Background(), cfg, nil)
+	require.NoError(t, err)
+	out, err = r.Rerank(context.Background(), rerank.Request{Question: "kafka", Kind: understand.KindList,
+		Planned: true, Candidates: []rerank.Candidate{{ID: "a", Rank: 1, Title: "a"}, {ID: "b", Rank: 2, Title: "b"}}})
+	require.NoError(t, err)
+	assert.Equal(t, rerank.StatusCold, out.Status)
+	assert.Equal(t, "gemma4:26b", <-loading, "the role's model, loading at its server")
+	done := make(chan struct{})
+	go func() {
+		r.stop()
+		r.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the reranker's background work didn't stop")
+	}
 }
 
 // TestNewPlanner: the planner writes with the planner role's model, at its

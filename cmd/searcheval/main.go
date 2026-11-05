@@ -62,6 +62,26 @@
 //	searcheval -db copy.db -queries my-queries.yaml -summarize -content ~/.curio/content \
 //		-documents sample.txt -summaries-out summaries.jsonl
 //	searcheval -db another-copy.db -queries my-queries.yaml -summaries summaries.jsonl
+//
+// The reranked variants (hybrid-reranked, planned-reranked) rerank their
+// base ranking's head as the daemon does a search that asks: the first
+// search.rerank_depth hits read as candidates, config.yaml's reranker
+// asked (whatever search.rerank says), routed by each plan's kind, the
+// rest in first-stage order. -rerank-with changes the reranker for a grid
+// point (method forces one method for every query, keywords included;
+// model, depth, blend, input, textless, folders, claims, timeout).
+// -reranks-out records every answer the model gives, a JSON line each,
+// and -reranks replays them, asking no model; with both, only what the
+// file lacks is asked. The answers hold no page text, but keep them out
+// of the repository. A recorded rerank longer than the timeout is scored
+// as the daemon would have answered it, a timeout keeping the first
+// ranking, at the timeout's cost; a replayed plan's or rerank's recorded
+// time counts in its stage and the total, which is Enter to results. The
+// fitness check, run before the variants whenever a model may be asked, is
+// reported with its calls' time apart, never in a query's.
+//
+//	searcheval -db copy.db -queries my-queries.yaml -variants planned,planned-reranked -plans base.json \
+//		-summaries summaries.jsonl -rerank-with method=listwise,depth=30 -reranks-out answers.jsonl
 package main
 
 import (
@@ -111,6 +131,12 @@ type options struct {
 	documents    string
 	summariesOut string
 	summaries    string
+	// rerankWith changes the reranked variants' reranker from the
+	// daemon's; reranks replays a -reranks-out file's answers, and
+	// reranksOut records the answers the model gives.
+	rerankWith rerankWith
+	reranks    string
+	reranksOut string
 }
 
 // Exit codes.
@@ -146,11 +172,15 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 // id alone, as its report does, so a private test set stays off the
 // terminal and out of any log a run is kept in.
 func dropQueryText(groups []string, a slog.Attr) slog.Attr {
-	if len(groups) == 0 && (a.Key == "query" || a.Key == "rewrites" || a.Key == "names") {
+	if len(groups) == 0 && slices.Contains(privateKeys, a.Key) {
 		return slog.Attr{}
 	}
 	return a
 }
+
+// privateKeys are the record keys that could carry a query's text, a
+// plan's, a page's or a model's reply.
+var privateKeys = []string{"query", "rewrites", "names", "question", "candidates", "prompt", "reply"}
 
 // complain writes msg to stderr. A failed write there has no one left to
 // report to.
@@ -159,17 +189,19 @@ func complain(stderr io.Writer, msg string) { _, _ = io.WriteString(stderr, msg)
 const usageLine = "usage: searcheval -db <copy of curio.db> -queries <file> [-config <config.yaml>] [-json <file>] " +
 	"[-baseline <previous -json>] " +
 	"[-variants hybrid,bm25,vector,fields,cards,titles,summaries,planned,planned-filters,planned-rewrites," +
-	"planned-names] " +
+	"planned-names,hybrid-reranked,planned-reranked] " +
 	"[-today YYYY-MM-DD] [-plans <previous -json>] [-reindex] [-content <dir>] " +
-	"[-summarize [-documents <file>] [-summaries-out <file>] | -summaries <file>]\n"
+	"[-summarize [-documents <file>] [-summaries-out <file>] | -summaries <file>] " +
+	"[-rerank-with key=value,...] [-reranks <file>] [-reranks-out <file>]\n"
 
 // parseFlags parses args, writing what is wrong and the usage to out on a
 // usage error, and the usage alone for -h.
 func parseFlags(args []string, out *bytes.Buffer) (options, error) {
 	var (
-		opts     options
-		variants string
-		today    string
+		opts       options
+		variants   string
+		today      string
+		rerankWith string
 	)
 	fs := flag.NewFlagSet("searcheval", flag.ContinueOnError)
 	fs.SetOutput(out)
@@ -193,6 +225,12 @@ func parseFlags(args []string, out *bytes.Buffer) (options, error) {
 	fs.StringVar(&opts.summariesOut, "summaries-out", "", "with -summarize, append each summary, with what it cost, "+
 		"to this file, a JSON line each (it holds what pages say: keep it out of the repository)")
 	fs.StringVar(&opts.summaries, "summaries", "", "replay a -summaries-out file's summaries first, asking no model")
+	fs.StringVar(&rerankWith, "rerank-with", "", "with a reranked variant, change its reranker from the daemon's: "+
+		"method, model, depth, blend, input, textless, folders, claims, timeout, as key=value,...")
+	fs.StringVar(&opts.reranks, "reranks", "", "with a reranked variant, replay a -reranks-out file's answers; a "+
+		"call it has no answer to fails the run, unless -reranks-out records the model's")
+	fs.StringVar(&opts.reranksOut, "reranks-out", "", "with a reranked variant, ask the model for each answer "+
+		"-reranks doesn't hold and append it to this file, a JSON line each (keep it out of the repository)")
 	fs.Usage = func() {
 		out.WriteString(usageLine)
 		fs.PrintDefaults()
@@ -220,6 +258,15 @@ func parseFlags(args []string, out *bytes.Buffer) (options, error) {
 		problem = "-documents and -summaries-out are read only with -summarize"
 	default:
 		opts.variants, problem = parseVariants(variants)
+	}
+	if problem == "" {
+		var err error
+		switch opts.rerankWith, err = parseRerankWith(rerankWith); {
+		case err != nil:
+			problem = err.Error()
+		case !anyReranked(opts.variants) && (rerankWith != "" || opts.reranks != "" || opts.reranksOut != ""):
+			problem = "-rerank-with, -reranks and -reranks-out are read only with a reranked variant"
+		}
 	}
 	if problem == "" {
 		var err error

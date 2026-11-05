@@ -21,6 +21,7 @@ import (
 	"github.com/samsar/curio/internal/insight"
 	"github.com/samsar/curio/internal/jobs"
 	"github.com/samsar/curio/internal/ollama"
+	"github.com/samsar/curio/internal/rerank"
 	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/summarize"
 	"github.com/samsar/curio/internal/understand"
@@ -181,6 +182,40 @@ func TestHealth_Understanding(t *testing.T) {
 			Error: "3 plans in a row took longer than 5s"}}, h.Understanding)
 	assert.NotContains(t, resp.body, "eviction_hold_until", "no hold, no field")
 	assert.Zero(t, planner.calls(), "healthz asks the planner nothing")
+}
+
+// TestHealth_Reranking: healthz says what the reranker knows of its
+// model, its times in UTC and only the holds in effect; with no reranker,
+// that reranking is off. It never asks the reranker's model anything, and
+// never changes the status.
+func TestHealth_Reranking(t *testing.T) {
+	off := newTestServer(t, func(*Deps) {})
+	resp := off.do(t, request{method: http.MethodGet, path: "/v1/healthz"})
+	require.Equal(t, http.StatusOK, resp.status, resp.body)
+	assert.Contains(t, resp.body, `"reranking":{"on":false,"reason":"search reranking is off (search.rerank: false)"}`)
+
+	at := time.Date(2026, 10, 14, 9, 30, 0, 0, time.FixedZone("CEST", 2*3600))
+	f := &fakeReranker{}
+	held := newTestServer(t, func(d *Deps) {
+		d.Reranker = stateReranker{fakeReranker: f, state: rerank.State{On: true, Model: "gemma4:26b",
+			Check: rerank.CheckFit, CheckedAt: at, Last: rerank.StatusTimeout, LastAt: at,
+			EvictionHoldUntil: at.Add(15 * time.Minute),
+			Failure:           rerank.Failure{Cause: "evicted", At: at, Err: "unloaded within its keep-alive 2 times"}}}
+	})
+	resp = held.do(t, request{method: http.MethodGet, path: "/v1/healthz"})
+	require.Equal(t, http.StatusOK, resp.status, resp.body)
+	var h struct {
+		Status    string          `json:"status"`
+		Reranking RerankingHealth `json:"reranking"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(resp.body), &h))
+	assert.Equal(t, "ok", h.Status)
+	assert.Equal(t, RerankingHealth{On: true, Model: "gemma4:26b", Check: "fit", CheckedAt: at.UTC(),
+		LastStatus: "timeout", LastAt: at.UTC(), EvictionHoldUntil: at.Add(15 * time.Minute).UTC(),
+		LastFailure: &UnderstandingFailure{Cause: "evicted", At: at.UTC(),
+			Error: "unloaded within its keep-alive 2 times"}}, h.Reranking)
+	assert.NotContains(t, resp.body, "timeout_hold_until", "no hold, no field")
+	assert.Zero(t, f.reranks(), "healthz asks the reranker nothing")
 }
 
 // TestHealth_YouTubeFetcher: healthz names the yt-dlp the daemon routes

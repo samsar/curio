@@ -8,7 +8,10 @@
 // and provider-agnostic, so another provider can sit behind them without
 // changing their callers. A provider that can't hold a reply to a JSON
 // schema must not implement JSONGenerator: callers type-assert it, and none
-// falls back to parsing Generate's prose.
+// falls back to parsing Generate's prose. Likewise a provider that can't
+// say how likely the first tokens of a reply are must not implement
+// LogprobGenerator: the reranker scores by those probabilities, and has no
+// prose to fall back to.
 package generator
 
 import (
@@ -105,6 +108,38 @@ type JSONGenerator interface {
 	// ErrTruncated. A structured reply is a decision rather than prose, so
 	// with opts.Temperature nil it is decoded greedily, at temperature 0.
 	GenerateJSON(ctx context.Context, prompt string, schema json.RawMessage, opts Options) (json.RawMessage, error)
+}
+
+// MaxTopTokens is the most first tokens FirstTokens may ask for: Ollama
+// refuses a top_logprobs above 20 with a 400 ("top_logprobs must be
+// between 0 and 20", measured on 0.40.14), which would read as the model
+// refusing the request.
+const MaxTopTokens = 20
+
+// ErrNoLogprobs: the provider answered without the token probabilities
+// asked for.
+var ErrNoLogprobs = errors.New("the provider returned no token probabilities")
+
+// TokenChoice is one token the model could write first, and its natural
+// log probability.
+type TokenChoice struct {
+	Token   string
+	Logprob float64
+}
+
+// LogprobGenerator is a Generator whose provider says how likely each of
+// the likeliest first tokens of a reply is: what a reranker that asks a
+// yes-or-no question scores a page by, without letting the model write
+// past one token.
+type LogprobGenerator interface {
+	Generator
+	// FirstTokens returns the top likeliest first tokens of the reply to
+	// prompt, in the provider's order (likeliest first), decoding one token
+	// greedily. With raw the prompt is sent as is, through no chat
+	// template: for a model whose own template the caller writes. top is
+	// in [1, MaxTopTokens]; any other is an error before a request. A reply
+	// without the probabilities is an error wrapping ErrNoLogprobs.
+	FirstTokens(ctx context.Context, prompt string, raw bool, top int, opts Options) ([]TokenChoice, error)
 }
 
 // Warmer is a generator whose model can be asked about, and loaded, apart

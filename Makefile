@@ -112,7 +112,7 @@ cluster-report:
 	@test -n "$(DB)" || { echo 'usage: make cluster-report DB=<copy of curio.db> [JSON=<file>] [DRAWS=n] [SEED=n]' >&2; exit 2; }
 	$(GO) run -tags=$(GOTAGS) ./cmd/clusterreport -db "$(DB)" $(if $(JSON),-json "$(JSON)") $(if $(DRAWS),-draws $(DRAWS)) $(if $(SEED),-seed $(SEED))
 
-## search-eval: score search on a copy of a home's database against a graded query file (DB=<copy> QUERIES=<file> [CONFIG=<config.yaml>] [JSON=<file>] [BASELINE=<previous JSON>] [VARIANTS=hybrid,bm25,vector,fields,cards,titles,summaries,planned,...] [TODAY=YYYY-MM-DD] [PLANS=<previous JSON>] [REINDEX=1] [CONTENT=<home's content dir>] [SUMMARIZE=1 [DOCUMENTS=<ids>] [SUMMARIES_OUT=<file>] | SUMMARIES=<file>])
+## search-eval: score search on a copy of a home's database against a graded query file (DB=<copy> QUERIES=<file> [CONFIG=<config.yaml>] [JSON=<file>] [BASELINE=<previous JSON>] [VARIANTS=hybrid,bm25,vector,fields,cards,titles,summaries,planned,...] [TODAY=YYYY-MM-DD] [PLANS=<previous JSON>] [REINDEX=1] [CONTENT=<home's content dir>] [SUMMARIZE=1 [DOCUMENTS=<ids>] [SUMMARIES_OUT=<file>] | SUMMARIES=<file>] [RERANK_WITH=key=value,...] [RERANKS=<file>] [RERANKS_OUT=<file>])
 # A developer's tool: go run, so nothing lands in ./bin; built with the
 # release's version stamp, which the report records. It migrates the
 # database it reads and refuses a home's own, like cluster-report, and
@@ -126,13 +126,16 @@ cluster-report:
 # summaries role, as the summary pass would, from the markdown under
 # CONTENT, one page at a time and resumably: DOCUMENTS holds it to a file
 # of document IDs, SUMMARIES_OUT appends each summary and its cost to a
-# file, which SUMMARIES replays into another copy, asking no model. Keep
-# the query file, the JSON report, the ID lists and the summaries files
-# out of the repository. See cmd/searcheval.
+# file, which SUMMARIES replays into another copy, asking no model. The
+# reranked variants (hybrid-reranked, planned-reranked) rerank each head
+# with config.yaml's reranker, RERANK_WITH changing its settings for a grid
+# point; RERANKS_OUT records every answer, which RERANKS replays, asking no
+# model. Keep the query file, the JSON report, the ID lists, the summaries
+# and the answers files out of the repository. See cmd/searcheval.
 .PHONY: search-eval
 search-eval:
-	@test -n "$(DB)" && test -n "$(QUERIES)" || { echo 'usage: make search-eval DB=<copy of curio.db> QUERIES=<file> [CONFIG=<config.yaml>] [JSON=<file>] [BASELINE=<previous JSON>] [VARIANTS=hybrid,bm25,vector,fields,cards,titles,summaries,planned,planned-filters,planned-rewrites,planned-names] [TODAY=YYYY-MM-DD] [PLANS=<previous JSON>] [REINDEX=1] [CONTENT=<dir>] [SUMMARIZE=1 [DOCUMENTS=<ids>] [SUMMARIES_OUT=<file>] | SUMMARIES=<file>]' >&2; exit 2; }
-	$(GO) run -tags=$(GOTAGS) -ldflags "$(LDFLAGS)" ./cmd/searcheval -db "$(DB)" -queries "$(QUERIES)" $(if $(CONFIG),-config "$(CONFIG)") $(if $(JSON),-json "$(JSON)") $(if $(BASELINE),-baseline "$(BASELINE)") $(if $(VARIANTS),-variants "$(VARIANTS)") $(if $(TODAY),-today "$(TODAY)") $(if $(PLANS),-plans "$(PLANS)") $(if $(REINDEX),-reindex) $(if $(CONTENT),-content "$(CONTENT)") $(if $(SUMMARIZE),-summarize) $(if $(DOCUMENTS),-documents "$(DOCUMENTS)") $(if $(SUMMARIES_OUT),-summaries-out "$(SUMMARIES_OUT)") $(if $(SUMMARIES),-summaries "$(SUMMARIES)")
+	@test -n "$(DB)" && test -n "$(QUERIES)" || { echo 'usage: make search-eval DB=<copy of curio.db> QUERIES=<file> [CONFIG=<config.yaml>] [JSON=<file>] [BASELINE=<previous JSON>] [VARIANTS=hybrid,bm25,vector,fields,cards,titles,summaries,planned,planned-filters,planned-rewrites,planned-names,hybrid-reranked,planned-reranked] [TODAY=YYYY-MM-DD] [PLANS=<previous JSON>] [REINDEX=1] [CONTENT=<dir>] [SUMMARIZE=1 [DOCUMENTS=<ids>] [SUMMARIES_OUT=<file>] | SUMMARIES=<file>] [RERANK_WITH=key=value,...] [RERANKS=<file>] [RERANKS_OUT=<file>]' >&2; exit 2; }
+	$(GO) run -tags=$(GOTAGS) -ldflags "$(LDFLAGS)" ./cmd/searcheval -db "$(DB)" -queries "$(QUERIES)" $(if $(CONFIG),-config "$(CONFIG)") $(if $(JSON),-json "$(JSON)") $(if $(BASELINE),-baseline "$(BASELINE)") $(if $(VARIANTS),-variants "$(VARIANTS)") $(if $(TODAY),-today "$(TODAY)") $(if $(PLANS),-plans "$(PLANS)") $(if $(REINDEX),-reindex) $(if $(CONTENT),-content "$(CONTENT)") $(if $(SUMMARIZE),-summarize) $(if $(DOCUMENTS),-documents "$(DOCUMENTS)") $(if $(SUMMARIES_OUT),-summaries-out "$(SUMMARIES_OUT)") $(if $(SUMMARIES),-summaries "$(SUMMARIES)") $(if $(RERANK_WITH),-rerank-with "$(RERANK_WITH)") $(if $(RERANKS),-reranks "$(RERANKS)") $(if $(RERANKS_OUT),-reranks-out "$(RERANKS_OUT)")
 
 ## planner-check: measure a writing model as search understanding's planner on this machine (MODEL=<name> [CONFIG=<config.yaml>])
 # A developer's tool: go run, so nothing lands in ./bin. It runs the

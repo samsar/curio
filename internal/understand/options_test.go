@@ -21,7 +21,7 @@ import (
 func TestOptionsFrom_Default(t *testing.T) {
 	assert.Equal(t, Options{On: true, Timeout: 5 * time.Second, KeepAlive: 30 * time.Minute,
 		Model: config.ModelSpec{Provider: "ollama", Model: "qwen3:4b-instruct", BaseURL: "http://localhost:11434",
-			TimeoutSeconds: 120}, Shared: true}, OptionsFrom(config.Default()))
+			TimeoutSeconds: 120}, Shared: true, ShortSharer: true}, OptionsFrom(config.Default()))
 }
 
 // TestOptionsFrom_Budget: a plan, a second asking whether the model is

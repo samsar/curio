@@ -112,10 +112,11 @@ linters:
             - pkg: github.com/samsar/curio/internal/store/sqlite
               desc: pages get their data through the Deps functions the JSON handlers use
         # Search ranks whatever plan it is given, and never asks a language
-        # model what a question means: the planner (internal/understand)
-        # reads search, never the reverse, so the engine, the developer's
-        # tools and every caller rank alike with or without a plan. Its
-        # tests may read the planner's share of config.Search.
+        # model what a question means or how to order its hits: the planner
+        # (internal/understand) and the reranker (internal/rerank) read
+        # search, never the reverse, so the engine, the developer's tools and
+        # every caller rank alike with or without them. Its tests may read
+        # their share of config.Search.
         search-llm-free:
           list-mode: lax
           files:
@@ -128,6 +129,10 @@ linters:
               desc: understand reads search, never the reverse
             - pkg: github.com/samsar/curio/internal/ollama
               desc: search reaches the embedding model through its Embedder alone
+            - pkg: github.com/samsar/curio/internal/modelgate
+              desc: search ranks without a writing model; the gate is for the planner's and the reranker's calls
+            - pkg: github.com/samsar/curio/internal/rerank
+              desc: rerank reads search's hits, never the reverse
         # The terminal UI library is the setup wizard's alone: nothing else
         # prompts, and the daemon and the MCP sidecar must not link it.
         prompts-in-setup:

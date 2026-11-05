@@ -62,7 +62,7 @@ func TestRenderUnderstanding_Golden(t *testing.T) {
 	var out bytes.Buffer
 	for _, tc := range cases {
 		fmt.Fprintf(&out, "== %s\n", tc.name)
-		renderUnderstanding(&out, tc.u, ny)
+		renderHeader(&out, tc.u, nil, ny)
 	}
 	path := filepath.Join("testdata", "search-understanding.golden")
 	if *update {

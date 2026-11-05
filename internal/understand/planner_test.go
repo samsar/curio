@@ -19,6 +19,7 @@ import (
 
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/generator"
+	"github.com/samsar/curio/internal/modelgate"
 	"github.com/samsar/curio/internal/ollama"
 	"github.com/samsar/curio/internal/search"
 )
@@ -530,7 +531,7 @@ func TestPlanner_CheckUnreachedWarnsOnce(t *testing.T) {
 	for range 4 {
 		assert.Equal(t, StatusChecking, r.plan(t, "q").Status)
 		r.p.Wait()
-		r.clock.advance(retryAfter)
+		r.clock.advance(modelgate.RetryAfter)
 	}
 	var levels []string
 	for _, rec := range r.records(t) {
@@ -822,7 +823,7 @@ func TestPlanner_LoadFindsItMissing(t *testing.T) {
 	r.model.mu.Lock()
 	r.model.warmErr = nil
 	r.model.mu.Unlock()
-	r.clock.advance(retryAfter)
+	r.clock.advance(modelgate.RetryAfter)
 	assert.Equal(t, "gemma4:26b isn't pulled — run curio up", r.plan(t, "q").Reason, "what is known while it retries")
 	r.p.Wait()
 	assert.Equal(t, StatusPlanned, r.plan(t, "q").Status)
@@ -949,27 +950,6 @@ func TestPlanner_TimeoutHold(t *testing.T) {
 		"once a run, and again after a plan")
 }
 
-// TestPlanner_HoldsEndOnTheWallClock: the timeout hold's end and the
-// eviction hold's, which healthz reports, are wall times, with no
-// monotonic reading: judged on Go's monotonic clock, which stops while a
-// Mac sleeps, a hold would outlast the time it says.
-func TestPlanner_HoldsEndOnTheWallClock(t *testing.T) {
-	r := newRigWith(t, &fakeModel{loaded: true}, func(o *Options) { o.Now = time.Now })
-	r.p.mu.Lock()
-	r.p.timeouts = timeoutsToHold
-	r.p.holdTimeoutsLocked()
-	now := r.p.now()
-	r.p.keptUntil, r.p.evictions, r.p.firstEviction = now.Add(time.Minute), evictionsToHold-1, now
-	_, held := r.p.unloadedLocked(now)
-	r.p.mu.Unlock()
-	require.True(t, held)
-	st := r.p.State()
-	for _, end := range []time.Time{st.TimeoutHoldUntil, st.EvictionHoldUntil} {
-		require.False(t, end.IsZero())
-		assert.NotContains(t, end.String(), "m=")
-	}
-}
-
 // TestPlanner_ConcurrentTimeouts: plans in flight together that all time
 // out start one hold of 2 minutes, not one escalated per plan.
 func TestPlanner_ConcurrentTimeouts(t *testing.T) {
@@ -1066,7 +1046,7 @@ func TestPlanner_Evictions(t *testing.T) {
 // 5 minutes after the last answer wasn't evicted.
 func TestPlanner_SharedKeepAlive(t *testing.T) {
 	r := newRigWith(t, &fakeModel{loaded: true, plan: answerWith(`{"kind":"one"}`)},
-		func(o *Options) { o.Shared = true })
+		func(o *Options) { o.Shared, o.ShortSharer = true, true })
 	r.plan(t, "q")
 	r.p.Wait()
 	for range 3 {
@@ -1323,8 +1303,9 @@ func (panicModel) Warm(context.Context, time.Duration) error { panic("warm") }
 func (panicModel) Unload(context.Context) error              { panic("unload") }
 
 // TestPlanner_UseEndsWhenACallPanics: a call of the model that panics, a
-// plan's, a probe's, a load or an unload, still ends its use, so a search
-// net/http recovered from doesn't hold the summary pass back.
+// plan's or a probe's, still ends its use, so a search net/http recovered
+// from doesn't hold the summary pass back. A load's and an unload's are
+// the gate's (internal/modelgate).
 func TestPlanner_UseEndsWhenACallPanics(t *testing.T) {
 	var open atomic.Int32
 	using := func() func() {
@@ -1340,8 +1321,6 @@ func TestPlanner_UseEndsWhenACallPanics(t *testing.T) {
 	}{
 		{"a plan", "generate", func() { _, _ = p.Ask(context.Background(), "q") }},
 		{"a probe", "generate", func() { _, _ = p.Check(context.Background()) }},
-		{"a load", "warm", func() { p.warm() }},
-		{"an unload", "unload", p.unload},
 	} {
 		assert.PanicsWithValue(t, c.value, c.call, c.name)
 		assert.Zero(t, open.Load(), "%s's use ended", c.name)

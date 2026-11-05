@@ -119,6 +119,33 @@ func (o *Ollama) GenerateJSON(ctx context.Context, prompt string, schema json.Ra
 	return json.RawMessage(reply), nil
 }
 
+// FirstTokens asks Ollama for one token of the reply to prompt, greedily,
+// with the top likeliest first tokens and their log probabilities
+// (logprobs, top_logprobs), retrying as Generate does. A raw prompt goes
+// through no chat template. See LogprobGenerator.
+func (o *Ollama) FirstTokens(ctx context.Context, prompt string, raw bool, top int, opts Options) ([]TokenChoice,
+	error) {
+	if top < 1 || top > MaxTopTokens {
+		return nil, fmt.Errorf("ollama generate: top tokens must be in [1, %d], got %d", MaxTopTokens, top)
+	}
+	req := o.request(prompt, opts)
+	req.Raw, req.Logprobs, req.TopLogprobs = raw, true, top
+	req.Options.Temperature, req.Options.NumPredict = new(0.0), 1
+	resp, err := o.generate(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	resp.report(opts.Usage)
+	if len(resp.Logprobs) == 0 || len(resp.Logprobs[0].TopLogprobs) == 0 {
+		return nil, fmt.Errorf("ollama generate: %w", ErrNoLogprobs)
+	}
+	out := make([]TokenChoice, 0, len(resp.Logprobs[0].TopLogprobs))
+	for _, t := range resp.Logprobs[0].TopLogprobs {
+		out = append(out, TokenChoice(t))
+	}
+	return out, nil
+}
+
 // Loaded reports whether Ollama holds the model in memory now; see
 // ollama.Client.Loaded.
 func (o *Ollama) Loaded(ctx context.Context) (bool, error) {
@@ -291,9 +318,15 @@ type generateRequest struct {
 	Think bool `json:"think"`
 	// Format is the JSON schema the reply is decoded under, for
 	// GenerateJSON.
-	Format    json.RawMessage `json:"format,omitempty"`
-	KeepAlive string          `json:"keep_alive,omitempty"`
-	Options   generateOptions `json:"options"`
+	Format json.RawMessage `json:"format,omitempty"`
+	// Raw sends Prompt through no chat template, and Logprobs with
+	// TopLogprobs asks for each token's log probability and the likeliest
+	// alternatives, for FirstTokens; every other call leaves them out.
+	Raw         bool            `json:"raw,omitempty"`
+	Logprobs    bool            `json:"logprobs,omitempty"`
+	TopLogprobs int             `json:"top_logprobs,omitempty"`
+	KeepAlive   string          `json:"keep_alive,omitempty"`
+	Options     generateOptions `json:"options"`
 }
 
 // warmRequest loads the model: a generate request without a prompt.
@@ -330,6 +363,22 @@ type generateResponse struct {
 	LoadDuration       int64 `json:"load_duration"`
 	PromptEvalDuration int64 `json:"prompt_eval_duration"`
 	EvalDuration       int64 `json:"eval_duration"`
+	// Logprobs are the reply's tokens with their probabilities, when the
+	// request asked for them: one per token written.
+	Logprobs []tokenLogprobs `json:"logprobs"`
+}
+
+// tokenLogprobs is a token Ollama wrote and the likeliest tokens it could
+// have written in its place.
+type tokenLogprobs struct {
+	Token       string         `json:"token"`
+	Logprob     float64        `json:"logprob"`
+	TopLogprobs []tokenLogprob `json:"top_logprobs"`
+}
+
+type tokenLogprob struct {
+	Token   string  `json:"token"`
+	Logprob float64 `json:"logprob"`
 }
 
 // report writes what the call cost into u, when u is set.

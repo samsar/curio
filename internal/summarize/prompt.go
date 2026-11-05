@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/textutil"
 )
 
 // promptTemplate asks the summaries role's model for one page's summary.
@@ -113,8 +114,8 @@ var inputRules = fmt.Sprintf("scan %d bytes; drop images, data URLs and lines of
 	"text at most %d bytes on a line boundary keeping half the limits, else a rune boundary, "+
 	"and %d tokens with the rest of the prompt at %d quarter-tokens an ASCII letter and %d any other byte; "+
 	"answer %d tokens",
-	scanWindow, maxTitleBytes, maxURLBytes, maxSiteBytes, maxPageBytes, numCtx-ctxMargin, letterQuarters,
-	byteQuarters, maxAnswerTokens)
+	scanWindow, maxTitleBytes, maxURLBytes, maxSiteBytes, maxPageBytes, numCtx-ctxMargin,
+	textutil.LetterQuarters, textutil.ByteQuarters, maxAnswerTokens)
 
 // PromptVersion names the prompt, the schema and the input rules a summary
 // was written with: the hex SHA-256 of the three, so a summary says which

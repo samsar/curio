@@ -12,9 +12,10 @@ deferred. Design reasoning lives in `docs/decisions.md`.
 first PR, the search evaluation and model roles, is merged; metadata
 search, real saved dates with search filters, and chunks embedded with
 their context are done; understanding the question is done; and
-summaries written by the LLM are done, stored and off by default. **Next:
-the rest of M6's search work, starting with the reranker, which measures
-the summaries as its input.**
+summaries written by the LLM are done, stored and off by default; and
+reranking is done, on by default for gemma4:26b while summaries are
+written. **Next: Ask (PR 6), and the dashboard
+bringing reranking in after its instant results.**
 
 ## M0 — Walking skeleton
 
@@ -400,6 +401,35 @@ before it:
   So the defaults keep 2.7's ranking (decisions.md "Summaries: one
   structured call per document, stored for the reranker"), and PR 5
   measures the summaries as the reranker's input.
+- PR 5, done: reranking, on by default for gemma4:26b while summaries are
+  written. A writing role, `reranker`
+  (`generation.roles.reranker`), reorders a search's head
+  (`internal/rerank`): each candidate read as its title, what it was saved
+  as, its site, its summary and its best passage, neutralized and fitted
+  to the model's context by construction; listwise (one call, an order of
+  the candidates' numbers under a schema) or pointwise (a call a candidate,
+  yes against no from the first token's probabilities, raw for a
+  Qwen3-Reranker build), routed by the plan's kind, with blends, a fitness
+  check and holds on a gate shared with the planner (`internal/modelgate`).
+  Every failure keeps the first ranking with a status; later pages send
+  the head's order back (`rerank_order`) and ask no model. Surfaces:
+  `POST /v1/search` `rerank`/`rerank_order` and `reranking`, healthz
+  `reranking`, `curio search` (`--no-rerank`), `curio status`/`doctor`;
+  MCP and `curio eval` stay literal, and the dashboard doesn't rerank yet.
+  searcheval gained reranked variants, `-rerank-with`, and recorded,
+  replayable answers. The grid, by the rule written before it ran: listwise
+  gemma4:26b at 30 raised the owner's planned all-queries nDCG@10 from
+  0.762 to 0.796 reranking the topical kinds alone (0.819 with remembered
+  pages too), every kind within its bar, and known-item S@1 from 0.898 to
+  0.925, live at 1.2 s p50 and 4.2 s p95; but every planned point misses
+  the known items' R@10 of 1.000, which planning alone lowers to 0.984, so
+  as written no point passed. The owner amended that bar after the grid
+  to what planning keeps, as the S@1 bar already was; by the rule's order
+  the topical-only route is the pick, needing the summaries (0.787
+  without), so gemma4:26b is listed as measured and `search.rerank` left
+  out reranks with it while summaries are written (decisions.md
+  "Reranking: a reranker role over the ranking's head, routed by the
+  plan's kind").
 
 ## M7 — Hosted mode
 
