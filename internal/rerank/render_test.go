@@ -5,8 +5,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"flag"
+	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -54,19 +56,35 @@ func hostileText(n int) string {
 	return strings.Repeat(unit, n/len(unit)+1)[:n]
 }
 
-// TestNeutralize_Hostile: a megabyte of hostile text costs its share,
-// under a bound on time, and keeps none of '<', '>' or a control.
+// TestNeutralize_Hostile: a megabyte of hostile text keeps none of '<',
+// '>' or a control, and costs its length: the whole is timed against its
+// eighth, the better of three reads each, so a loaded runner slows both
+// alike. Linear is 8 and quadratic 64; 22 is about their geometric mean.
+// A read past hangGuard is a hang, whatever the ratio.
 func TestNeutralize_Hostile(t *testing.T) {
+	const maxRatio = 22
+	const hangGuard = 10 * time.Second
 	text := hostileText(1 << 20)
-	began := time.Now()
-	for range 10 {
-		got := neutralize(text, 1<<20)
-		assert.NotContains(t, got, "<")
-		assert.NotContains(t, got, ">")
-		assert.NotContains(t, got, "\n")
-		assert.NotContains(t, got, "\x00")
+	got := neutralize(text, 1<<20)
+	assert.NotContains(t, got, "<")
+	assert.NotContains(t, got, ">")
+	assert.NotContains(t, got, "\n")
+	assert.NotContains(t, got, "\x00")
+	best := func(in string) time.Duration {
+		fastest := time.Duration(math.MaxInt64)
+		for range 3 {
+			runtime.GC()
+			began := time.Now()
+			neutralize(in, len(in))
+			took := time.Since(began)
+			require.Less(t, took, hangGuard, "a read of %d bytes", len(in))
+			fastest = min(fastest, took)
+		}
+		return max(fastest, time.Microsecond)
 	}
-	assert.Less(t, time.Since(began), 2*time.Second, "linear in its length")
+	eighth, whole := best(hostileText(1<<17)), best(text)
+	assert.LessOrEqual(t, float64(whole)/float64(eighth), float64(maxRatio),
+		"an eighth read in %v, all of it in %v", eighth, whole)
 }
 
 // denseCandidate is a candidate whose every field is full of the densest
