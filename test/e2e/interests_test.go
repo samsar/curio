@@ -182,7 +182,8 @@ func TestDaemon_AnImportIsGroupedUnasked(t *testing.T) {
 	for _, path := range []string{"/ui/interests", "/ui/interests/" + list.Items[0].ID, "/ui/interests/unsorted",
 		"/ui/interests/changes", "/ui/interests/map"} {
 		_, body := getDashboard(t, env.base, path)
-		assert.Contains(t, body, `<a href="/ui/interests" aria-current="page">`, path)
+		// The nav opens the map (By group), Interests current on every interests page.
+		assert.Contains(t, body, `<a href="/ui/interests/map" aria-current="page">`, path)
 	}
 	_, body := getDashboard(t, env.base, "/ui/interests/map?view=groups&select=interest%3A"+list.Items[0].ID)
 	assert.Contains(t, body, `id="interest-map" data-src="/v1/interests/map"`)
