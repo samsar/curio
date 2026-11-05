@@ -891,9 +891,8 @@ svg.stackbar rect { shape-rendering: crispEdges; }
 
 /* Search -------------------------------------------------------------------- */
 
-/* The box is centred, a little narrower than the container; the results
-   below it take the container's whole width. A phone's box is the
-   container. */
+/* The box and the results share one centred column, a little narrower
+   than the container. A phone's column is the container. */
 .search-hero { position: relative; width: 100%; max-width: 80%; margin: var(--s2) auto var(--s6); }
 .searchbox { position: relative; }
 .searchbox > svg.icon { position: absolute; left: 1.05rem; top: 50%; transform: translateY(-50%); width: 1.25rem; height: 1.25rem; color: var(--text-3); pointer-events: none; }
@@ -950,8 +949,10 @@ svg.stackbar rect { shape-rendering: crispEdges; }
 /* The results fill the box's column (--search-measure); their passages
    keep their reading measure (.snippet). A flex item with auto margins
    would shrink to its min-content width, which a result's one-line
-   address makes wider than a phone. */
+   address makes wider than a phone. The column is the outer one's
+   (ol.results inside it carries the class too). */
 .results { width: 100%; }
+#results > .results { max-width: 80%; margin: 0 auto; }
 /* The results' head: a quiet line, its count wrapping beside the toggle
    where it doesn't fit (a phone), never cut. */
 .results-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s3); margin-bottom: var(--s1); color: var(--text-3); font-size: var(--fs-xs); }
@@ -1419,7 +1420,7 @@ td .badge.fit-new { margin-top: var(--s1); }
   .grid-3, .grid-2, .interest-grid, .controls { grid-template-columns: minmax(0, 1fr); }
   .span-2 { grid-column: auto; }
   .page-head h1, .doc-head h1 { font-size: var(--fs-xl-sm); }
-  .search-hero { max-width: none; }
+  .search-hero, #results > .results { max-width: none; }
   .searchbox input[type="search"] { padding-right: 3.25rem; height: 3rem; }
   .searchbox .btn .label { display: none; }
   .searchbox .btn { width: 2.4rem; padding: 0; }

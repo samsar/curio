@@ -16667,8 +16667,8 @@ cut. The keystroke, hx-sync,
 pager and search.js rules are unchanged, and so is the home's read count.
 
 Amended: the full width made the box a long bar. The box is centred at
-80% of the container; the results keep its whole width. At 48 rem and
-under the box is the container. The home's "All N →" goes where the
+80% of the container, and the results under it in the same column. At
+48 rem and under the column is the container. The home's "All N →" goes where the
 navigation's Interests goes (`interestsHref`): the map, or the list with
 the map off.
 
