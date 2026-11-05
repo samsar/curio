@@ -206,8 +206,9 @@ func TestRun_PlannedTextKeepsPlansPrivate(t *testing.T) {
 }
 
 // TestRun_PlannedReplay: a report's plans replayed with -plans rank every
-// query the same, asking no model: the plan stage reads 0, and the report
-// says where the plans came from.
+// query the same, asking no model: the plan stage reads each plan's
+// recorded time, marked replayed, so the total is still Enter to results,
+// and the report says where the plans came from.
 func TestRun_PlannedReplay(t *testing.T) {
 	fx := plannedFixture(t)
 	first := filepath.Join(fx.dir, "first.json")
@@ -230,10 +231,15 @@ func TestRun_PlannedReplay(t *testing.T) {
 		for i, q := range v.Queries {
 			assert.Equal(t, old.Queries[i].Ranking, q.Ranking, "%s %s", v.Name, q.ID)
 			assert.Equal(t, old.Queries[i].PlanStatus, q.PlanStatus)
-			assert.Equal(t, 0.0, *q.PlanMS, "replayed, not planned")
+			assert.Equal(t, *old.Queries[i].PlanMS, *q.PlanMS, "the recorded time")
+			assert.Equal(t, *old.Queries[i].PlanMS, q.TimingsMS["plan"], "in the plan stage")
+			assert.GreaterOrEqual(t, q.TimingsMS["total"], *q.PlanMS, "and the total")
+			assert.True(t, q.PlanReplayed)
+			assert.False(t, old.Queries[i].PlanReplayed)
 		}
-		assert.Zero(t, v.LatencyMS["plan"].P95)
+		assert.Equal(t, old.LatencyMS["plan"], v.LatencyMS["plan"])
 	}
+	assert.Contains(t, res.stdout, "each plan's recorded time counts in its plan stage and total")
 }
 
 func slicesIndex(vs []variantReport, name string) int {

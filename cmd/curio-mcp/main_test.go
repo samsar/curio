@@ -718,10 +718,13 @@ func TestMCP_SearchFilters(t *testing.T) {
 }
 
 // TestMCP_SearchIsLiteral: search_bookmarks never asks the daemon to
-// understand the question, nor sends a plan, and its input has neither
-// field: the calling model writes the filters and rewrites itself, and a
-// second, local model would add seconds of the call's budget and guesses
-// that compete with its own (decisions.md "Understanding the question").
+// understand the question or rerank its results, nor sends a plan or an
+// order, and its input has none of those fields: the calling model writes
+// the filters and rewrites itself, and ranks what it reads, and a second,
+// local model would add seconds of the call's budget and guesses that
+// compete with its own (decisions.md "Understanding the question",
+// "Reranking: a reranker role over the ranking's head, routed by the
+// plan's kind").
 func TestMCP_SearchIsLiteral(t *testing.T) {
 	cs := connectMCP(t)
 	_, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "search_bookmarks",
@@ -729,8 +732,9 @@ func TestMCP_SearchIsLiteral(t *testing.T) {
 			"saved_after": "2025-06-01"}})
 	require.NoError(t, err)
 	req := cs.lastSearch.Load().(map[string]any)
-	assert.NotContains(t, req, "understand")
-	assert.NotContains(t, req, "plan")
+	for _, field := range []string{"understand", "plan", "rerank", "rerank_order"} {
+		assert.NotContains(t, req, field)
+	}
 
 	tools, err := cs.ListTools(context.Background(), nil)
 	require.NoError(t, err)
@@ -747,8 +751,9 @@ func TestMCP_SearchIsLiteral(t *testing.T) {
 		}
 		require.NoError(t, json.Unmarshal(schema, &input))
 		assert.Contains(t, input.Properties, "query")
-		assert.NotContains(t, input.Properties, "understand")
-		assert.NotContains(t, input.Properties, "plan")
+		for _, field := range []string{"understand", "plan", "rerank", "rerank_order"} {
+			assert.NotContains(t, input.Properties, field)
+		}
 	}
 	assert.True(t, found, "search_bookmarks is listed")
 }

@@ -57,9 +57,13 @@ curio keep-awake on             # stay awake while importing, when plugged in
 
 curio's writing model can also summarize each page, one at a time: what
 it is, who made it, what it is about and the names it holds. The
-summaries are off by default: search doesn't use them yet, and a pass
-over a library takes hours. `summaries: {enabled: true}` in config.yaml
-turns them on (see [docs/setup.md](docs/setup.md#document-summaries)).
+summaries are off by default: a pass over a library takes hours.
+`summaries: {enabled: true}` in config.yaml turns them on (see
+[docs/setup.md](docs/setup.md#document-summaries)). And it can reorder a
+search's first results by reading each of them, its summary included:
+with gemma4:26b that is on while summaries are written, and `search:
+{rerank: true}` turns it on with any model (see
+[docs/setup.md](docs/setup.md#reranking)).
 
 If something seems off, run `curio doctor`: it checks every part and says what to fix.
 

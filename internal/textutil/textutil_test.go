@@ -107,3 +107,20 @@ func TestTextProblem(t *testing.T) {
 		assert.Equal(t, tc.want, TextProblem(tc.text, tc.maxBytes), "%q", tc.text)
 	}
 }
+
+// TestTokenQuarters: an ASCII letter costs 3 quarter-tokens, any other
+// byte 4, so a multi-byte rune costs a token a byte.
+func TestTokenQuarters(t *testing.T) {
+	for _, tc := range []struct {
+		s        string
+		quarters int
+	}{
+		{"", 0},
+		{"abc", 9},
+		{"a1", 7},
+		{"한", 12},
+		{"queue backs up", 3*12 + 4*2},
+	} {
+		assert.Equal(t, tc.quarters, TokenQuarters(tc.s), "%q", tc.s)
+	}
+}

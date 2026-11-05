@@ -162,9 +162,10 @@ func summariesCheckOf(ctx context.Context, c *client.Client, s *client.SummarySt
 // check, doesn't answer, is held for a model Ollama keeps unloading,
 // couldn't be checked, or the pass's brake stops it, each with its fix;
 // while they are on with a model below the measured bars
-// (config.SummariesBelowBars); and while pages are left to write with no
-// job queued to write them, which a restart fixes; otherwise fine, with
-// the progress, summaries by another model or prompt a note.
+// (config.SummariesBelowBars), unless pages are left to write with no
+// job queued to write them, which a restart fixes and which says so
+// first; otherwise fine, with the progress, summaries by another model or
+// prompt a note.
 func summariesCheck(s *client.SummaryStats, h client.SummariesHealth, queued bool) (status checkStatus, detail,
 	hint string) {
 	switch {
@@ -189,19 +190,19 @@ func summariesCheck(s *client.SummaryStats, h client.SummariesHealth, queued boo
 		return statusWarn, fmt.Sprintf("the summary pass waits until %s, the summaries of %s having failed in a "+
 			"row%s: %s", localTime(h.Brake.Until), plural(h.Brake.Failures, "page"), brakeDocuments(*h.Brake),
 			h.Brake.Error), summariesBrakeFix
+	case s != nil && s.ToWrite > 0 && !queued:
+		// Ahead of the bars: a pass that stopped needs the restart whatever
+		// the model, and the advisory would hide it.
+		return statusWarn, fmt.Sprintf("%s; %d to write, and no summarize job is queued to write them",
+			summariesProgress(s, h.Model), s.ToWrite), summariesRestart
 	case config.SummariesBelowBars(h.Model) != "":
 		return statusWarn, fmt.Sprintf("on with %s, which misses the summaries' measured bars: %s", h.Model,
 			config.SummariesBelowBars(h.Model)), summariesBarsFix
 	case s == nil:
 		return statusOK, "on, with " + h.Model, ""
 	}
-	progress := fmt.Sprintf("%d of %d written with %s", s.Written+s.NotThePage,
-		s.Written+s.ToWrite+s.Outdated+s.Failed+s.NotThePage, h.Model)
+	progress := summariesProgress(s, h.Model)
 	if s.ToWrite > 0 {
-		if !queued {
-			return statusWarn, fmt.Sprintf("%s; %d to write, and no summarize job is queued to write them", progress,
-				s.ToWrite), summariesRestart
-		}
 		progress += fmt.Sprintf("; %d to write%s", s.ToWrite, summariesETA(s))
 	}
 	if s.Outdated > 0 {
@@ -209,6 +210,13 @@ func summariesCheck(s *client.SummaryStats, h client.SummariesHealth, queued boo
 			"them again", s.Outdated)
 	}
 	return statusOK, progress, hint
+}
+
+// summariesProgress is how many of the fetched documents' summaries model
+// has written, as doctor says it.
+func summariesProgress(s *client.SummaryStats, model string) string {
+	return fmt.Sprintf("%d of %d written with %s", s.Written+s.NotThePage,
+		s.Written+s.ToWrite+s.Outdated+s.Failed+s.NotThePage, model)
 }
 
 // renderDocumentSummary writes a document's summary, for docs show: what it is

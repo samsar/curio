@@ -18,12 +18,14 @@ import (
 
 // queryPlan is a query's plan as the planned variants search by it: the
 // planner's outcome, or a replayed report's, and how long the planner took
-// to give it (0 when replayed).
+// to give it, as recorded when replayed, so a replayed run's totals are
+// still Enter to results.
 type queryPlan struct {
-	status  understand.Status
-	plan    *understand.Plan
-	dropped []understand.Dropped
-	took    time.Duration
+	status   understand.Status
+	plan     *understand.Plan
+	dropped  []understand.Dropped
+	took     time.Duration
+	replayed bool
 }
 
 // plannerReport is the planner the planned variants were planned by: its
@@ -158,7 +160,10 @@ func loadReplay(path string, qf queryFile) (*replay, error) {
 		if !ok {
 			return nil, fmt.Errorf("the plans %s hold no plan of query %s", path, queryLabel(q.ID, i))
 		}
-		qp := queryPlan{status: understand.Status(old.PlanStatus)}
+		qp := queryPlan{status: understand.Status(old.PlanStatus), replayed: true}
+		if old.PlanMS != nil {
+			qp.took = fromMS(*old.PlanMS)
+		}
 		if old.Plan != nil {
 			p := old.Plan.plan()
 			qp.plan = &p

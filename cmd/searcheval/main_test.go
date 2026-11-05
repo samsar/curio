@@ -24,7 +24,8 @@ func TestRun_Usage(t *testing.T) {
 			"flag provided but not defined"},
 		{"an unknown variant", []string{"-db", "x.db", "-queries", "q.yaml", "-variants", "hybrid,rerank"}, exitUsage,
 			`unknown variant "rerank" in -variants (the variants are: hybrid, bm25, vector, fields, cards, titles, ` +
-				`summaries, planned, planned-filters, planned-rewrites, planned-names)`},
+				`summaries, planned, planned-filters, planned-rewrites, planned-names, hybrid-reranked, ` +
+				`planned-reranked)`},
 		{"a -today that isn't a day", []string{"-db", "x.db", "-queries", "q.yaml", "-today", "monday"}, exitUsage,
 			`-today "monday" is not a day YYYY-MM-DD`},
 		{"a variant twice", []string{"-db", "x.db", "-queries", "q.yaml", "-variants", "bm25,hybrid,bm25"}, exitUsage,
@@ -43,6 +44,19 @@ func TestRun_Usage(t *testing.T) {
 			exitUsage, "-documents and -summaries-out are read only with -summarize"},
 		{"-summaries-out without -summarize", []string{"-db", "x.db", "-queries", "q.yaml", "-summaries-out", "s.jsonl"},
 			exitUsage, "-documents and -summaries-out are read only with -summarize"},
+		{"-rerank-with without a reranked variant", []string{"-db", "x.db", "-queries", "q.yaml", "-rerank-with",
+			"depth=30"}, exitUsage, "-rerank-with, -reranks and -reranks-out are read only with a reranked variant"},
+		{"-reranks without a reranked variant", []string{"-db", "x.db", "-queries", "q.yaml", "-reranks", "a.jsonl"},
+			exitUsage, "read only with a reranked variant"},
+		{"an unknown -rerank-with key", []string{"-db", "x.db", "-queries", "q.yaml", "-variants", "hybrid-reranked",
+			"-rerank-with", "depth=30,speed=fast"}, exitUsage, "-rerank-with speed: unknown key"},
+		{"a -rerank-with value outside its set", []string{"-db", "x.db", "-queries", "q.yaml", "-variants",
+			"hybrid-reranked", "-rerank-with", "blend=mean"}, exitUsage, `-rerank-with blend: "mean" is not one of ` +
+			`pure, position, rrf`},
+		{"a -rerank-with depth out of range", []string{"-db", "x.db", "-queries", "q.yaml", "-variants",
+			"hybrid-reranked", "-rerank-with", "depth=31"}, exitUsage, `"31" is not a depth in [2, 30]`},
+		{"a -rerank-with key twice", []string{"-db", "x.db", "-queries", "q.yaml", "-variants", "hybrid-reranked",
+			"-rerank-with", "depth=20,depth=30"}, exitUsage, "-rerank-with: depth given twice"},
 		{"help", []string{"-h"}, exitOK, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -52,8 +66,10 @@ func TestRun_Usage(t *testing.T) {
 			assert.Contains(t, res.stderr, tc.says)
 			assert.Contains(t, res.stderr, "usage: searcheval -db <copy of curio.db> -queries <file> "+
 				"[-config <config.yaml>] [-json <file>] [-baseline <previous -json>] [-variants hybrid,bm25,vector,"+
-				"fields,cards,titles,summaries,planned,planned-filters,planned-rewrites,planned-names] [-today YYYY-MM-DD] [-plans <previous -json>] [-reindex] [-content <dir>] "+
-				"[-summarize [-documents <file>] [-summaries-out <file>] | -summaries <file>]")
+				"fields,cards,titles,summaries,planned,planned-filters,planned-rewrites,planned-names,hybrid-reranked,"+
+				"planned-reranked] [-today YYYY-MM-DD] [-plans <previous -json>] [-reindex] [-content <dir>] "+
+				"[-summarize [-documents <file>] [-summaries-out <file>] | -summaries <file>] "+
+				"[-rerank-with key=value,...] [-reranks <file>] [-reranks-out <file>]")
 		})
 	}
 }

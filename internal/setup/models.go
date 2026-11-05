@@ -9,6 +9,7 @@ import (
 
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/ollama"
+	"github.com/samsar/curio/internal/rerank"
 	"github.com/samsar/curio/internal/summarize"
 	"github.com/samsar/curio/internal/understand"
 )
@@ -39,11 +40,13 @@ type wanted struct {
 // withholders say, for each role whose requests carry the user's own
 // content, why none may go where its model runs ("" when they may): the
 // questions a search sends the planner, the pages the summaries send
-// theirs. A withheld role's model would write nothing, so it is neither
-// pulled nor offered.
+// theirs; and for the reranker, also why no search would be reranked
+// (rerank.Options.Held: it reranks only understood searches). A withheld
+// role's model would write nothing, so it is neither pulled nor offered.
 var withholders = map[config.Role]func(config.Config) string{
 	config.RolePlanner:   func(c config.Config) string { return understand.OptionsFrom(c).Withheld },
 	config.RoleSummaries: func(c config.Config) string { return summarize.OptionsFrom(c).Withheld },
+	config.RoleReranker:  func(c config.Config) string { return rerank.OptionsFrom(c).Held() },
 }
 
 // picks are the models the home needs: the embedding model always, and
@@ -110,11 +113,15 @@ func (w *world) pick(ctx context.Context, hs homeState) (picks, error) {
 	}
 	p.embedding = wanted{Model: knownModel(embedding), baseURL: cfg.Embedding.BaseURL}
 
+	if note := rerankDefault(cfg); note != "" {
+		p.notes = append(p.notes, note)
+	}
 	roles := cfg.RolesInUse()
 	if len(roles) == 0 {
 		p.notes = append(p.notes, "no writing model is pulled: no role writes with one "+
 			"(interest labels are off with insight.enabled false or insight.labeling not llm, "+
-			"search understanding with search.understand false, document summaries unless summaries.enabled is true)")
+			"search understanding with search.understand false, document summaries unless summaries.enabled is true, "+
+			"search reranking unless search.rerank is true, or left out for a model measured as the reranker)")
 		return p, nil
 	}
 	roles = slices.DeleteFunc(roles, func(r config.Role) bool {
@@ -158,6 +165,32 @@ func (w *world) pick(ctx context.Context, hs homeState) (picks, error) {
 		p.addWriting(wanted{p.generation.Model, cfg.Generation.Role(r).BaseURL, !r.PullsAlone(), []config.Role{r}})
 	}
 	return p, nil
+}
+
+// rerankDefault says what search reranking does for a config.yaml that
+// leaves search.rerank out, when its model is measured as the reranker
+// (rerank.OptionsFrom): on, or off for want of the summaries it was
+// measured with, the one change that would turn it on; "" otherwise: an
+// unmeasured model or search.rerank set, whose behaviour is the key's, or
+// off for another reason, which doctor says.
+func rerankDefault(cfg config.Config) string {
+	model := cfg.Generation.Role(config.RoleReranker).Model
+	point, measured := config.RerankMeasured(model)
+	if cfg.Search.Rerank != nil || !measured {
+		return ""
+	}
+	switch o := rerank.OptionsFrom(cfg); {
+	case o.ByDefault && point.NeedsSummaries:
+		return fmt.Sprintf("search reranking is on by default for %s with the summaries, as it was measured; "+
+			"search.rerank: false turns it off", model)
+	case o.ByDefault:
+		return fmt.Sprintf("search reranking is on by default for %s, as it was measured; search.rerank: false "+
+			"turns it off", model)
+	case point.NeedsSummaries && !cfg.SummariesOn() && cfg.Search.Understand && o.Unplanned == "":
+		return fmt.Sprintf("search reranking is off by default for %s without the summaries, which it was "+
+			"measured with; summaries.enabled: true turns it on", model)
+	}
+	return ""
 }
 
 // addWriting adds m to the writing models unless it is there already,
@@ -330,6 +363,8 @@ var withoutModel = map[config.Role]struct{ uses, without, off string }{
 	config.RolePlanner: {"search understanding", "searches use their words",
 		"search.understand: false to stop understanding questions"},
 	config.RoleSummaries: {"document summaries", "pages get no summary", "summaries.enabled: false to write none"},
+	config.RoleReranker: {"search reranking", "searches keep their first ranking",
+		"search.rerank: false to stop reranking"},
 }
 
 // possessive is name's possessive: "search understanding's", "document

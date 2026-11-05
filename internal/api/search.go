@@ -24,13 +24,20 @@ import (
 // understanding.plan as is or with a filter taken out, and asks no model,
 // so an understood search's pages are windows of one ranking. A request
 // sends one or neither. Filters win over a plan's, dimension by dimension.
+//
+// Rerank asks the reranker to reorder the ranking's head; RerankOrder
+// orders it by the head a response's reranking.order returned, asking no
+// model, so a reranked search's pages are windows of one ranking too. A
+// request sends one or neither.
 type SearchRequest struct {
-	Query      string    `json:"query"`
-	K          int       `json:"k,omitempty"`
-	Offset     int       `json:"offset,omitempty"`
-	Filters    Filters   `json:"filters,omitzero"`
-	Understand bool      `json:"understand,omitempty"`
-	Plan       *PlanJSON `json:"plan,omitempty"`
+	Query       string    `json:"query"`
+	K           int       `json:"k,omitempty"`
+	Offset      int       `json:"offset,omitempty"`
+	Filters     Filters   `json:"filters,omitzero"`
+	Understand  bool      `json:"understand,omitempty"`
+	Plan        *PlanJSON `json:"plan,omitempty"`
+	Rerank      bool      `json:"rerank,omitempty"`
+	RerankOrder []string  `json:"rerank_order,omitempty"`
 }
 
 // PlanJSON mirrors the openapi Plan schema: what a search does for a
@@ -159,7 +166,10 @@ type ChunkMatchJSON struct {
 // keyword-only results when semantic search was unavailable. Undated, with
 // a date filter alone, is how many documents it couldn't judge.
 // Understanding says how a request that sent understand or plan was
-// understood; TookMS covers the planning too.
+// understood, and Reranking how one that sent rerank or rerank_order had
+// its head ordered; TookMS covers the planning and the reranking too.
+// Items are in the reranker's order when it reordered the head; each
+// Score stays the first ranking's.
 type SearchResponse struct {
 	Query         string              `json:"query"`
 	TookMS        int64               `json:"took_ms"`
@@ -174,6 +184,7 @@ type SearchResponse struct {
 	Warnings      []string            `json:"warnings,omitempty"`
 	Undated       *int                `json:"undated,omitempty"`
 	Understanding *Understanding      `json:"understanding,omitempty"`
+	Reranking     *Reranking          `json:"reranking,omitempty"`
 	Items         []SearchHitResponse `json:"items"`
 }
 
@@ -197,10 +208,12 @@ func (d Deps) handleSearch(w http.ResponseWriter, r *http.Request) {
 // (search.FilterError), and a content_type or source outside its set is
 // one, since the engine would match nothing and a typo would read as "no
 // results". So is a request sending understand and a plan, or a plan
-// understand.Validate refuses. Semantic search failing is not an error:
-// the keyword results come back Degraded, with Warnings; nor is
-// understanding failing, which searches the query's words, Understanding
-// saying why.
+// understand.Validate refuses, or rerank with rerank_order, or an order
+// checkRerank refuses. Semantic search failing is not an error: the
+// keyword results come back Degraded, with Warnings; nor is understanding
+// failing, which searches the query's words, Understanding saying why; nor
+// reranking failing, which keeps the first ranking whole, Reranking saying
+// why.
 func (d Deps) search(ctx context.Context, req SearchRequest) (SearchResponse, error) {
 	if req.Query == "" {
 		return SearchResponse{}, badRequest("query is required")
@@ -222,9 +235,12 @@ func (d Deps) search(ctx context.Context, req SearchRequest) (SearchResponse, er
 	if _, err := req.Filters.request().Resolve(); err != nil {
 		return SearchResponse{}, &requestError{err: err}
 	}
+	if err := checkRerank(req); err != nil {
+		return SearchResponse{}, err
+	}
 
-	// The whole search, its plan, embed, reads and hydration, is the
-	// person's use of the models, which the summary pass yields to.
+	// The whole search, its plan, embed, reads, rerank and hydration, is
+	// the person's use of the models, which the summary pass yields to.
 	end := d.Foreground.Begin()
 	defer end()
 	start := time.Now()
@@ -246,12 +262,23 @@ func (d Deps) search(ctx context.Context, req SearchRequest) (SearchResponse, er
 	if sreq.Filters, err = merged.Resolve(); err != nil {
 		return SearchResponse{}, &requestError{err: err}
 	}
-	res, err := d.Search.Search(ctx, sreq)
+	// A reranked head is read from the top whatever the window: the
+	// engine is asked for both, and the window cut from the head reordered
+	// and the first ranking's rest.
+	rp := d.planRerank(req, plan)
+	res, err := d.Search.Search(ctx, rerankWindow(sreq, rp, k))
 	if err != nil {
 		return SearchResponse{}, err
 	}
+	hits, reranking, err := d.applyRerank(ctx, req, plan, rp, res.Items)
+	if err != nil {
+		return SearchResponse{}, err
+	}
+	if rp.depth > 0 {
+		hits = hitWindow(hits, req.Offset, k)
+	}
 
-	items, err := d.searchHitsToResponse(ctx, res.Items)
+	items, err := d.searchHitsToResponse(ctx, hits)
 	if err != nil {
 		return SearchResponse{}, err
 	}
@@ -269,6 +296,7 @@ func (d Deps) search(ctx context.Context, req SearchRequest) (SearchResponse, er
 		Warnings:      res.Warnings,
 		Undated:       res.Undated,
 		Understanding: understanding,
+		Reranking:     reranking,
 		Items:         items,
 	}, nil
 }

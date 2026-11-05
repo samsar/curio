@@ -77,7 +77,7 @@ func (f *fakeOllama) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var req pullRequest
 		assert.NoError(f.t, json.NewDecoder(r.Body).Decode(&req))
 		f.pulled = append(f.pulled, req.Model)
-		f.models = append(f.models, normalizeModel(req.Model))
+		f.models = append(f.models, NormalizeModel(req.Model))
 		fmt.Fprintln(w, `{"status":"pulling manifest"}`)
 		fmt.Fprintln(w, `{"status":"success"}`)
 	default:
@@ -372,7 +372,7 @@ func TestNormalizeModel(t *testing.T) {
 		"localhost:5000/m:v1":   "localhost:5000/m:v1",
 	}
 	for in, want := range cases {
-		assert.Equal(t, want, normalizeModel(in), in)
+		assert.Equal(t, want, NormalizeModel(in), in)
 	}
 }
 

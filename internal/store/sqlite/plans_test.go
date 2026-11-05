@@ -841,6 +841,14 @@ func documentIndexPlanCases(t *testing.T) []planCase {
 			first: "SEARCH document_fields USING INDEX sqlite_autoindex_document_fields_1 (document_id=?)",
 		},
 		{
+			// A reranker's candidates' fields rows, each by its unique key,
+			// however many: the tenant checked on each row found.
+			name:  "FieldsOf",
+			query: fieldsOfSQL, args: []any{`["a","b","c"]`, "local"},
+			want:  []string{"SEARCH document_fields USING INDEX sqlite_autoindex_document_fields_1 (document_id=?)"},
+			avoid: []string{"SCAN document_fields"},
+		},
+		{
 			// The tenant's documents, each card by its primary key.
 			name:  "ResetCards",
 			query: resetCardsSQL, args: []any{"local"},
@@ -961,6 +969,14 @@ func summaryPlanCases() []planCase {
 			name:  "GetSummary",
 			query: getSummarySQL, args: []any{"doc", "local"},
 			want: []string{document, summaryOfDoc},
+		},
+		{
+			// A reranker's candidates' summaries, each by its unique key,
+			// its document by its primary key: no scan of either table.
+			name:  "CurrentSummaries",
+			query: currentSummariesSQL, args: []any{`["a","b","c"]`, "local"},
+			want:  []string{document, summaryOfDoc},
+			avoid: []string{"SCAN s", "SCAN d"},
 		},
 		{
 			// The tenant's fetched documents, one range, each row by its key:

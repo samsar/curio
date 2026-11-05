@@ -13,6 +13,7 @@ import (
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/devtool"
 	"github.com/samsar/curio/internal/eval"
+	"github.com/samsar/curio/internal/rerank"
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/understand"
@@ -120,6 +121,8 @@ type variantReport struct {
 	LatencyMS       map[string]percentiles `json:"latency_ms"`
 	PlanStatuses    map[string]int         `json:"plan_statuses,omitempty"`
 	FilterAgreement map[verdict]int        `json:"filter_agreement,omitempty"`
+	Rerank          *rerankReport          `json:"rerank,omitempty"`
+	RerankStatuses  map[string]int         `json:"rerank_statuses,omitempty"`
 	Groups          []groupReport          `json:"groups"`
 	Queries         []queryReport          `json:"queries"`
 
@@ -156,8 +159,13 @@ type queryReport struct {
 	Plan            *planJSON          `json:"plan,omitempty"`
 	PlanStatus      string             `json:"plan_status,omitempty"`
 	PlanMS          *float64           `json:"plan_ms,omitempty"`
+	PlanReplayed    bool               `json:"plan_replayed,omitempty"`
 	PlanDropped     []droppedJSON      `json:"plan_dropped,omitempty"`
 	FilterAgreement map[string]verdict `json:"filter_agreement,omitempty"`
+	Rerank          *rerankQuery       `json:"rerank,omitempty"`
+	// UnjudgedTop10 are the documents a rerank brought into the top 10
+	// that no judgment names: the measure's blind spot.
+	UnjudgedTop10 []string `json:"unjudged_top10,omitempty"`
 	eval.QueryScore
 	Judgments []judgmentReport   `json:"judgments"`
 	Ranking   []rankedReport     `json:"ranking"`
@@ -252,13 +260,37 @@ func newQueryReport(i int, q eval.Query, score eval.QueryScore, r ranking, judge
 	if r.plan != nil {
 		addPlan(&qr, *r.plan, r.applied)
 	}
+	if r.rerank != nil {
+		qr.Rerank = r.rerank
+		qr.UnjudgedTop10 = unjudgedEntering(q, r.base, r.docs)
+	}
 	return qr
+}
+
+// unjudgedEntering are the documents of after's top 10 that before's top
+// 10 didn't hold and no judgment of q names, in after's order.
+func unjudgedEntering(q eval.Query, before, after []rankedDoc) []string {
+	judged := make(map[string]bool, len(q.Relevant))
+	for _, j := range q.Relevant {
+		judged[j.URL] = true
+	}
+	was := make(map[string]bool, 10)
+	for _, d := range before[:min(10, len(before))] {
+		was[d.id] = true
+	}
+	var out []string
+	for _, d := range after[:min(10, len(after))] {
+		if !was[d.id] && !judged[d.url] {
+			out = append(out, d.id)
+		}
+	}
+	return out
 }
 
 // addPlan records a planned query's plan in its report.
 func addPlan(qr *queryReport, qp queryPlan, applied search.FilterRequest) {
 	took := ms(qp.took)
-	qr.PlanStatus, qr.PlanMS = string(qp.status), &took
+	qr.PlanStatus, qr.PlanMS, qr.PlanReplayed = string(qp.status), &took, qp.replayed
 	if qp.plan != nil {
 		qr.Plan = toPlanJSON(*qp.plan)
 	}
@@ -331,6 +363,7 @@ func (r *report) text(b *bytes.Buffer, base *baseline) {
 		writeQueries(b, v.Queries)
 		b.WriteString("\n")
 		writePlans(b, v)
+		writeReranks(b, v)
 		writeLatencies(b, v)
 		fmt.Fprintf(b, "\nwall time %.1f s\n", v.WallMS/1000)
 		if base != nil {
@@ -346,8 +379,8 @@ func (r *report) writePlanner(b *bytes.Buffer) {
 	p := r.Provenance
 	switch {
 	case p.PlansFrom != "":
-		fmt.Fprintf(b, "Plans: replayed from %s (prompt %s); no model was asked\n", p.PlansFrom,
-			shortHash(p.PlansPromptVersion))
+		fmt.Fprintf(b, "Plans: replayed from %s (prompt %s); no model was asked; each plan's recorded time counts "+
+			"in its plan stage and total\n", p.PlansFrom, shortHash(p.PlansPromptVersion))
 	case r.Planner != nil:
 		pl := r.Planner
 		fmt.Fprintf(b, "Planner: %s, prompt %s, today %s, loaded in %.1f s; rewrites at %g, names at %g, "+
@@ -392,6 +425,44 @@ func writePlans(b *bytes.Buffer, v variantReport) {
 		}
 	}
 	b.WriteString("\n")
+}
+
+// writeReranks says, for a reranked variant, which reranker reranked it,
+// its queries by rerank status, the pointwise candidates left unscored
+// and bounded, and how many documents no judgment names reranks brought
+// into the top 10. Counts alone: the IDs are in the JSON.
+func writeReranks(b *bytes.Buffer, v variantReport) {
+	rr := v.Rerank
+	if rr == nil {
+		return
+	}
+	fmt.Fprintf(b, "reranker: %s (%s), routes one %s, topical %s, none %s, keywords %s; depth %d, blend %s, input "+
+		"%s, textless %s, folders %v, claims %v, timeout %.0f ms; prompt %s; check %s in %.1f s; loaded in %.1f s; "+
+		"%d answers asked, %d replayed\n", rr.Model, rr.Family, rr.Routes["one"], rr.Routes["topical"],
+		rr.Routes["none"], rr.Routes["keywords"], rr.Depth, rr.Blend, rr.Input, rr.Textless, rr.Folders, rr.Claims,
+		rr.TimeoutMS, shortHash(rr.PromptVersion), rr.Check, rr.CheckMS/1000, rr.WarmMS/1000, rr.Answers.Asked,
+		rr.Answers.Replayed)
+	if len(rr.Evicted) > 0 {
+		fmt.Fprintf(b, "evicted while it ran: %s\n", strings.Join(rr.Evicted, ", "))
+	}
+	var statuses []string
+	for _, st := range rerank.Statuses() {
+		if n := v.RerankStatuses[string(st)]; n > 0 {
+			statuses = append(statuses, fmt.Sprintf("%s %d", st, n))
+		}
+	}
+	unscored, bounded, unjudged, timedOut := 0, 0, 0, 0
+	for _, q := range v.Queries {
+		if q.Rerank != nil {
+			unscored, bounded = unscored+q.Rerank.Unscored, bounded+q.Rerank.Bounded
+			if q.Rerank.TimedOutByBudget {
+				timedOut++
+			}
+		}
+		unjudged += len(q.UnjudgedTop10)
+	}
+	fmt.Fprintf(b, "reranks: %s; %d timed out by the budget; %d candidates unscored, %d bounded; %d unjudged "+
+		"documents entered a top 10\n\n", strings.Join(statuses, ", "), timedOut, unscored, bounded, unjudged)
 }
 
 // queryCount is how many queries the run scored.

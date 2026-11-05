@@ -28,22 +28,30 @@ const MaxCardBytes = cardParts*maxCardPartBytes + (cardParts-1)*len(cardSeparato
 // " — ". It reads only f, so the store can make a card again from the
 // fields it keeps.
 func (f Fields) Card() string {
-	var saved []string
-	seen := map[string]bool{strings.ToLower(f.Title): true}
-	for _, t := range lines(f.BookmarkTitles) {
-		if key := strings.ToLower(collapse(t)); !seen[key] {
-			seen[key] = true
-			saved = append(saved, t)
-		}
-	}
 	parts := make([]string, 0, cardParts)
-	for _, p := range [cardParts]string{f.Title, strings.Join(saved, " | "), SiteOrHost(f.SiteName, f.Host), f.Author,
-		strings.Join(lines(f.Folders), " | ")} {
+	for _, p := range [cardParts]string{f.Title, strings.Join(SavedTitles(f.Title, f.BookmarkTitles), " | "),
+		SiteOrHost(f.SiteName, f.Host), f.Author, strings.Join(lines(f.Folders), " | ")} {
 		if p = strings.TrimSpace(textutil.TruncateBytes(collapse(p), maxCardPartBytes)); p != "" {
 			parts = append(parts, p)
 		}
 	}
 	return strings.Join(parts, cardSeparator)
+}
+
+// SavedTitles are the titles a document was saved as, bookmarkTitles one a
+// line as its fields hold them, that differ from its title and from each
+// other, compared case-insensitively, in their order: what its card and a
+// reranker show beside the title.
+func SavedTitles(title, bookmarkTitles string) []string {
+	var saved []string
+	seen := map[string]bool{strings.ToLower(title): true}
+	for _, t := range lines(bookmarkTitles) {
+		if key := strings.ToLower(collapse(t)); !seen[key] {
+			seen[key] = true
+			saved = append(saved, t)
+		}
+	}
+	return saved
 }
 
 // SiteOrHost is how a document's site is named in the text it is embedded

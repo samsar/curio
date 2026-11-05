@@ -1249,11 +1249,29 @@ type DocumentIndex interface {
 	// the name its host agreed on or its page declared, and its host.
 	// ErrNotFound when the document has no fields row.
 	Site(ctx context.Context, tenantID, documentID string) (DocumentSite, error)
+	// FieldsOf reads the fields of the tenant's documents ids names, by
+	// document ID, in one read whatever their number: what a reranker
+	// shows a candidate by. A document without a fields row, or another
+	// tenant's, is absent; no IDs read nothing.
+	FieldsOf(ctx context.Context, tenantID string, ids []string) (map[string]DocumentFields, error)
 	// ResetCards makes every one of the tenant's cards stale, keeping
 	// their vectors searchable until they are embedded again, and queues
 	// a cards job, at most one pending per tenant, in one transaction.
 	// It returns how many cards it made stale.
 	ResetCards(ctx context.Context, tenantID string) (int, error)
+}
+
+// DocumentFields are the fields of a document a reader of it shows, as
+// its search fields hold them (docmeta.Fields): its title, its bookmarks'
+// distinct titles and folders one a line, its site's name and host, and
+// its author.
+type DocumentFields struct {
+	Title          string
+	BookmarkTitles string
+	Folders        string
+	SiteName       string
+	Host           string
+	Author         string
 }
 
 // DocumentSite is a document's site as its search fields hold it.
@@ -1410,6 +1428,14 @@ type SummaryStore interface {
 	// GetSummary reads documentID's summary as stored. ErrNotFound when
 	// none was written or failed.
 	GetSummary(ctx context.Context, tenantID, documentID string) (*StoredSummary, error)
+	// CurrentSummaries reads, by document ID, the summaries of the
+	// tenant's documents ids names that read their document's current
+	// extraction, in one read whatever their number: what a reranker shows
+	// a candidate by. A summary by another model or prompt counts, one owed
+	// a rewrite too; a summary of kind not_the_page, of an older
+	// extraction, or of another tenant's document is absent, as is a
+	// document without one. No IDs read nothing.
+	CurrentSummaries(ctx context.Context, tenantID string, ids []string) (map[string]*Summary, error)
 	// CountSummaries sorts the tenant's fetched documents by their
 	// summary under w (SummaryCounts).
 	CountSummaries(ctx context.Context, tenantID string, w SummaryWriter) (SummaryCounts, error)

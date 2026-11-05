@@ -14,6 +14,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/samsar/curio/internal/textutil"
 )
 
 // countingReader is a reader of n bytes of text that counts how many were
@@ -154,8 +156,8 @@ func TestFit(t *testing.T) {
 		}
 		in, err := BuildInput(d, strings.NewReader(text(r.IntN(40<<10))))
 		require.NoError(t, err)
-		fields := (estimateQuarters(in.Title+in.URL+in.Site+in.ContentType) + 3) / 4
-		page := (estimateQuarters(in.Text) + 3) / 4
+		fields := (textutil.TokenQuarters(in.Title+in.URL+in.Site+in.ContentType) + 3) / 4
+		page := (textutil.TokenQuarters(in.Text) + 3) / 4
 		require.LessOrEqual(t, instructionTokens+fields+page+maxAnswerTokens, numCtx-ctxMargin)
 		require.True(t, utf8.ValidString(in.Text))
 	}

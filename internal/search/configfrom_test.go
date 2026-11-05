@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/samsar/curio/internal/config"
+	"github.com/samsar/curio/internal/rerank"
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/understand"
 )
@@ -20,15 +21,16 @@ var otherSearchStrings = map[string]string{"Collapse": "sum"}
 // TestConfigFrom_MapsEveryKey: a change to any key of config.yaml's search
 // section, or to embedding.query_prefix, changes the engine's Config, so a
 // search key added later fails here until ConfigFrom maps it. The keys the
-// planner owns (understand.SearchFields) are left to its own test, which
-// holds understand.OptionsFrom to them; an external test package, since
-// understand imports search.
+// planner and the reranker own (understand.SearchFields,
+// rerank.SearchFields) are left to their own tests, which hold their
+// OptionsFrom to them; an external test package, since both import
+// search.
 func TestConfigFrom_MapsEveryKey(t *testing.T) {
 	base := search.ConfigFrom(config.Default())
 	typ := reflect.TypeFor[config.Search]()
 	for i := range typ.NumField() {
 		field := typ.Field(i)
-		if slices.Contains(understand.SearchFields(), field.Name) {
+		if slices.Contains(understand.SearchFields(), field.Name) || slices.Contains(rerank.SearchFields(), field.Name) {
 			continue
 		}
 		t.Run("search."+field.Tag.Get("yaml"), func(t *testing.T) {

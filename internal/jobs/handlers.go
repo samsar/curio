@@ -328,9 +328,10 @@ func fetchedMetadata(doc *store.Document, res *fetcher.Result, extractionID stri
 }
 
 // ErrNoMarkdown is a document whose current extraction has no markdown to
-// index: it has no extraction, the extraction names no file, or the file
-// is gone (content files may be deleted). Retrying can't bring it back.
-var ErrNoMarkdown = errors.New("no markdown to index")
+// read, for an index job or a summarize job alike: it has no extraction,
+// the extraction names no file, or the file is gone (content files may be
+// deleted). Retrying can't bring it back.
+var ErrNoMarkdown = errors.New("no markdown to read")
 
 // indexHandler builds the closure that runs one index job: IndexDocument,
 // then the document placed into the current interests, best effort. A

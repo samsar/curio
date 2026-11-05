@@ -98,6 +98,12 @@ func TestSummariesCheck(t *testing.T) {
 	assert.Equal(t, "on with gemma4:12b, which misses the summaries' measured bars: 6% of gemma4:12b's summaries "+
 		"stated what their page doesn't", detail)
 	assert.Equal(t, summariesBarsFix, hint)
+	status, detail, hint = summariesCheck(stats, client.SummariesHealth{On: true, Model: "gemma4:12b",
+		Check: "fit"}, false)
+	assert.Equal(t, statusWarn, status, "a pass stopped below the bars")
+	assert.Equal(t, "10 of 15 written with gemma4:12b; 5 to write, and no summarize job is queued to write them",
+		detail, "the restart it needs comes before the bars' advisory")
+	assert.Equal(t, summariesRestart, hint)
 	status, _, _ = summariesCheck(stats, client.SummariesHealth{On: true, Model: "elsewhere:7b", Check: "fit"}, true)
 	assert.Equal(t, statusOK, status, "an unmeasured model: nothing to say")
 

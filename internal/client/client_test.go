@@ -1108,3 +1108,32 @@ func TestQueue(t *testing.T) {
 	_, err = c.UpdateQueue(ctx, client.QueueUpdate{Throttle: "fast"})
 	requireStatus(t, err, http.StatusBadRequest)
 }
+
+// TestSearchRequest_RerankFields: rerank and rerank_order are sent only
+// when set, after understand and plan, so a daemon that predates them is
+// refused for the first it doesn't know; a reranked response's reranking
+// and healthz's reranking decode.
+func TestSearchRequest_RerankFields(t *testing.T) {
+	body, err := json.Marshal(client.SearchRequest{Query: "q"})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"query":"q"}`, string(body))
+	body, err = json.Marshal(client.SearchRequest{Query: "q", Understand: true, Rerank: true})
+	require.NoError(t, err)
+	assert.Equal(t, `{"query":"q","understand":true,"rerank":true}`, string(body), "in this order")
+	body, err = json.Marshal(client.SearchRequest{Query: "q", RerankOrder: []string{"a", "b"}})
+	require.NoError(t, err)
+	assert.Equal(t, `{"query":"q","rerank_order":["a","b"]}`, string(body))
+
+	srv := apitest.Start(t, apitest.WithReranker(apitest.NewReranker(10)))
+	srv.AddBookmark(t, "https://example.com/a", store.SourceChrome, "Queues a", "")
+	srv.AddBookmark(t, "https://example.com/b", store.SourceChrome, "Queues b", "")
+	c := client.New(srv.URL)
+	res, err := c.Search(context.Background(), client.SearchRequest{Query: "queues", Rerank: true})
+	require.NoError(t, err)
+	require.NotNil(t, res.Reranking)
+	assert.Equal(t, "reranked", res.Reranking.Status)
+	h, err := c.Healthz(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, h.Reranking)
+	assert.True(t, h.Reranking.On)
+}

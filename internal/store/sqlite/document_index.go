@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -587,6 +588,43 @@ func (x *DocumentIndex) Site(ctx context.Context, tenantID, documentID string) (
 		return store.DocumentSite{}, fmt.Errorf("site of document %s: %w", documentID, err)
 	}
 	return site, nil
+}
+
+// fieldsOfSQL reads the fields rows of the documents a JSON array names,
+// each by its unique key (the document_id index), so the SQL is the same
+// however many IDs there are. The tenant is checked on the rows found
+// (+tenant_id), never walked. Its args are the array and the tenant.
+const fieldsOfSQL = `SELECT document_id, title, bookmark_titles, folders, site_name, host, author
+	FROM document_fields WHERE document_id IN (SELECT value FROM json_each(?)) AND +tenant_id = ?`
+
+// FieldsOf implements store.DocumentIndex.
+func (x *DocumentIndex) FieldsOf(ctx context.Context, tenantID string, ids []string) (map[string]store.DocumentFields,
+	error) {
+	out := map[string]store.DocumentFields{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	list, err := json.Marshal(ids)
+	if err != nil {
+		return nil, fmt.Errorf("fields of documents: encode their IDs: %w", err)
+	}
+	rows, err := x.db.QueryContext(ctx, fieldsOfSQL, string(list), tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("fields of documents: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var f store.DocumentFields
+		if err := rows.Scan(&id, &f.Title, &f.BookmarkTitles, &f.Folders, &f.SiteName, &f.Host, &f.Author); err != nil {
+			return nil, fmt.Errorf("fields of documents: %w", err)
+		}
+		out[id] = f
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("fields of documents: %w", err)
+	}
+	return out, nil
 }
 
 // resetCardsSQL makes the tenant's embedded cards stale, reaching them

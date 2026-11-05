@@ -142,9 +142,9 @@ func (c *Client) lookup(ctx context.Context) (tagEntry, error) {
 	if err := decodeJSON(resp.Body, &tags, MaxResponseBody); err != nil {
 		return tagEntry{}, fmt.Errorf("/api/tags: %w", err)
 	}
-	want := normalizeModel(c.model)
+	want := NormalizeModel(c.model)
 	for _, m := range tags.Models {
-		if normalizeModel(m.Name) == want || normalizeModel(m.Model) == want {
+		if NormalizeModel(m.Name) == want || NormalizeModel(m.Model) == want {
 			return m, nil
 		}
 	}
@@ -186,8 +186,8 @@ func (c *Client) Running(ctx context.Context) ([]Running, error) {
 // Is reports whether r is the model named name, matched as Ping matches
 // /api/tags: case aside, an untagged name being :latest.
 func (r Running) Is(name string) bool {
-	want := normalizeModel(name)
-	return normalizeModel(r.Name) == want || normalizeModel(r.Model) == want
+	want := NormalizeModel(name)
+	return NormalizeModel(r.Name) == want || NormalizeModel(r.Model) == want
 }
 
 // Loaded reports whether Ollama holds the model in memory now, from GET
@@ -244,10 +244,10 @@ func (c *Client) Version(ctx context.Context) (string, error) {
 	return v.Version, nil
 }
 
-// normalizeModel is the name Ollama runs for name: lower-cased, with
+// NormalizeModel is the name Ollama runs for name: lower-cased, with
 // ":latest" when it has no tag. The tag follows a ':' in the last path
 // segment; a ':' before the last '/' belongs to a registry host's port.
-func normalizeModel(name string) string {
+func NormalizeModel(name string) string {
 	name = strings.ToLower(name)
 	if !strings.Contains(name[strings.LastIndex(name, "/")+1:], ":") {
 		name += ":latest"

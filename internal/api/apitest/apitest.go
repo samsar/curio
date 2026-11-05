@@ -30,6 +30,7 @@ import (
 	"github.com/samsar/curio/internal/indexer"
 	"github.com/samsar/curio/internal/insight"
 	"github.com/samsar/curio/internal/jobs"
+	"github.com/samsar/curio/internal/rerank"
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/store/sqlite"
@@ -297,6 +298,68 @@ func (p *Planner) Questions() []string {
 // WithPlanner is an option for Start that understands questions with p.
 func WithPlanner(p *Planner) func(*api.Deps) {
 	return func(d *api.Deps) { d.Planner = p }
+}
+
+// Reranker is a reranker whose state a test sets, and which reverses every
+// head it reranks, at depth, recording the questions it is asked. Its
+// state, until set, a reranker that is on and hasn't checked its model.
+// Safe for concurrent use.
+type Reranker struct {
+	mu        sync.Mutex
+	depth     int
+	state     *rerank.State
+	questions []string
+}
+
+// NewReranker is a reranker that reverses the first depth documents of
+// every search.
+func NewReranker(depth int) *Reranker { return &Reranker{depth: depth} }
+
+// Decide implements api.Reranker.
+func (r *Reranker) Decide(string, understand.Kind, bool) (int, rerank.Outcome) {
+	return r.depth, rerank.Outcome{}
+}
+
+// Rerank implements api.Reranker: the head reversed.
+func (r *Reranker) Rerank(_ context.Context, req rerank.Request) (rerank.Outcome, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.questions = append(r.questions, req.Question)
+	order := make([]string, len(req.Candidates))
+	for i, c := range req.Candidates {
+		order[len(order)-1-i] = c.ID
+	}
+	return rerank.Outcome{Status: rerank.StatusReranked, Model: "m:1", Method: rerank.MethodListwise,
+		Depth: len(order), Candidates: len(order), Order: order}, nil
+}
+
+// State implements api.Reranker.
+func (r *Reranker) State() rerank.State {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.state != nil {
+		return *r.state
+	}
+	return rerank.State{On: true, Model: "m:1", Check: rerank.CheckUnchecked}
+}
+
+// SetState makes s the reranker's state from now on.
+func (r *Reranker) SetState(s rerank.State) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.state = &s
+}
+
+// Questions are the questions whose heads the reranker reranked, in order.
+func (r *Reranker) Questions() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.questions)
+}
+
+// WithReranker is an option for Start that reranks searches with r.
+func WithReranker(r *Reranker) func(*api.Deps) {
+	return func(d *api.Deps) { d.Reranker = r }
 }
 
 // AddBookmark saves url from source as title in folder through ingest,

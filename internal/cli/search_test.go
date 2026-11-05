@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -173,17 +174,118 @@ func TestSearch_OlderDaemon(t *testing.T) {
 	assert.Empty(t, stderr.String())
 }
 
-// TestPredatesUnderstanding: only a 400 whose detail opens with the
-// decoder's words for the understand field is an older daemon.
-func TestPredatesUnderstanding(t *testing.T) {
+// TestPredates: only a 400 whose detail opens with the decoder's words for
+// the field is an older daemon.
+func TestPredates(t *testing.T) {
 	refused := func(status int, detail string) error {
 		return &client.APIError{Status: status, Problem: client.Problem{Detail: detail}}
 	}
-	assert.True(t, predatesUnderstanding(fmt.Errorf("search: %w",
-		refused(http.StatusBadRequest, `unknown field "understand": this curio-daemon doesn't support it`))))
-	assert.False(t, predatesUnderstanding(refused(http.StatusBadRequest, `unknown field "plan": ...`)))
-	assert.False(t, predatesUnderstanding(refused(http.StatusBadRequest, "filters.site: \"*\" is not a domain")))
-	assert.False(t, predatesUnderstanding(refused(http.StatusInternalServerError, `unknown field "understand"`)))
-	assert.False(t, predatesUnderstanding(errors.New(`unknown field "understand"`)), "not the daemon's answer")
-	assert.False(t, predatesUnderstanding(nil))
+	assert.True(t, predates(fmt.Errorf("search: %w",
+		refused(http.StatusBadRequest, `unknown field "understand": this curio-daemon doesn't support it`)), "understand"))
+	assert.True(t, predates(refused(http.StatusBadRequest, `unknown field "rerank": ...`), "rerank"))
+	assert.False(t, predates(refused(http.StatusBadRequest, `unknown field "rerank": ...`), "understand"))
+	assert.False(t, predates(refused(http.StatusBadRequest, `unknown field "plan": ...`), "understand"))
+	assert.False(t, predates(refused(http.StatusBadRequest, "filters.site: \"*\" is not a domain"), "understand"))
+	assert.False(t, predates(refused(http.StatusInternalServerError, `unknown field "understand"`), "understand"))
+	assert.False(t, predates(errors.New(`unknown field "understand"`), "understand"), "not the daemon's answer")
+	assert.False(t, predates(nil, "understand"))
+}
+
+// refusingDaemon is a daemon whose decoder refuses fields, as a daemon that
+// predates them does: the first of them a request sends. It records each
+// body.
+func refusingDaemon(t *testing.T, fields ...string) (*httptest.Server, *[]string) {
+	t.Helper()
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, err := io.ReadAll(r.Body)
+		assert.NoError(t, err)
+		bodies = append(bodies, string(raw))
+		var got map[string]json.RawMessage
+		assert.NoError(t, json.Unmarshal(raw, &got))
+		for _, f := range fields {
+			if _, sent := got[f]; sent {
+				w.Header().Set("Content-Type", "application/problem+json")
+				w.WriteHeader(http.StatusBadRequest)
+				fmt.Fprintf(w, `{"type":"about:blank","title":"bad request","status":400,"detail":`+
+					`"unknown field \"%s\": this curio-daemon (version v2.6.0) doesn't support it. If the client is `+
+					`newer, restart the daemon: run `+"`curio daemon stop`"+`, and the next command starts the current one"}`,
+					f)
+				return
+			}
+		}
+		fmt.Fprint(w, `{"query":"kafka","took_ms":3,"bm25_hits":0,"vector_hits":0,"total":0,"capped":false,"items":[]}`)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &bodies
+}
+
+// TestSearch_DaemonBeforeReranking: a daemon that predates reranking but
+// understands has the search sent again without rerank; one that predates
+// both, without understand, then without rerank, each said once on
+// stderr.
+func TestSearch_DaemonBeforeReranking(t *testing.T) {
+	const understood = "note: this curio-daemon predates understanding questions; searched your words " +
+		"(restart it: curio daemon stop)\n"
+	const reranked = "note: this curio-daemon predates reranking; kept its first ranking (restart it: curio " +
+		"daemon stop)\n"
+	for _, tc := range []struct {
+		name   string
+		fields []string
+		bodies []string
+		notes  string
+	}{
+		{"before reranking", []string{"rerank"}, []string{`{"query":"kafka","understand":true,"rerank":true}`,
+			`{"query":"kafka","understand":true}`}, reranked},
+		{"before both", []string{"understand", "rerank"}, []string{
+			`{"query":"kafka","understand":true,"rerank":true}`, `{"query":"kafka","rerank":true}`,
+			`{"query":"kafka"}`}, understood + reranked},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, bodies := refusingDaemon(t, tc.fields...)
+			var stderr bytes.Buffer
+			res, err := sendSearch(context.Background(), client.New(srv.URL), client.SearchRequest{Query: "kafka",
+				Understand: true, Rerank: true}, &stderr)
+			require.NoError(t, err)
+			assert.Equal(t, "kafka", res.Query)
+			assert.Equal(t, tc.bodies, *bodies)
+			assert.Equal(t, tc.notes, stderr.String())
+		})
+	}
+}
+
+// TestRerankingLines: a reranked search says by what, how deep and how
+// long; one that kept its first ranking why, unless it was off or its kind
+// isn't reranked.
+func TestRerankingLines(t *testing.T) {
+	for _, tc := range []struct {
+		r    *client.Reranking
+		want []string
+	}{
+		{&client.Reranking{Status: "reranked", Model: "gemma4:26b", Method: "listwise", Depth: 20, TookMS: 3450},
+			[]string{"reranked (gemma4:26b, listwise, top 20, 3.5 s)"}},
+		{&client.Reranking{Status: "supplied", Order: []string{"a", "b"}},
+			[]string{"reranked as the first page was, by the order sent"}},
+		{&client.Reranking{Status: "supplied", Order: []string{"a", "b"}, Stale: 1},
+			[]string{"reranked as the first page was, by the order sent; 1 of its documents left the head"}},
+		{&client.Reranking{Status: "cold", Reason: "gemma4:26b is loading"},
+			[]string{"kept the first ranking: gemma4:26b is loading"}},
+		{&client.Reranking{Status: "timeout", Reason: "reranking took longer than 7s"},
+			[]string{"kept the first ranking: reranking took longer than 7s"}},
+		{&client.Reranking{Status: "too_long", Reason: "the question is 600 bytes"},
+			[]string{"kept the first ranking: the question is 600 bytes"}},
+		{&client.Reranking{Status: "off", Reason: "search reranking is off (search.rerank: false)"}, nil},
+		{&client.Reranking{Status: "skipped", Reason: "searches for keywords keep their first ranking"}, nil},
+		{nil, nil},
+	} {
+		assert.Equal(t, tc.want, rerankingLines(tc.r))
+	}
+	var out bytes.Buffer
+	renderHeader(&out, &client.Understanding{Status: "cold", Reason: "gemma4:26b is loading"},
+		&client.Reranking{Status: "cold", Reason: "gemma4:26b is loading"}, time.UTC)
+	assert.Equal(t, "searched your words: gemma4:26b is loading\nkept the first ranking: gemma4:26b is loading\n\n",
+		out.String(), "the rerank line follows the understood line")
+	out.Reset()
+	renderHeader(&out, nil, &client.Reranking{Status: "off"}, time.UTC)
+	assert.Empty(t, out.String())
 }

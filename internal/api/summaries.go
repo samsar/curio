@@ -145,12 +145,12 @@ func (d Deps) summaryStats(ctx context.Context) (*SummaryStats, error) {
 // are written, and off_by_default whether they are off because
 // config.yaml leaves summaries.enabled out; reason why no page is written
 // at all: off, off by default, no structured output, or withheld; the
-// fitness check's verdict,
-// and when an unchecked model's check runs again after one that reached
-// no verdict), the outage while its model doesn't answer, until when the
-// pass is held for a model Ollama keeps unloading, the pass's brake while
-// it is on, until when it yields to the person's use of the models, and
-// the writer's last failure. Like understanding, it never changes Status.
+// fitness check's verdict, and when an unchecked model's check runs again
+// after one that reached no verdict), the outage while its model doesn't
+// answer, until when the pass is held for a model Ollama keeps unloading,
+// the pass's brake while it is on, until when it yields to the person's
+// use of the models, and the writer's last failure. Like understanding,
+// it never changes Status.
 type SummariesHealth struct {
 	On                bool                  `json:"on"`
 	OffByDefault      bool                  `json:"off_by_default,omitempty"`

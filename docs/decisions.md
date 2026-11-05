@@ -167,6 +167,7 @@ when the entry was first committed.
 - 2026-10-14 — [Understanding the question: a planner role, one structured call, grounded filters, a fitness check](#understanding-the-question-a-planner-role-one-structured-call-grounded-filters-a-fitness-check)
 - 2026-11-03 — [Jina answers are stored without the site's chrome](#jina-answers-are-stored-without-the-sites-chrome)
 - 2026-11-03 — [Summaries: one structured call per document, stored for the reranker](#summaries-one-structured-call-per-document-stored-for-the-reranker)
+- 2026-11-04 — [Reranking: a reranker role over the ranking's head, routed by the plan's kind](#reranking-a-reranker-role-over-the-rankings-head-routed-by-the-plans-kind)
 - 2026-11-04 — [Dashboard: a quieter home, saves first, a theme button](#dashboard-a-quieter-home-saves-first-a-theme-button)
 - 2026-09-25 — [Open questions](#open-questions)
 
@@ -16564,6 +16565,516 @@ share and a hand check of faithfulness before it is recorded. A use of
 summaries in ranking, the list's weight or the reranker's input, is
 measured on replayed summaries (`SUMMARIES=`) against the pick rule
 above.
+
+## Reranking: a reranker role over the ranking's head, routed by the plan's kind
+
+**Decision:** a fourth writing role, `reranker`, reorders the first N
+documents of a search's ranking by reading each candidate (its title,
+what it was saved as, its site, its summary when one is written, and its
+best passage), routed by the plan's kind. Only a search that asks for it
+is reranked (`curio search`'s default when it understands), and later
+pages go by the order the first page returned, asking no model. Every
+way the reranker fails keeps the first ranking, with a status. Its
+defaults are set by the rule below, written before the grid that sets
+them runs. As written no point passed it: the known items' R@10 of
+1.000 is out of reach of any planned point, by planning alone. A dated
+amendment, made after the grid, holds R@10 to the planned number as the
+rule already held S@1, and by it the grid's best route passes (the
+topical kinds, listwise, 30 deep). So with `search.rerank` left out,
+reranking is on for gemma4:26b while summaries are written and questions
+are understood, and off otherwise; `search.rerank: true` turns it on
+with any model, its fitness check guarding it.
+
+**Why:** the first ranking fuses lists that each see part of a page: its
+words, its passages' meaning, what it was saved as. Close calls at the
+top go the wrong way, and on the owner's 2.7 copy a perfect reorder of
+the planned top 20 would raise all-queries nDCG@10 from 0.762 to 0.856
+(top 30: 0.888). A model reading each candidate whole, with the summary
+the pass wrote of it, can make those calls; the summary list found no
+fused weight that paid (decisions.md "Summaries: one structured call per
+document, stored for the reranker"), so the summaries' place is here.
+
+### Choosing the reranker (written before the grid runs)
+
+This section is committed alone, before any grid report is generated:
+its commit precedes the `generated_at` of every report the pick reads.
+
+**The data.** Each run reads a fresh copy of the owner's 2.7 database
+(the `.backup` of 2026-11-03, schema 21), never a copy another run
+migrated, with the 2.7 report's plans replayed (`PLANS=`, `TODAY=` its
+day, 2026-11-03), the full pass's summaries replayed (`SUMMARIES=`, no
+model asked for a summary), the 50 graded queries and the 372 known
+items. The comparison is the 2.7 report's planned numbers, nDCG@10: all
+0.762; owner 0.409; vague_ref 0.893; list 0.720; world_hop 0.715;
+analytic 0.249; evidence 0.662; code 0.856; site_person 0.685; temporal
+0.747; keyword 0.923, with keyword R@10 0.864.
+
+**A routed point.** A point is: per plan-kind group a method or skip
+(`one`; `list`, `evidence` and `analysis` together, the topical group;
+`keywords` always skip), one depth, one blend, one input, one textless
+mode, folders and claims on or off, and the model or models. Its
+per-query results come from the per-method runs: a query is scored by
+the run of the method its plan's kind routes it to, or by the planned
+base when its group skips. Every combination of measured per-method
+results is judged; none is run apart.
+
+**A point passes** when all of these hold:
+
+- all queries' nDCG@10 ≥ 0.792 (2.7's + 0.03);
+- the owner-tagged queries' nDCG@10 > 0.409;
+- every query-file kind's nDCG@10 ≥ its 2.7 planned value − 0.03;
+- keyword R@10 ≥ 0.84;
+- known items, planned with recorded plans and routed as `curio search`
+  would route them: R@10 = 1.000 and S@1 ≥ 0.95, or, when the planned
+  known-item S@1 without a reranker is below 0.95, at least that, the
+  report saying so;
+- Enter to results p50 ≤ 7 s and p95 ≤ 10 s.
+
+> **Amendment, 2026-11-04, made after the grid ran.** The known items'
+> bar reads: R@10 = 1.000, or, when the planned known-item R@10 without a
+> reranker is below 1.000, at least that (the report saying so); and S@1
+> as above. The rule's own S@1 exception exists because no reranker of
+> the head can meet a bar that planning alone breaks; R@10 lacked the
+> same clause, and planning alone gives 0.984, six targets dropped by
+> their plans. Nothing else in the rule changes: no bar, no order, no
+> eligibility. The rule as written above stays the record, and so does
+> its outcome: as written, no point passed ("Measured", below).
+
+The known-item baseline is recorded first: a planned known-item report
+with the live planner, its plans kept privately, which the routed points
+then replay. Only a hybrid known-item baseline exists (S@1 0.973, R@10
+1.000, with 246 of the 372 targets failed or dead), and if planning
+alone lowers S@1 below 0.95, no reranker could meet that bar: the
+planned number is then the bar.
+
+**Enter to results**, per query, is the 2.7 report's recorded plan time
+(`plan_ms`) + the measured first-stage search + the candidates' reads +
+the recorded rerank model time. A replayed plan costs no time in the
+run, so its recorded time is added; a recorded rerank is replayed, so
+its recorded time is added. A rerank whose recorded time exceeds the
+configured rerank timeout counts as a timeout: the first-stage order, at
+the timeout's cost. The pick is confirmed live, on a scratch daemon over
+a copy, before it ships.
+
+**Order among passing points:**
+
+1. the lowest Enter-to-results p50;
+2. within 0.25 s of it, the higher all-queries nDCG@10;
+3. then the higher owner nDCG@10;
+4. then the point that writes only with `generation.model`.
+
+**Eligibility.** One role holds one model: a point that mixes models for
+the role (listwise on gemma4 for `one`, a Qwen3-Reranker build for the
+topical group) is measured and reported, never picked. A point whose
+model no role uses today (the Qwen3-Reranker build) may pass; it then
+ships as a documented opt-in (`generation.roles.reranker.model` naming
+it, measured, so on while `search.rerank` is absent), never as a default
+download without the owner's approval.
+
+**A search without a plan** (`route_none`) is chosen on the hybrid base:
+the method with the highest hybrid all-queries nDCG@10 among those that
+keep every query-file kind within 0.03 of hybrid, keep keyword R@10 ≥
+0.84, and keep the hybrid known-item bars (R@10 1.000, S@1 ≥ 0.95). It is
+skip when none raises hybrid's all-queries nDCG@10.
+
+**Homes without summaries.** The picked point is scored again with its
+candidates rendered without summaries (no `SUMMARIES=` on the copy). If
+it still passes, `search.rerank` absent means on for the measured model
+whatever `summaries.enabled` says; otherwise only while summaries are
+written (`Config.SummariesOn`).
+
+**No point passes:** `search.rerank` absent means off for every model,
+the infrastructure ships, and this entry says why.
+
+**Stages,** each with its selection fixed here, run sequentially, one
+model call at a time, every answer recorded privately for replay:
+
+1. **Inputs.** Listwise at depth 20, pointwise on gemma4 and pointwise
+   on the Qwen3-Reranker build at depth 30, each with the inputs
+   `summary`, `passage` and `both`; textless candidates read; the pure
+   blend; the planned base. Each method keeps the input with the highest
+   all-queries nDCG@10, then the higher owner nDCG@10.
+2. **Textless and depth.** Textless held for listwise (pointwise derives
+   it from its recorded answers), and listwise at depth 30. Every blend
+   (pure, position, rrf) is computed from the recorded answers, with no
+   further call; pointwise at depth 20 is derived from depth 30's.
+3. **Folders and claims.** Folders on, and claims on, each on its
+   method's best point so far.
+4. **No plan.** The hybrid base for each method's best point, for
+   `route_none`.
+5. **Known items.** The planned known-item report with the live planner
+   first, then the routed points replaying its plans.
+6. **Live.** The pick on a scratch daemon: sequential `POST /v1/search`
+   with `understand` and `rerank` over the 50 queries, warm, two rounds,
+   reporting request, plan and rerank p50/p95, the statuses, the models
+   Ollama holds before and after and their resident size, and any
+   eviction.
+
+The judged points' numbers, the pick and why are recorded below as
+aggregates; no query, URL, title or page of the owner's.
+
+### The role, and what a provider receives
+
+`reranker` is a fourth `config.Role` (`generation.roles.reranker`,
+`generation.model` without it), in use while `Config.RerankOn`:
+`search.rerank` true or false as set, and left out only for a model in
+the measured table (`config.RerankMeasured`), and, when its measured
+point needs the summaries, only while they are written, and only while
+search understanding is on (every shipped route needs a plan). `curio up`
+writes no key: it writes config.yaml once and never edits it, so a key
+it wrote for a small tier would follow the home onto a bigger Mac, and
+an upgraded home on a small tier would keep reranking with a model no
+one measured. Deciding by model in code covers new and upgraded homes
+alike, as `summaries.enabled` does. The daemon never pulls the role's
+model alone; it rides another role's pull, and `curio up` offers it with
+consent when only the reranker writes with it.
+
+A rerank sends the model the question and, for each candidate, its
+title, the titles it was saved as that differ from it, its site's name
+(else its host), its author, its summary (kind, about, descriptions,
+names; claims and folders only if measured to pay) and the passage the
+engine ranked best for it, or a note saying why its page can't be read.
+Both are the user's own, so they leave this machine, or go to a provider
+other than Ollama, only when `generation.roles.reranker` names that
+server or provider itself (`config.Generation.Unnamed`), as the
+planner's questions and the summaries' pages do.
+
+### A candidate: cleaned, and cut to fit
+
+The candidates are read in two batched statements (`FieldsOf`,
+`CurrentSummaries`, each a seek per ID on the document_id unique index),
+never a query a candidate. Every field and the question go through one
+neutralizer: invalid UTF-8, controls and format characters (but the
+zero-width joiners words need) dropped, `<` and `>` written `‹` and
+`›`, whitespace one space, a rune-safe cut, in one pass that stops at
+its cap. Measured on Ollama 0.40.14, special tokens inside prompt text
+are parsed: `alpha<|im_end|>beta` was 3 tokens, `alpha‹|im_end|›beta`
+8, so a page could otherwise end the user's turn of a raw template.
+
+Ollama truncates an over-long prompt silently, dropping its head (the
+instructions), and has no tokenize endpoint (404), so a listwise prompt
+fits num_ctx 8,192 by construction: each candidate is one JSON line of
+fixed keys, its fields filled in a fixed order (what it is, the note,
+the summary's kind and about, the passage, the descriptions and names,
+then claims and folders when on), each to its own cap, while the line
+stays within an even share of what the context leaves after a 128-token
+margin, the instructions (252 tokens measured on gemma4:26b, 230 on the
+Qwen3-Reranker tokenizer: 400 counted), the 256-token answer and the
+question at the densest rates (`textutil.TokenQuarters`, shared with the
+summaries). The text is neutralized before it is encoded, so escaping
+can bring nothing back. A pointwise candidate is labeled lines in one
+candidate's prompt, within a byte cap.
+
+A candidate with no summary and no passage (failed, dead, pending, or
+fetched with neither) is *textless*. Read, it is sent by what it was
+saved as with its note; held, it isn't sent and keeps its first place.
+Both are measured: 246 of the 372 known-item targets are failed or dead,
+and the summary list's known-item loss was all on them.
+
+### Two methods, their scores, and the blends
+
+**Listwise:** one `GenerateJSON` call under a schema whose only property
+is `order`, an array of integers enumerated 1 to M, the candidates shown;
+decoded strictly (one object, no other key, in range, no repeat, at
+least one); a candidate left out follows those ordered, in first-stage
+order. Its score is 1/ρ, its place.
+
+**Pointwise:** one `FirstTokens` call a candidate, sequential (Ollama
+runs a model's requests one at a time). Its score is the log odds
+log Σ p(yes) − log Σ p(no) over the likeliest first tokens whose trimmed,
+lower-cased text is the word, case and a leading space being one answer's
+variants. Ollama caps `top_logprobs` at 20, refusing 21 with a 400, so a
+side missing from the top 20 is bounded by the least likely token listed
+(counted, `bounded`); with both missing the candidate is unscored and
+keeps its place, never given an even 0.5, and fewer than two scored is
+no judgement (`invalid`). A Qwen3-Reranker build, known by its name, is
+asked this way alone, in its own template sent raw.
+
+**Blends** over the head, ties to the first-stage rank, pinned candidates
+(held or unscored) in their places: *pure* (the reranker's order),
+*position* (w/r + (1−w)·s, w 0.75 for ranks 1–3, 0.60 for 4–10, 0.40
+below), *rrf* (1/(60+r) + 1/(60+ρ)). Each is computed from the recorded
+answers, so a blend costs no model call.
+
+### Routing by the plan's kind
+
+The plan's kind routes the search: `one` (a page remembered), the topical
+kinds together (`list`, `evidence`, `analysis`), `keywords` (always
+skipped: the words are the query) and `none`, a search without a plan.
+Each routed group gets a method or skip (`rerank.Shipped`). One role
+holds one model, so a point that would need gemma4 for one group and a
+Qwen3-Reranker build for another is measured, never shipped; a
+provider that lacks a route's interface makes that route off, with the
+reason, never prose.
+
+Every shipped route needs a plan, so reranking turned on with search
+understanding off, or withheld from its model, would rerank nothing.
+`rerank.OptionsFrom` then holds it (`Unplanned`, read through `Held`
+while every route the model's family takes needs a plan): every rerank
+is unavailable with the reason, healthz, `curio status` and `curio
+doctor` say it, and `curio up` neither pulls nor offers a model only the
+reranker writes with. A route for searches without a plan would lift the
+hold, which `Held` reads from the routes, not from a list. While the
+planner can understand no question for a time (its model unfit, held for
+timeouts or evictions), doctor's `reranking` check names the planner's
+state and points at the `understanding` check.
+
+### Paging by the order, not a cache
+
+The first page's response carries the head's order (`reranking.order`,
+document IDs); a later page sends it back (`rerank_order`) and asks no
+model: the head is the order's IDs found among the ranking's first
+len(order), in its order, then the rest of those in first-stage order,
+then the ranking's rest (`rerank.Apply`). Greedy answers vary from run to
+run, so asking again for page 2 would break the tiling, as it would
+have for plans ("Paging by the plan, not a cache"). Rejected: an
+in-memory order cache, for the plan's reasons (restarts, evictions, the
+model's variance, added state); and a compact permutation token, which
+can't tell a head that changed and would misplace documents silently,
+where IDs merge by rule and count what went stale.
+
+### Holds, the fitness check and the budget
+
+The planner's readiness machinery, loaded check, not-pulled listing,
+eviction count and hold, background warm-up and check, timeout hold,
+WARN once a cause, the use the summary pass yields to, moved into a
+shared gate (`internal/modelgate`) both stand on, worded for each; a
+second copy would have split future fixes, as the wall-clock fix once
+had to land twice. The gate counts an unload as an eviction only within the
+keep-alive its last call sent: Ollama's 5 minutes when another role
+writes with the model and sends no keep-alive or a shorter one (the
+labels send none: `ShortSharer`, `config.SharesModelShorter`), the whole
+keep-alive when every sharer sends the same one, as the planner, the
+reranker and the summaries beside them do. Before, any sharer cut it to
+5 minutes, so the planner and the reranker on one model each missed the
+other's evictions after 5 minutes. Only one rerank asks the model at a time: two
+pointwise reranks interleaved through one Ollama slot would both run out
+of time, so a semaphore is taken under the rerank's own deadline. A wait
+that runs out is a timeout that counts toward no hold, and so is a call
+that runs out after a wait, since part of its time was another search's.
+
+The fitness check runs once a process on made-up pages: listwise, a page
+remembered by description sitting 4th of 6 must come first, and a
+topic's two relevant pages must rank above a page whose text asks to be
+ranked first (and another last); pointwise, a relevant page must score 2
+above an irrelevant one in log odds, a page asking for a yes below the
+relevant one, three different pages not all within 0.5, and none
+unscored. A wrong answer, one that can't be used, a refused request or a
+provider without token probabilities is unfit; no answer is tried again
+after a minute.
+
+Each probe gets twice a rerank's timeout (14 s with the defaults, at most
+30), taken once it holds the model's slot, the one a rerank holds, so a
+probe never runs beside a rerank. A probe that runs past it is a verdict
+for now, not an unreached check: the model is too slow here, so
+reranking is held as after reranks that keep timing out (2 minutes,
+doubling to 15 while checks keep running out, `timeout:check`), and the
+check runs again when the hold ends. Before, a 30 s probe that ran out
+was retried every minute, holding Ollama for up to a minute at a time and
+pushing the planner's 5 s plans into its own timeout hold. The check
+still starts with the first search the reranker is asked about, not
+right after the planner's passes: starting it then would compete with
+the next search's plan just the same, would load a dedicated reranker
+model in a session that searches no topic, and on a Mac short of memory
+would load a second model just as the planner's is warm, the eviction
+the planner's gate counts.
+
+The plan's timeout and its loaded check, the embed, the rerank and the
+reranker's loaded check stay under the 25 s an understood search has
+within the CLI's 30 s: 5 + 1 + 10 + 7 + 1 = 24 with the defaults. Past
+it the rerank gets what is left, at least a second, and below that none
+is asked; `config.Validate` never refuses the sum, since keys valid
+before reranking existed can reach it.
+
+### Surfaces
+
+- **API.** `POST /v1/search` takes `rerank` or `rerank_order`, not both,
+  and `rerank_order` with a `plan`, never with `understand`, which could
+  plan another ranking than the one its order was made over;
+  `reranking` reports the status (reranked, supplied, skipped, off,
+  cold, checking, unfit, timeout, unavailable, invalid, too_long), the
+  reason, the model, method, depth, time, the order and, for a supplied
+  order, how many of its IDs went stale. Scores stay the first
+  ranking's; items follow the reranker's order. healthz reports what the
+  reranker knows of its model (`reranking`).
+- **CLI.** `curio search` reranks when it understands, says how after
+  the understood line, and `--no-rerank` understands alone; a daemon from
+  before reranking refuses the field, and the search is sent again
+  without it, once, with a note. `curio status` warns in a line while no
+  search can be reranked, and `curio doctor` has a `reranking` check.
+- **MCP** never reranks: its caller ranks what it reads, within its own
+  30 s.
+- **The dashboard** doesn't rerank yet: a later change brings it as a
+  smart path after the instant results.
+- **cmd/searcheval.** `hybrid-reranked` and `planned-reranked`,
+  `-rerank-with`, and answers recorded (`-reranks-out`) and replayed
+  (`-reranks`), so the grid and later work measure with no model call.
+
+### Measured: as written no point passes; amended, gemma4:26b reranks the topical kinds with the summaries
+
+The grid ran on Ollama 0.40.14 on a 64 GB M4 Max, the stages above in
+order, every answer recorded and the derived points replayed from them:
+889 listwise calls of gemma4:26b (577 of them on the known items), and
+4,195 pointwise calls each of gemma4:26b and a Qwen3-Reranker 4B build
+(`hf.co/QuantFactory/Qwen3-Reranker-4B-GGUF:Q8_0`), the fitness checks'
+included. Every Enter-to-results figure below comes from a replay of
+those answers on the same Mac: a replay runs no fitness check, so no
+query's time holds the check's calls. Both models passed the fitness
+check, gemma4:26b keeping the page that asked to be ranked first below
+both relevant pages. The planned base reproduced the 2.7 report, and
+hybrid and planned without a reranker ranked all 50 queries as the 2.7
+report does (50 of 50 each), the summaries replayed.
+
+All-queries and owner nDCG@10 with every query reranked by one method
+(the inputs' choice; keyword searches are skipped in every routed point
+below), against the planned 0.762 and 0.409:
+
+| Point | all | owner | Enter to results p50 / p95 |
+|---|---|---|---|
+| listwise 20, both inputs | 0.812 | 0.456 | 3.6 / 3.9 s |
+| listwise 20, summary | 0.806 | 0.429 | 3.5 / 3.8 s |
+| listwise 20, passage | 0.797 | 0.391 | 4.0 / 4.5 s |
+| listwise 20, textless held | 0.810 | 0.448 | 3.6 / 3.9 s |
+| listwise 30, both | 0.828 | 0.474 | 4.0 / 5.1 s |
+| listwise 30, folders on | 0.822 | 0.484 | 4.0 / 5.1 s (temporal 0.712) |
+| listwise 30, claims on | 0.828 | 0.474 | the same order: the claims never fit a line's share |
+| gemma4 pointwise 30 | every rerank past the 7 s timeout (8.1 s p50), so the first ranking | | |
+| gemma4 pointwise 30, no budget | 0.786–0.787 | 0.437–0.463 | 9.7–13.2 s |
+| gemma4 pointwise 20, passage | 0.781 | 0.478 | 8.1 s: still past the timeout |
+| Qwen3-Reranker 30, summary | 0.793 | 0.453 | 4.7 / 5.4 s (analytic, vague_ref low) |
+| Qwen3-Reranker 30/20, other blends | 0.781–0.794 | 0.421–0.492 | 3.5–4.7 s; analytic or all low |
+
+The position and rrf blends lost to pure (listwise 30: 0.809, 0.794);
+held textless pages lost a little to read. A call cost gemma4:26b 2.9 s
+listwise at 20 to 30 candidates (p50) and 0.35 s pointwise; the Qwen
+build 0.17 s pointwise. Pointwise scores had a side bounded by the top 20
+for 41 to 123 candidates of a run's 1,500, and none unscored. Listwise at
+30 named a candidate twice in 2 of 50 answers (8 on the hybrid base, 44
+of the 372 known items), each such answer invalid and its search left in
+its first ranking.
+
+Routed points from the listwise 30 runs (keywords skipped), on the 50
+queries' bars:
+
+| Route | all | owner | kinds | p50 / p95 | unjudged entering a top 10 |
+|---|---|---|---|---|---|
+| one and topical | 0.819 | 0.474 | every kind within 0.03 | 3.9 / 5.0 s | 80 |
+| topical only | 0.796 | 0.475 | every kind within 0.03 | 1.2 / 4.7 s | 33 |
+| one only | 0.785 | 0.408 | | 1.2 / 4.9 s | 47 |
+
+Points mixing the two models (listwise gemma4 for one kind, the Qwen
+build for the other) reached 0.802–0.803 and failed a kind's bar
+(analytic or vague_ref); none was eligible anyway.
+
+**Known items.** Planned with the live planner (gemma4:26b, its check
+passed, every one of the 372 planned), the known items lost what hybrid
+had: S@1 0.973 to 0.898, and R@10 1.000 to 0.984, six targets left out of
+the ranking whole by their plans, which no reranker of the head can
+bring back. Routed as `curio search` would rerank them, listwise 30 kept
+R@10 at 0.984 and raised S@1: 0.949 for one and topical, 0.925 for
+topical only. The S@1 bar is the planned 0.898, which both clear; the
+R@10 bar of 1.000 none can.
+
+**The pick.** Applied as written, the rule passed no point: every
+planned point misses the known items' R@10 of 1.000, by planning alone,
+and the measured table stayed empty. The owner then amended the bar
+(above, after the grid ran) to the planned known-item R@10, 0.984, as the
+S@1 bar already was. Applied to the recorded results in the rule's order,
+with no new model call:
+
+1. The passing point with the lowest Enter-to-results p50 is the
+   topical-only route, listwise 30 (1.18 s p50, 4.73 s p95): all 0.796 ≥
+   0.792, owner 0.475 > 0.409, every kind within 0.03 (site_person and
+   keyword at their planned values), keyword R@10 0.864, known-item S@1
+   0.925 ≥ 0.898 and R@10 0.984 ≥ 0.984. The same route with claims on
+   ranks the same, the claims never fitting a line's share; the shipped
+   point leaves them off.
+2. Within 0.25 s of it no other point passes: one only (1.24 s) misses
+   the all-queries and owner bars (0.785, 0.408), and one and topical
+   (0.819, 3.94 s) and every other passing combination (3.48 s and up)
+   are outside the window.
+
+So gemma4:26b is listed as measured, its point needing the summaries:
+scored again without them, the topical-only route falls to 0.787, under
+0.792 (one and topical would hold 0.817, but it isn't the pick). With
+`search.rerank` left out, reranking is on for gemma4:26b while summaries
+are written and questions are understood, and off by default otherwise,
+the reason saying what turns it on (`summaries.enabled: true`); healthz
+says `on_by_default`, and doctor and `curio up` say which. The live check
+(stage 6, below) ran on exactly these routes, so it stands for the pick.
+
+What the daemon reranks with, `search.rerank: true` included, is that
+point: the topical kinds listwise, 30 deep, both inputs, the pure blend,
+textless pages read, no folders or claims, a page remembered and
+keywords left in their first ranking.
+Searches without a plan (understanding off, or failing) keep theirs: on
+the hybrid base listwise raised all-queries nDCG@10 from 0.667 to 0.767,
+every kind within 0.03 or above and keyword R@10 0.964, at 3.2 / 4.4 s,
+but it lost the hybrid known-item bars (R@10 1.000 to 0.997, S@1 0.973 to
+0.946), so `route_none` is skip by the rule. A Qwen3-Reranker build named
+in `generation.roles.reranker` reranks the same routes pointwise; its
+best point (0.794, the summary input) failed a kind's bar, so it isn't
+offered as an opt-in. A tier below 64 GB gets reranking off by default,
+its model unmeasured, and `search.rerank: true` with the fitness check
+guarding it.
+
+**Live.** The shipped routes on a scratch daemon (its own home and port,
+`auto_pull` off, the queue paused) over a copy holding the summaries,
+owner-config.yaml with `search.rerank: true`: 50 understood, reranked
+searches in sequence, two rounds after a warm-up. Request p50 1.16 and
+1.28 s, p95 4.17 and 4.19 s; the plan p50 0.90 s, p95 1.14; the rerank
+of the 17 to 19 topical searches p95 2.9 s; the other 31 skipped (in the
+first round two searches found the model being checked). gemma4:26b and
+the embedder stayed loaded throughout, nothing evicted: /api/ps listed
+both before and after the rounds, at the same sizes (gemma4:26b 0.97 GB,
+the embedder 1.74 GB, as /api/ps reports them). The runners' resident
+memory wasn't recorded. The daemon logged no WARN or ERROR.
+
+### Known limits
+
+- A dedicated reranker model sends search's keep-alive
+  (`search.understand_keep_alive_minutes`), as the planner does: no key
+  of its own keeps a large model, used only for topical searches, loaded
+  for less.
+- An understood, reranked search can run about 24 s (the 25 s budget),
+  past the daemon's 5 s HTTP shutdown grace: one in flight at exit is
+  abandoned, and its client sees the connection close.
+- Candidate text is neutralized for `<`/`>` chat-template tokens
+  (gemma, Qwen, Llama 3) only. Bracket control tokens (`[INST]`,
+  `[/INST]`, `[TOOL_CALLS]`) pass through, which matters only for a
+  reranker model whose template uses them (Mistral, Llama 2), an opt-in
+  no measurement covers. Neutralizing them changes the render rules and
+  so `PromptVersion`, orphaning every recorded answer, so it waits for
+  the next re-recorded grid.
+- Pointwise costs a call a candidate: at depth 30 a rerank is 30 calls in
+  sequence through the model's one slot.
+- The planner's and the reranker's prompts share a model's slot and evict
+  each other's cached prefix.
+- A reranked first page that loses its order (a client that drops it)
+  makes its next page another rerank; the API can't tell.
+- The measured table names models by tag: an `ollama pull` that changes a
+  tag's weights keeps its row.
+- Listwise answers are decoded strictly, so one that names a candidate
+  twice keeps the first ranking: 12% of the known items' reranks at depth
+  30. Ollama's grammar can't hold an array's items unique.
+- A rerank brings documents no judgment names into the top 10 (33 over
+  the 50 queries for the shipped route, 80 for one and topical): the
+  graded set can't credit or blame them.
+- Every method, input, blend and textless mode stays: the shipped routes
+  use listwise and, for a Qwen3-Reranker build, pointwise, and
+  `-rerank-with` exposes the rest to the next grid, under tests.
+
+### Going back
+
+Remove `search.rerank`, `search.rerank_depth`,
+`search.rerank_timeout_seconds` and `generation.roles.reranker` from
+config.yaml first: an older curio's strict loader refuses each. Nothing
+in the database changed: reranking adds no table or migration.
+
+**How to revisit:** a change of a prompt, the schema or the rendering
+changes `PromptVersion` and the goldens: the grid is run again on
+replayed plans and summaries, recording answers anew, against the rule
+above, and the fitness check measured on the tiers' models.
 
 ---
 

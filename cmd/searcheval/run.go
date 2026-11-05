@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"os"
 	"slices"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/samsar/curio/internal/eval"
 	"github.com/samsar/curio/internal/indexer"
 	"github.com/samsar/curio/internal/ollama"
+	"github.com/samsar/curio/internal/rerank"
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
 )
@@ -115,6 +117,18 @@ func evaluate(ctx context.Context, opts options, stdout io.Writer, log *slog.Log
 			return err
 		}
 	}
+	if anyReranked(opts.variants) {
+		if e.rerank, err = startReranker(ctx, rerankerSetup{cfg: cfg, with: opts.rerankWith, replay: opts.reranks,
+			recordTo: opts.reranksOut, readers: rerank.Readers{Fields: lib.Index, Summaries: lib.Summaries},
+			log: log}); err != nil {
+			return err
+		}
+		defer func() {
+			if err := e.rerank.close(ctx); err != nil {
+				log.Warn("close the reranker", "err", err)
+			}
+		}()
+	}
 	for _, v := range opts.variants {
 		vr, err := runVariant(ctx, v, e, qf.set, filters, judged)
 		if err != nil {
@@ -122,6 +136,15 @@ func evaluate(ctx context.Context, opts options, stdout io.Writer, log *slog.Log
 		}
 		log.Info("variant done", "variant", v.name, "queries", len(vr.Queries), "wall_ms", int64(vr.WallMS))
 		rep.Variants = append(rep.Variants, vr)
+	}
+	if e.rerank != nil {
+		e.rerank.observe(ctx, log)
+		for i := range rep.Variants {
+			if v, _ := variantNamed(rep.Variants[i].Name); v.reranked {
+				rr := e.rerank.report
+				rep.Variants[i].Rerank = &rr
+			}
+		}
 	}
 	rep.GeneratedAt = time.Now().UTC()
 
@@ -415,10 +438,13 @@ func runVariant(ctx context.Context, v variant, e env, qs *eval.QuerySet, filter
 			return variantReport{}, fmt.Errorf("variant %s, query %s: %w", v.name, queryLabel(q.ID, i), err)
 		}
 		if r.plan != nil {
-			// The plan was made before the ranking: a planned query's total
-			// is Enter to results, without the API's hydration.
+			// The plan was made before the ranking, or recorded by the run it
+			// is replayed from: a planned query's total is Enter to results,
+			// without the API's hydration.
 			total += r.plan.took
 		}
+		// A replayed rerank counts its recorded time, or its timeout.
+		total += r.adjust
 		r.stages = append(r.stages, stage{totalStage, total})
 		for _, s := range r.stages {
 			if !slices.Contains(vr.stages, s.name) {
@@ -437,7 +463,51 @@ func runVariant(ctx context.Context, v variant, e env, qs *eval.QuerySet, filter
 	for _, g := range eval.Groups(qs) {
 		vr.Groups = append(vr.Groups, newGroupReport(g, scores, vr.Queries))
 	}
+	if v.planned() || v.reranked {
+		for _, g := range planKindGroups(vr.Queries) {
+			vr.Groups = append(vr.Groups, newGroupReport(g, scores, vr.Queries))
+		}
+	}
+	if v.reranked {
+		vr.RerankStatuses = rerankStatuses(vr.Queries)
+	}
 	return vr, nil
+}
+
+// groupPlanKind is the group type of the queries a plan of one kind was
+// made for: a reranked search is routed by it.
+const groupPlanKind eval.GroupType = "plan_kind"
+
+// planKindGroups group queries by their plan's kind, in the order the
+// kinds first appear, "none" for a query searched without a plan.
+func planKindGroups(queries []queryReport) []eval.Group {
+	var out []eval.Group
+	at := map[string]int{}
+	for i, q := range queries {
+		kind := "none"
+		if q.Plan != nil {
+			kind = q.Plan.Kind
+		}
+		g, ok := at[kind]
+		if !ok {
+			g = len(out)
+			at[kind] = g
+			out = append(out, eval.Group{Type: groupPlanKind, Name: kind})
+		}
+		out[g].Queries = append(out[g].Queries, i)
+	}
+	return out
+}
+
+// rerankStatuses counts a reranked variant's queries by rerank status.
+func rerankStatuses(queries []queryReport) map[string]int {
+	out := map[string]int{}
+	for _, q := range queries {
+		if q.Rerank != nil {
+			out[string(q.Rerank.Status)]++
+		}
+	}
+	return out
 }
 
 // queryLabel names a query in the report: its id, or its index, "#3".
@@ -471,3 +541,7 @@ func nearestRank(sorted []time.Duration, pct int) time.Duration {
 
 // ms is d in milliseconds.
 func ms(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
+
+// fromMS is a report's milliseconds as a duration again, to the
+// nanosecond ms wrote it from.
+func fromMS(v float64) time.Duration { return time.Duration(math.Round(v * float64(time.Millisecond))) }
