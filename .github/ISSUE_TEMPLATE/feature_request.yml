@@ -1,0 +1,21 @@
+name: Feature request
+description: An idea for curio
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you're trying to do
+      description: The problem or the moment it would help, more than the solution. "I saved a talk and couldn't find it because…"
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help
+      description: How you imagine it working, if you have an idea.
+  - type: textarea
+    id: else
+    attributes:
+      label: Anything else
+      description: What you've tried, other tools that do it, your library's size.
