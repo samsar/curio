@@ -1,0 +1,77 @@
+name: Bug report
+description: Something in curio doesn't work as it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting it. Running `curio doctor` first often says what's wrong and how to fix it.
+
+        **Privacy:** what you paste here is public. curio's output and logs can name pages you bookmarked, so look it over and replace anything you'd rather not share.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what curio did instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. curio import safari
+        2. curio search "…"
+        3. …
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `curio doctor`
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Output of `curio version`
+      placeholder: curio v2.8.0 (…)
+    validations:
+      required: true
+  - type: input
+    id: mac
+    attributes:
+      label: Mac and macOS
+      description: The chip, the memory, and the macOS version (Apple menu → About This Mac).
+      placeholder: MacBook Pro, M2 Pro, 32 GB, macOS 15.3
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How you installed curio
+      options:
+        - Homebrew (brew install samsar/tap/curio)
+        - Built from source
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where it happened
+      multiple: true
+      options:
+        - curio up (setup)
+        - Importing bookmarks
+        - Fetching pages
+        - Search
+        - Dashboard (curio ui)
+        - Interests
+        - MCP (curio-mcp)
+        - The daemon (starting, stopping, background service)
+        - Something else
+  - type: textarea
+    id: logs
+    attributes:
+      label: Daemon log (optional)
+      description: The lines around the problem, from `curio daemon logs` or `~/.curio/logs/daemon.log`. It names the pages curio fetched.
+      render: text

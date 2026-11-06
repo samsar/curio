@@ -6,6 +6,8 @@ Your accumulated curiosity is invisible to the tools you think with. You save pa
 
 Everything runs on your Mac: your library, the search, and the AI models.
 
+> **Platforms:** curio runs on Macs with Apple silicon (M1 or later) and macOS 14 or newer. Intel Macs, Linux and Windows aren't supported: releases are built for Apple silicon only, and curio runs in the background through macOS's own service manager (launchd).
+
 ## What you can do with it
 
 - **Find that article again.** `curio search "rolling out feature flags"` searches the full text of every saved page, by meaning, not just keywords; `--saved-after 2024-01-01`, `--site example.com` or `--folder "/Bookmarks Bar/Work"` narrow it to when, where or how you saved it. Ask it a question, *"the talks on raft I saved last summer"*, and a local model first reads what the question says (the dates, the kind of page, what it points at) and searches with that; it shows what it understood, and `--literal` searches your words alone.
@@ -93,7 +95,9 @@ Then ask Claude Code about anything you've saved. Claude can search your library
 - [Using Curio with Claude (MCP)](./docs/mcp.md)
 - [How it works](./docs/architecture.md), [design decisions](./docs/decisions.md), and the [roadmap](./docs/roadmap.md)
 
-To build from source, clone the repo and run `make build` (Go and the Xcode Command Line Tools required; `make help` lists everything).
+To build from source, clone the repo and run `make build` on an Apple silicon Mac (Go and the Xcode Command Line Tools required; `make help` lists everything).
+
+Found a bug? Run `curio doctor`, then [open an issue](https://github.com/samsar/curio/issues/new/choose). Found a security problem? Please report it privately: see [SECURITY.md](./SECURITY.md).
 
 ## License
 
