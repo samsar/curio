@@ -1,7 +1,7 @@
 version: 2
 
 # curio depends on cgo for sqlite + sqlite-vec, so cross-compiling is
-# painful. We start with the platforms a single macos-14 runner can
+# painful. We start with the platforms a single macos-15 runner can
 # produce natively (darwin/arm64) and grow when there's demand.
 #
 # Adding darwin/amd64 later: easiest path is a second matrix runner on
