@@ -137,7 +137,7 @@ func Shipped() Settings {
 		Routes:         map[Group]Method{GroupTopical: MethodListwise},
 		Blend:          BlendPure,
 		Textless:       TextlessRead,
-		Inputs:         Inputs{Input: InputBoth},
+		Input:          InputBoth,
 		PointwiseBytes: pointwiseBytes,
 	}
 }

@@ -409,7 +409,7 @@ func (rp *runPlacement) place(documentID string, vec []float32) (placed, error) 
 	if err != nil {
 		return placed{}, fmt.Errorf("document %s: %w", documentID, err)
 	}
-	out := placed{Placement: store.Placement{RunID: rp.runID, DocumentID: documentID, Similarity: pl.Similarity},
+	out := placed{RunID: rp.runID, DocumentID: documentID, Similarity: pl.Similarity,
 		vec: vec}
 	if pl.Interest >= 0 {
 		out.nearest = rp.interests[pl.Interest]

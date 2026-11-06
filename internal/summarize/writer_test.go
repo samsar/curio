@@ -143,8 +143,8 @@ func TestWrite(t *testing.T) {
 	assert.Equal(t, store.Summary{Kind: store.SummaryKindArticle, Site: "Example Times, a made-up newspaper",
 		Author: "Bo Example", About: "Why queues back up.", Entities: []string{"Zephyrine", "Kafka"},
 		Claims: []string{"Backpressure beats buffering."}, Descriptions: []string{"a queues piece"},
-		SummaryWriter: store.SummaryWriter{Model: "gemma4:26b", PromptVersion: PromptVersion},
-		InputHash:     page().Hash()}, got.Summary)
+		Model: "gemma4:26b", PromptVersion: PromptVersion,
+		InputHash: page().Hash()}, got.Summary)
 	assert.Equal(t, 1, got.Dropped, "Mars Base Nine isn't in the input")
 	assert.Positive(t, got.Usage.PromptTokens)
 	assert.Equal(t, 4, model.calls(), "three probes, then the page")

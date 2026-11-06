@@ -17,10 +17,10 @@ func flatStored() *storedRun {
 		return store.InterestAssignment{DocumentID: doc, InterestID: interest, Fit: store.InterestFitMember}
 	}
 	return &storedRun{
-		run: &store.InterestRun{ID: "run-1", RunOutcome: store.RunOutcome{Shape: store.InterestShapeFlat}},
+		run: &store.InterestRun{ID: "run-1", Shape: store.InterestShapeFlat},
 		groups: []store.InterestGroup{
-			{Interest: store.Interest{ID: "a", Level: store.InterestLevelInterest, Label: "Agent Tooling"}, Size: 3},
-			{Interest: store.Interest{ID: "b", Level: store.InterestLevelInterest, Label: "Agent Talks"}, Size: 2},
+			{ID: "a", Level: store.InterestLevelInterest, Label: "Agent Tooling", Size: 3},
+			{ID: "b", Level: store.InterestLevelInterest, Label: "Agent Talks", Size: 2},
 		},
 		assignments: []store.InterestAssignment{
 			member("d0", "a"), member("d1", "a"), member("d2", "a"), member("d3", "b"), member("d4", "b"),

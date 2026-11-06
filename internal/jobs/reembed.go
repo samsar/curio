@@ -41,7 +41,7 @@ import (
 // retry or a deferral besides the one in flight; a document whose re-embed
 // failed for good isn't fed again for reembedFailedWait; and after
 // reembedBrakeAfter documents' first failures in a row, the brake stops the
-// feed for reembedBrakeMin, doubling to reembedBrakeMax while they keep
+// feed for reembedBrakeStart, doubling to reembedBrakeMax while they keep
 // failing, until a re-embed is done. A few documents failing for their own
 // reasons hold up none of the others: the feed queues the documents that
 // never failed first, and a document failing again doesn't count.
@@ -63,12 +63,12 @@ const reembedWaiting = 4
 const reembedFailedWait = 15 * time.Minute
 
 // The brake: after reembedBrakeAfter documents' re-embeds failed for the
-// first time in a row, the feed stops for reembedBrakeMin, then twice as
+// first time in a row, the feed stops for reembedBrakeStart, then twice as
 // long each time it stops again without a re-embed done in between, up to
 // reembedBrakeMax.
 const (
 	reembedBrakeAfter = 3
-	reembedBrakeMin   = 15 * time.Minute
+	reembedBrakeStart = 15 * time.Minute
 	reembedBrakeMax   = 4 * time.Hour
 )
 
@@ -108,7 +108,7 @@ type ReembedOptions struct {
 	FailedWait                            time.Duration
 	CheckEvery, ProgressEvery, RateWindow time.Duration
 	// BrakeAfter, BrakeMin and BrakeMax are reembedBrakeAfter,
-	// reembedBrakeMin and reembedBrakeMax when zero.
+	// reembedBrakeStart and reembedBrakeMax when zero.
 	BrakeAfter         int
 	BrakeMin, BrakeMax time.Duration
 }
@@ -183,7 +183,7 @@ func NewReembed(opts ReembedOptions) *Reembed {
 	opts.ProgressEvery = cmp.Or(opts.ProgressEvery, reembedProgressEvery)
 	opts.RateWindow = cmp.Or(opts.RateWindow, reembedRateWindow)
 	opts.BrakeAfter = cmp.Or(opts.BrakeAfter, reembedBrakeAfter)
-	opts.BrakeMin = cmp.Or(opts.BrakeMin, reembedBrakeMin)
+	opts.BrakeMin = cmp.Or(opts.BrakeMin, reembedBrakeStart)
 	opts.BrakeMax = cmp.Or(opts.BrakeMax, reembedBrakeMax)
 	if opts.Log == nil {
 		opts.Log = slog.New(slog.DiscardHandler)

@@ -183,7 +183,7 @@ func (m *fakeModel) callCount() int {
 func testSettings() Settings {
 	return Settings{Routes: map[Group]Method{GroupOne: MethodListwise, GroupTopical: MethodPointwise,
 		GroupNone: MethodListwise}, Depth: 20, Blend: BlendPure, Textless: TextlessRead,
-		Inputs: Inputs{Input: InputBoth}, PointwiseBytes: pointwiseBytes}
+		Input: InputBoth, PointwiseBytes: pointwiseBytes}
 }
 
 // rig is a reranker on, routed by testSettings, over a fake model,
@@ -369,7 +369,7 @@ func TestReorder(t *testing.T) {
 func TestListwise_LeavesOutFollow(t *testing.T) {
 	m := &fakeModel{order: func(int) (json.RawMessage, error) { return json.RawMessage(`{"order":[4,2]}`), nil }}
 	j, err := listwise{gen: m}.judge(context.Background(), "q", pages("a", "b", "c", "d", "e"),
-		Settings{Inputs: Inputs{Input: InputBoth}})
+		Settings{Input: InputBoth})
 	require.NoError(t, err)
 	assert.Equal(t, []int{3, 2, 4, 1, 5}, j.place)
 	assert.Equal(t, []string{"d", "b", "a", "c", "e"}, ids(reorder(pages("a", "b", "c", "d", "e"),
@@ -841,7 +841,7 @@ func TestPointwise_Hostile(t *testing.T) {
 	}
 	m := &fakeModel{}
 	p := pointwise{gen: m, family: FamilyInstruct}
-	s := Settings{Inputs: Inputs{Input: InputBoth}, PointwiseBytes: pointwiseBytes}
+	s := Settings{Input: InputBoth, PointwiseBytes: pointwiseBytes}
 	before, err := p.judge(context.Background(), question, clean, s)
 	require.NoError(t, err)
 	m.prompts = nil

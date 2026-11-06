@@ -111,7 +111,7 @@ func fixedReport() *report {
 	}
 	rep.Chain.Fresh.Areas, rep.Chain.Fresh.Interests, rep.Chain.Fresh.Cohesion = 30, 187, share(0.6414)
 	rep.StoredRun.Duplicates.Scopes = []scopeDuplicates{{Scope: "Software Engineering",
-		LabelDuplicates: quality.LabelDuplicates{Near: 1, Interests: 2, Pairs: [][2]string{{"AI Agent Engineering", "AI Agent Tooling"}}}}}
+		Near: 1, Interests: 2, Pairs: [][2]string{{"AI Agent Engineering", "AI Agent Tooling"}}}}
 	rep.StoredRun.Duplicates.WithinScopes.Near = 1
 	rep.StoredRun.Duplicates.AllInterests = quality.LabelDuplicates{Near: 1}
 	return rep

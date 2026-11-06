@@ -41,7 +41,7 @@ func insightFixtureOn(t *testing.T, db *DB, n int) *insightFixture {
 func (f *insightFixture) run(t *testing.T, tenant string) *store.InterestRun {
 	t.Helper()
 	r := &store.InterestRun{TenantID: tenant, Trigger: store.RunTriggerManual, Grouper: "test",
-		RunOutcome: store.RunOutcome{Kind: store.RunKindFresh, Shape: store.InterestShapeAreas}}
+		Kind: store.RunKindFresh, Shape: store.InterestShapeAreas}
 	require.NoError(t, f.ins.CreateRun(f.ctx, r))
 	return r
 }
@@ -56,12 +56,12 @@ func identity(id string, level store.InterestLevel, label string, source store.L
 }
 
 func areaGroup(id string, size, loose int, cohesion float64) store.InterestGroup {
-	return store.InterestGroup{Interest: store.Interest{ID: id, Level: store.InterestLevelArea}, Size: size, Loose: loose,
+	return store.InterestGroup{ID: id, Level: store.InterestLevelArea, Size: size, Loose: loose,
 		Cohesion: cohesion}
 }
 
 func interestGroup(id, parent string, size, loose int, cohesion float64, centroid ...float32) store.InterestGroup {
-	return store.InterestGroup{Interest: store.Interest{ID: id, Level: store.InterestLevelInterest}, ParentID: parent,
+	return store.InterestGroup{ID: id, Level: store.InterestLevelInterest, ParentID: parent,
 		Size: size, Loose: loose, Cohesion: cohesion, Centroid: centroid}
 }
 
@@ -204,7 +204,7 @@ func TestInsights_CommitRoundTrip(t *testing.T) {
 	readAt := time.Date(2026, 10, 2, 9, 30, 0, 0, time.UTC)
 	first := &store.InterestRun{TenantID: "local", Trigger: store.RunTriggerFirst, Grouper: "louvain",
 		Params: []byte(`{"seed":1}`), VectorsReadAt: &readAt,
-		RunOutcome: store.RunOutcome{Kind: store.RunKindFresh, Shape: store.InterestShapeFlat}}
+		Kind: store.RunKindFresh, Shape: store.InterestShapeFlat}
 	require.NoError(t, ins.CreateRun(ctx, first))
 	require.NotEmpty(t, first.ID)
 	assert.Equal(t, store.InterestRunRunning, first.Status)
@@ -409,7 +409,7 @@ func TestInsights_CreateRunChecks(t *testing.T) {
 	f := newInsightFixture(t, 0)
 	valid := func() *store.InterestRun {
 		return &store.InterestRun{TenantID: "local", Trigger: store.RunTriggerAuto, Grouper: "louvain",
-			RunOutcome: store.RunOutcome{Kind: store.RunKindWarm, Shape: store.InterestShapeFlat}}
+			Kind: store.RunKindWarm, Shape: store.InterestShapeFlat}
 	}
 	for name, mutate := range map[string]func(*store.InterestRun){
 		"no tenant":  func(r *store.InterestRun) { r.TenantID = "" },
@@ -780,7 +780,7 @@ func (f *insightFixture) doneRun(t *testing.T, readAt time.Time) *store.Interest
 func (f *insightFixture) doneRunOf(t *testing.T, readAt time.Time, commit func(*store.InterestRun) store.RunCommit) *store.InterestRun {
 	t.Helper()
 	run := &store.InterestRun{TenantID: "local", Trigger: store.RunTriggerFirst, Grouper: "test", VectorsReadAt: &readAt,
-		RunOutcome: store.RunOutcome{Kind: store.RunKindFresh, Shape: store.InterestShapeAreas}}
+		Kind: store.RunKindFresh, Shape: store.InterestShapeAreas}
 	require.NoError(t, f.ins.CreateRun(f.ctx, run))
 	require.NoError(t, f.ins.CommitRun(f.ctx, commit(run)))
 	done, err := f.ins.GetRun(f.ctx, run.ID)
@@ -971,7 +971,7 @@ func TestInsights_CommitConsumesTheFreshRebuildOwed(t *testing.T) {
 			_, err := f.db.Exec(`UPDATE insight_state SET fresh_owed_at = ?`, formatTime(owedAt))
 			require.NoError(t, err)
 			run := &store.InterestRun{TenantID: "local", Trigger: store.RunTriggerReindex, Grouper: "test",
-				VectorsReadAt: &tc.readAt, RunOutcome: store.RunOutcome{Kind: tc.kind, Shape: store.InterestShapeAreas}}
+				VectorsReadAt: &tc.readAt, Kind: tc.kind, Shape: store.InterestShapeAreas}
 			require.NoError(t, f.ins.CreateRun(f.ctx, run))
 			c := f.firstCommit(run)
 			c.Outcome.Kind, c.ReadMidReindex = tc.kind, tc.midReindex
@@ -1137,7 +1137,7 @@ func TestInsights_DocumentPlace(t *testing.T) {
 
 	flat := newInsightFixture(t, 1)
 	run := &store.InterestRun{TenantID: "local", Trigger: store.RunTriggerManual, Grouper: "test",
-		RunOutcome: store.RunOutcome{Kind: store.RunKindFresh, Shape: store.InterestShapeFlat}}
+		Kind: store.RunKindFresh, Shape: store.InterestShapeFlat}
 	require.NoError(t, flat.ins.CreateRun(flat.ctx, run))
 	require.NoError(t, flat.ins.CommitRun(flat.ctx, store.RunCommit{RunID: run.ID, TenantID: "local",
 		Outcome: store.RunOutcome{Kind: store.RunKindFresh, Shape: store.InterestShapeFlat, NumDocuments: 1,

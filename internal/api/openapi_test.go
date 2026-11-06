@@ -822,9 +822,9 @@ func seedContractFixtures(t *testing.T, s *testServer) contractFixtures {
 		ExtractionID: aExt.ID, Kind: store.SummaryKindArticle, Site: "Example Times, a made-up newspaper",
 		Author: "Ada Example", About: "How Kafka partitions spread a topic.", Entities: []string{"Kafka"},
 		Claims: []string{"Partitions scale reads."}, Descriptions: []string{"that piece on kafka partitions"},
-		SummaryWriter: store.SummaryWriter{Model: "gemma4:26b", PromptVersion: "p0"}, InputHash: "h"}))
+		Model: "gemma4:26b", PromptVersion: "p0", InputHash: "h"}))
 	require.NoError(t, s.deps.Summaries.RecordSummaryFailure(ctx, "local", failed.ID, store.SummaryFailure{
-		ExtractionID: "e1", SummaryWriter: store.SummaryWriter{Model: "gemma4:26b", PromptVersion: "p1"},
+		ExtractionID: "e1", Model: "gemma4:26b", PromptVersion: "p1",
 		Error: "the model's summary couldn't be used: its kind isn't one of the summary kinds"}))
 
 	return contractFixtures{fetched: a.ID, failed: failed.ID, dead: dead.ID, bookmark: bookmark.ID,

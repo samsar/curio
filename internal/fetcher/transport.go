@@ -195,8 +195,7 @@ func (s *stockRT) do(ctx context.Context, target string, headers []header) (*fet
 	}
 	resp, err := s.client.Do(req) //nolint:bodyclose // the body escapes in fetchResponse.body, which the caller closes
 	if err != nil {
-		var cve *tls.CertificateVerificationError
-		if errors.As(err, &cve) {
+		if _, ok := errors.AsType[*tls.CertificateVerificationError](err); ok {
 			return nil, fmt.Errorf("%w: %w", ErrTLSCertificate, err)
 		}
 		return nil, err
@@ -339,12 +338,10 @@ func chromeCheckRedirect(req *fhttp.Request, via []*fhttp.Request) error {
 // tagged ErrTLSCertificate. uTLS reports that with its own
 // CertificateVerificationError type, which crypto/tls's doesn't match.
 func chromeError(err error) error {
-	var ue *url.Error
-	if errors.As(err, &ue) {
+	if ue, ok := errors.AsType[*url.Error](err); ok {
 		ue.URL = withoutDefaultPort(ue.URL)
 	}
-	var cve *utls.CertificateVerificationError
-	if errors.As(err, &cve) {
+	if _, ok := errors.AsType[*utls.CertificateVerificationError](err); ok {
 		return fmt.Errorf("%w: %w", ErrTLSCertificate, err)
 	}
 	return err

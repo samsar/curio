@@ -365,19 +365,19 @@ func TestCard(t *testing.T) {
 		want string
 	}{
 		{"nothing", Fields{}, ""},
-		{"a title alone", Fields{Own: Own{Title: "Title"}}, "Title"},
+		{"a title alone", Fields{Title: "Title"}, "Title"},
 		{"bookmark titles the title repeats are left out",
-			Fields{Own: Own{Title: "Same Title", BookmarkTitles: "same  TITLE\nOther\nother"}, SiteName: "Site"},
+			Fields{Title: "Same Title", BookmarkTitles: "same  TITLE\nOther\nother", SiteName: "Site"},
 			"Same Title — Other — Site"},
 		{"an untitled document's bookmark titles",
-			Fields{Own: Own{Host: "example.com", BookmarkTitles: "One\nTwo", Folders: "A / B\nC"}},
+			Fields{Host: "example.com", BookmarkTitles: "One\nTwo", Folders: "A / B\nC"},
 			"One | Two — example.com — A / B | C"},
 	}
 	for _, tc := range cases {
 		assert.Equal(t, tc.want, tc.f.Card(), tc.name)
 	}
-	long := Fields{Own: Own{Title: strings.Repeat("t", 500), BookmarkTitles: strings.Repeat("b", 500),
-		Author: strings.Repeat("a", 500), Folders: strings.Repeat("f", 500)}, SiteName: strings.Repeat("s", 500)}
+	long := Fields{Title: strings.Repeat("t", 500), BookmarkTitles: strings.Repeat("b", 500),
+		Author: strings.Repeat("a", 500), Folders: strings.Repeat("f", 500), SiteName: strings.Repeat("s", 500)}
 	card := long.Card()
 	assert.Len(t, card, MaxCardBytes, "every part at its cap")
 	for part := range strings.SplitSeq(card, cardSeparator) {

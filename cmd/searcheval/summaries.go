@@ -436,8 +436,8 @@ func replaySummaries(ctx context.Context, path string, lib *devtool.Copy, log *s
 func (r summaryRecord) summary() store.Summary {
 	return store.Summary{DocumentID: r.DocumentID, ExtractionID: r.ExtractionID, Kind: store.SummaryKind(r.Kind),
 		Site: r.Site, Author: r.Author, About: r.About, Entities: r.Entities, Claims: r.Claims,
-		Descriptions: r.Descriptions, SummaryWriter: store.SummaryWriter{Model: r.Model,
-			PromptVersion: r.PromptVersion}, InputHash: r.InputHash, WrittenAt: r.WrittenAt}
+		Descriptions: r.Descriptions, Model: r.Model,
+		PromptVersion: r.PromptVersion, InputHash: r.InputHash, WrittenAt: r.WrittenAt}
 }
 
 // recordFile is the -summaries-out file, appended to a line at a time;

@@ -286,7 +286,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	err := s.srv.Shutdown(shutdownCtx)
 	// http.Server.Serve returns, closing the listener, as soon as Shutdown
 	// begins, even if Shutdown got there before Serve had started.
-	<-errCh
+	<-errCh //nolint:errcheck // it returns http.ErrServerClosed then, which says nothing new
 	if err != nil {
 		return fmt.Errorf("shut down api: %w", err)
 	}

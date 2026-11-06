@@ -255,7 +255,7 @@ func (x *Summaries) GetSummary(ctx context.Context, tenantID, documentID string)
 			return nil, fmt.Errorf("summary of document %s: failed_at: %w", documentID, err)
 		}
 		out.Failure = &store.SummaryFailure{ExtractionID: failedExt.String, At: at, Error: failure.String,
-			SummaryWriter: store.SummaryWriter{Model: failedModel.String, PromptVersion: failedPrompt.String}}
+			Model: failedModel.String, PromptVersion: failedPrompt.String}
 	}
 	return out, nil
 }

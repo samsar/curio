@@ -27,7 +27,7 @@ func TestConstraintErrors(t *testing.T) {
 	require.NoError(t, bms.Create(ctx, newBookmark()))
 	newRun := func(id string) *store.InterestRun {
 		return &store.InterestRun{ID: id, TenantID: "local", Trigger: store.RunTriggerManual, Grouper: "louvain",
-			RunOutcome: store.RunOutcome{Kind: store.RunKindFresh, Shape: store.InterestShapeFlat}}
+			Kind: store.RunKindFresh, Shape: store.InterestShapeFlat}
 	}
 	run := newRun("")
 	require.NoError(t, ins.CreateRun(ctx, run))

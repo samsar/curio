@@ -19,7 +19,7 @@ export GOTOOLCHAIN := go$(GO_VERSION)
 
 # golangci-lint must be built with a Go minor at least the go directive's,
 # or it cannot type-check the standard library it is handed.
-GOLANGCI_LINT_VERSION := v2.12.2
+GOLANGCI_LINT_VERSION := v2.15.0
 GOVULNCHECK_VERSION   := v1.8.0
 ACTIONLINT_VERSION    := v1.7.12
 # goose's CLI tracks the library version the migrations run under.
