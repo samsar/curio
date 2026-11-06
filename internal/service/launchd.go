@@ -547,8 +547,7 @@ func (l *Launchd) run(ctx context.Context, timeout time.Duration, args ...string
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return "", fmt.Errorf("%s: no answer within %s: %w", what, timeout, ctxErr)
 	}
-	var exit *exec.ExitError
-	if errors.As(err, &exit) {
+	if exit, ok := errors.AsType[*exec.ExitError](err); ok {
 		return stdout.String(), &LaunchctlError{Args: args, ExitCode: exit.ExitCode(), Stderr: strings.TrimSpace(stderr.String())}
 	}
 	return "", fmt.Errorf("%s: %w", what, err)

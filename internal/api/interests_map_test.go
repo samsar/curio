@@ -228,11 +228,11 @@ func drop[T any](xs []T, i int) []T { return slices.Delete(slices.Clone(xs), i, 
 // the run lacks, are errors, not documents left out.
 func TestMapResponse_Inconsistencies(t *testing.T) {
 	finished := time.Now()
-	run := &store.InterestRun{ID: "run", FinishedAt: &finished, RunOutcome: store.RunOutcome{Shape: store.InterestShapeFlat,
+	run := &store.InterestRun{ID: "run", FinishedAt: &finished, Shape: store.InterestShapeFlat,
 		Map: &store.RunMap{Status: store.MapBuilt, Kind: store.RunKindFresh, DotRadius: 1,
-			Unsorted: store.Circle{X: 900, Y: 500, R: 60}}}}
+			Unsorted: store.Circle{X: 900, Y: 500, R: 60}}}
 	place := &store.GroupMap{ZoomX: 100, ZoomY: 100, ZoomR: 10, AnchorX: 1, AnchorY: 1}
-	kafka := store.InterestGroup{Interest: store.Interest{ID: "kafka", Level: store.InterestLevelInterest}, Size: 1, Map: place}
+	kafka := store.InterestGroup{ID: "kafka", Level: store.InterestLevelInterest, Size: 1, Map: place}
 	for name, tc := range map[string]struct {
 		groups []store.InterestGroup
 		docs   []store.MapDocument

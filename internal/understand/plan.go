@@ -119,8 +119,7 @@ func Validate(p Plan) error {
 		return err
 	}
 	if _, err := p.Filters.Resolve(); err != nil {
-		var fe *search.FilterError
-		if errors.As(err, &fe) {
+		if fe, ok := errors.AsType[*search.FilterError](err); ok {
 			return &FieldError{"plan.filters." + fe.Field, fe.Reason}
 		}
 		return fmt.Errorf("plan.filters: %w", err)

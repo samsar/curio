@@ -957,7 +957,7 @@ func TestSummaries(t *testing.T) {
 	written := time.Date(2026, 11, 3, 1, 2, 3, 0, time.UTC)
 	require.NoError(t, s.Deps.Summaries.PutSummary(ctx, "local", store.Summary{DocumentID: doc.ID,
 		ExtractionID: ext.ID, Kind: store.SummaryKindArticle, About: "Why queues back up.",
-		Entities: []string{"Kafka"}, SummaryWriter: store.SummaryWriter{Model: "gemma4:26b", PromptVersion: "p0"},
+		Entities: []string{"Kafka"}, Model: "gemma4:26b", PromptVersion: "p0",
 		WrittenAt: written}))
 
 	got, err := c.GetDocument(ctx, doc.ID)

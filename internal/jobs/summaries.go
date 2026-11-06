@@ -24,7 +24,7 @@ import (
 // besides the one in flight, a document whose summary failed for good
 // isn't fed again for SummariesFailedWait, and after summariesBrakeAfter
 // documents' first failures in a row the brake stops the feed for
-// summariesBrakeMin, doubling to summariesBrakeMax while they keep
+// summariesBrakeStart, doubling to summariesBrakeMax while they keep
 // failing. A model that doesn't answer, or whose fitness check waits to
 // run again, stops the feed but for one job, whose deferrals are the probe
 // that sees it answer again; one the provider doesn't have, or that Ollama
@@ -55,7 +55,7 @@ const (
 	SummariesFailedWait = 7 * 24 * time.Hour
 	// The brake, as the re-embed's.
 	summariesBrakeAfter = 3
-	summariesBrakeMin   = 15 * time.Minute
+	summariesBrakeStart = 15 * time.Minute
 	summariesBrakeMax   = 4 * time.Hour
 	// summariesCheckEvery is how often the feed checks when nothing kicks
 	// it: what it found then (the backlog empty, or a page the kicks
@@ -166,7 +166,7 @@ func NewSummaries(opts SummariesOptions) *Summaries {
 	opts.RateWindow = cmp.Or(opts.RateWindow, summariesRateWindow)
 	opts.CountsFresh = cmp.Or(opts.CountsFresh, summaryCountsFresh)
 	opts.BrakeAfter = cmp.Or(opts.BrakeAfter, summariesBrakeAfter)
-	opts.BrakeMin = cmp.Or(opts.BrakeMin, summariesBrakeMin)
+	opts.BrakeMin = cmp.Or(opts.BrakeMin, summariesBrakeStart)
 	opts.BrakeMax = cmp.Or(opts.BrakeMax, summariesBrakeMax)
 	if opts.Log == nil {
 		opts.Log = slog.New(slog.DiscardHandler)

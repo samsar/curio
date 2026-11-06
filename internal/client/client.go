@@ -1342,8 +1342,7 @@ type InterestSuccessor struct {
 // RetiredOf returns what became of a retired interest, if err is the
 // daemon's answer for one, and nil otherwise.
 func RetiredOf(err error) *RetiredInterest {
-	var apiErr *APIError
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[*APIError](err); ok {
 		return apiErr.Retired
 	}
 	return nil
@@ -1494,8 +1493,7 @@ func (s Startup) Progress() string {
 // StartupOf returns what a starting daemon's healthz answer reported, if
 // err is one, and nil otherwise.
 func StartupOf(err error) *Startup {
-	var apiErr *APIError
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[*APIError](err); ok {
 		return apiErr.Startup
 	}
 	return nil

@@ -43,7 +43,7 @@ func (s *testServer) newTenantRun(t *testing.T, tenant string, shape store.Inter
 	t.Helper()
 	ctx := context.Background()
 	run := &store.InterestRun{TenantID: tenant, Trigger: store.RunTriggerManual, Grouper: "test",
-		RunOutcome: store.RunOutcome{Kind: store.RunKindFresh, Shape: shape}}
+		Kind: store.RunKindFresh, Shape: shape}
 	require.NoError(t, s.insights().CreateRun(ctx, run))
 	f := &runFixture{s: s, tenant: tenant, c: store.RunCommit{RunID: run.ID, TenantID: tenant,
 		Outcome: store.RunOutcome{Kind: store.RunKindFresh, Shape: shape}}}
@@ -59,7 +59,7 @@ func (s *testServer) newTenantRun(t *testing.T, tenant string, shape store.Inter
 // ID; its size and loose fits are its interests', given later.
 func (f *runFixture) area(label string, carried ...string) string {
 	id := f.identity(store.InterestLevelArea, label, carried...)
-	f.c.Groups = append(f.c.Groups, store.InterestGroup{Interest: store.Interest{ID: id, Level: store.InterestLevelArea},
+	f.c.Groups = append(f.c.Groups, store.InterestGroup{ID: id, Level: store.InterestLevelArea,
 		Cohesion: 0.4})
 	f.c.Outcome.NumAreas++
 	return id
@@ -71,7 +71,7 @@ func (f *runFixture) area(label string, carried ...string) string {
 func (f *runFixture) interest(label, area string, size int, members, loose []*store.Document, carried ...string) string {
 	id := f.identity(store.InterestLevelInterest, label, carried...)
 	size = max(size, len(members))
-	f.c.Groups = append(f.c.Groups, store.InterestGroup{Interest: store.Interest{ID: id, Level: store.InterestLevelInterest},
+	f.c.Groups = append(f.c.Groups, store.InterestGroup{ID: id, Level: store.InterestLevelInterest,
 		ParentID: area, Size: size, Loose: len(loose), Cohesion: 0.8})
 	for i := range f.c.Groups {
 		if f.c.Groups[i].ID == area {
@@ -1013,7 +1013,7 @@ func (p prunedMidRead) GetGroup(ctx context.Context, runID, id string) (*store.I
 // when live.
 func TestInterests_PrunedMidRead(t *testing.T) {
 	pruned := &store.InterestRun{ID: "run-a", Grouper: "test",
-		RunOutcome: store.RunOutcome{Shape: store.InterestShapeFlat, NumInterests: 3}}
+		Shape: store.InterestShapeFlat, NumInterests: 3}
 	for _, tc := range []struct {
 		name    string
 		path    string

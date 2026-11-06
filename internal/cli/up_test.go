@@ -174,7 +174,9 @@ func TestUp_Help(t *testing.T) {
 	for line := range strings.SplitSeq(out, "\n") {
 		// Flag lines are indented; the description's lines aren't.
 		if f := strings.Fields(line); len(f) > 0 && strings.HasPrefix(line, " ") && strings.HasPrefix(f[0], "--") {
-			flags = append(flags, f[0])
+			// pflag 1.1 prints a bool flag as --name[=true|false].
+			name, _, _ := strings.Cut(f[0], "[")
+			flags = append(flags, name)
 		}
 	}
 	assert.ElementsMatch(t, []string{"--dry-run", "--embedding-model", "--fresh", "--generation-model", "--import",

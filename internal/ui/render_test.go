@@ -188,9 +188,9 @@ func samples(t testing.TB, r *Renderer) map[string]any {
 			Events: sampleChanges()}},
 		PageRetired: Gone{Layout: layout(NavInterests), ID: evilAttr, RetentionDays: 180,
 			Retired: &Retired{Label: evilRTL, RetiredAt: at, Successors: []Successor{
-				{InterestRef: InterestRef{ID: evilScript, Label: evilLong}, Event: "split", Shared: 12},
-				{InterestRef: InterestRef{ID: evilAttr, Retired: true}, Event: "merged", Shared: 1},
-				{InterestRef: InterestRef{ID: evilQuotes, Label: evilQuotes}, Event: evilScript, Shared: 3}}}},
+				{ID: evilScript, Label: evilLong, Event: "split", Shared: 12},
+				{ID: evilAttr, Retired: true, Event: "merged", Shared: 1},
+				{ID: evilQuotes, Label: evilQuotes, Event: evilScript, Shared: 3}}}},
 		PageError: ErrorPage{Layout: layout(NavNone), Status: http.StatusBadRequest, Title: evilScript,
 			Message: evilAttr, RequestID: evilQuotes, Retry: NavLibrary},
 		PageStarting: Starting{Layout: layout(NavNone), Phase: evilScript, Migrating: true, Applied: 1, Total: 6},
@@ -453,9 +453,9 @@ func sampleEvents(id string) []InterestEvent {
 // none.
 func sampleUnsorted() []UnsortedDoc {
 	doc := func(i int, nearest InterestRef) UnsortedDoc {
-		return UnsortedDoc{Member: Member{DocumentID: evilAttr + strconv.Itoa(i), Title: evilScript,
+		return UnsortedDoc{DocumentID: evilAttr + strconv.Itoa(i), Title: evilScript,
 			BookmarkTitle: evilQuotes, URL: "https://example.com/" + evilQuotes + strconv.Itoa(i), Similarity: 0.3,
-			Fit: "unsorted"}, Nearest: nearest}
+			Fit: "unsorted", Nearest: nearest}
 	}
 	return []UnsortedDoc{doc(0, InterestRef{ID: evilAttr, Label: evilScript}), doc(1, InterestRef{ID: evilQuotes}),
 		doc(2, InterestRef{ID: evilScript, Label: evilLong}), doc(3, InterestRef{})}
@@ -669,8 +669,8 @@ func goneVariants(layout Layout, at time.Time) []any {
 	successor := func(event string, n int) []Successor {
 		out := make([]Successor, 0, n)
 		for i := range n {
-			out = append(out, Successor{InterestRef: InterestRef{ID: evilAttr + strconv.Itoa(i), Label: evilScript,
-				Area: true}, Event: event, Shared: i + 1})
+			out = append(out, Successor{ID: evilAttr + strconv.Itoa(i), Label: evilScript,
+				Area: true, Event: event, Shared: i + 1})
 		}
 		return out
 	}
@@ -809,11 +809,11 @@ func partialSamples(t testing.TB) map[string][]any {
 		"alike-why":       {nil},
 		"loose-why":       {nil},
 		"rebuild-confirm": {Rebuild{Enabled: true}},
-		"result": {ShownHit{SearchHit: SearchHit{DocumentID: evilAttr, Title: evilScript, URL: evilURL,
-			ContentType: evilAttr, Matches: []Match{{Segments: Highlight(evilScript), Vector: new(0.3)}}},
+		"result": {ShownHit{DocumentID: evilAttr, Title: evilScript, URL: evilURL,
+			ContentType: evilAttr, Matches: []Match{{Segments: Highlight(evilScript), Vector: new(0.3)}},
 			Badge: evilScript},
-			ShownHit{SearchHit: SearchHit{DocumentID: evilAttr, BookmarkTitle: evilScript, URL: evilURL,
-				State: "dead", Bookmarks: []SavedBookmark{{Title: evilScript, FolderPath: evilAttr}}}}},
+			ShownHit{DocumentID: evilAttr, BookmarkTitle: evilScript, URL: evilURL,
+				State: "dead", Bookmarks: []SavedBookmark{{Title: evilScript, FolderPath: evilAttr}}}},
 		"similarity": {0.5, 0.0, 1.0},
 		"date":       {at},
 		"interest-cards": {[]Interest{sampleArea(Interest{ID: evilAttr, Label: evilScript, Size: 7}),
@@ -831,8 +831,8 @@ func partialSamples(t testing.TB) map[string][]any {
 		"nearest": {InterestRef{ID: evilAttr, Label: evilScript}, InterestRef{}},
 		"new-band": {&NewBand{Members: []Member{{DocumentID: evilAttr, Title: evilLong, URL: evilURL, Fit: "new"},
 			{DocumentID: evilScript, BookmarkTitle: evilRTL, URL: evilURL, Fit: evilAttr}}, More: 18}, &NewBand{}},
-		"ranked-row": {RankedMember{Rank: 1234, Member: Member{DocumentID: evilAttr, Title: evilScript, URL: evilURL,
-			Fit: "loose"}}, RankedMember{Member: Member{Fit: evilScript}}},
+		"ranked-row": {RankedMember{Rank: 1234, DocumentID: evilAttr, Title: evilScript, URL: evilURL,
+			Fit: "loose"}, RankedMember{Fit: evilScript}},
 		"event-line": eventsOf(sampleChanges()),
 		"fate": {Retired{Successors: []Successor{{Event: "split"}}}, Retired{Successors: []Successor{{Event: "merged"}}},
 			Retired{Successors: []Successor{{Event: "merged"}, {Event: "split"}}}, Retired{RetiredAt: at}},

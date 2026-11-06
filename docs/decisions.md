@@ -4509,6 +4509,17 @@ standard library ("file requires newer Go version go1.27") on a machine
 whose default Go is newer than the directive. With the export it loads the
 directive's standard library everywhere.
 
+**Later (2026-11-06): go 1.27.3.** Dependabot's grouped bump of
+bogdanfinn/fhttp 0.7.3, tls-client 1.18.0 and utls 1.8.2 (the chrome
+backend's TLS stack) requires go 1.27, and its `go mod tidy` wrote the
+directive as `go 1.27`: a language version, which `GOTOOLCHAIN=go1.27`
+refuses as a toolchain, so every job failed in seconds. The directive moved
+to go1.27.3, the line's latest patch, ahead of 1.26 leaving support, and
+the bumps came with it. golangci-lint moved to v2.15.0, whose official
+binary is built with go1.27.0: v2.12.2's go1.26 build refuses to target
+1.27 ("the Go language version (go1.26) used to build golangci-lint is
+lower than the targeted Go version").
+
 ---
 
 ## Releases: gated on CI, pinned, least privilege

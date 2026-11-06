@@ -194,7 +194,7 @@ func TestSummarize(t *testing.T) {
 	doc, ext := seedFetched(t, srv, "https://example.com/a")
 	sums := srv.Deps.Summaries
 	require.NoError(t, sums.PutSummary(context.Background(), "local", store.Summary{DocumentID: doc, ExtractionID: ext,
-		Kind: store.SummaryKindArticle, SummaryWriter: store.SummaryWriter{Model: "old:1b", PromptVersion: "p0"}}))
+		Kind: store.SummaryKindArticle, Model: "old:1b", PromptVersion: "p0"}))
 
 	_, err := runCLI(t, srv, "summarize")
 	require.ErrorContains(t, err, "pass --outdated or --all")
@@ -214,8 +214,8 @@ func TestSummarize(t *testing.T) {
 	other := apitest.Start(t, func(d *api.Deps) { d.SummaryWriter = unmeasured })
 	doc, ext = seedFetched(t, other, "https://example.com/b")
 	require.NoError(t, other.Deps.Summaries.PutSummary(context.Background(), "local", store.Summary{DocumentID: doc,
-		ExtractionID: ext, Kind: store.SummaryKindArticle, SummaryWriter: store.SummaryWriter{Model: "old:1b",
-			PromptVersion: "p0"}}))
+		ExtractionID: ext, Kind: store.SummaryKindArticle, Model: "old:1b",
+		PromptVersion: "p0"}))
 	assert.Equal(t, "1 page to summarize again\n1 page to write in all, one at a time; the time a page isn't "+
 		"measured yet: `curio status` shows the rate once the pass runs\n", mustRun(t, other, "summarize", "--outdated"),
 		"a model curio up never measured: no time")
