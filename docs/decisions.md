@@ -4547,6 +4547,14 @@ Migrating turns the tap's Formula into a Cask, which changes how users
 install and upgrade; that is a distribution decision of its own, not a
 hygiene fix.
 
+**Later (2026-11-06): macos-15.** GitHub retired the macos-14 image on
+2026-11-02, and a job asking for it is cancelled before it starts ("The
+configuration 'macos-14-arm64-us-default' is not supported"), so every PR's
+`test-macos` failed and a tag's gate could never pass. Both jobs moved to
+`macos-15`, still Apple silicon and named exactly: `macos-latest` moves to
+a new macOS on GitHub's schedule, and the release runner should change only
+in a commit here.
+
 **Why:** The release workflow published with a write token and a PAT that
 can push to the tap, on any `v*` tag, with no test, vet, lint or
 vulnerability gate and nothing requiring the tagged commit to have passed
