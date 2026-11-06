@@ -968,7 +968,7 @@ func TestRebuild_Abandoned(t *testing.T) {
 	f := newEngineFixture(t, 3, 4)
 	prior := f.rebuild(t, f.engine(nil, nil, Config{}))
 	left := &store.InterestRun{TenantID: tenant, Trigger: store.RunTriggerAuto, Grouper: "test",
-		RunOutcome: store.RunOutcome{Kind: store.RunKindWarm, Shape: store.InterestShapeFlat}}
+		Kind: store.RunKindWarm, Shape: store.InterestShapeFlat}
 	require.NoError(t, f.store.CreateRun(ctx, left))
 
 	require.NoError(t, f.engine(nil, nil, Config{}).Abandoned(ctx, tenant))

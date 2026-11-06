@@ -634,7 +634,7 @@ func TestUI_SearchSavedHits(t *testing.T) {
 func TestUI_SearchPages(t *testing.T) {
 	embeds, mu := 0, new(sync.Mutex)
 	srv := apitest.Start(t, func(d *api.Deps) {
-		emb := countingEmbedder{Embedder: apitest.Embedder{Dim: config.Default().Embedding.Dim}, calls: &embeds, mu: mu}
+		emb := countingEmbedder{Dim: config.Default().Embedding.Dim, calls: &embeds, mu: mu}
 		d.Search = search.New(d.Chunks, d.Documents, d.Index, emb, search.Config{Log: slog.New(slog.DiscardHandler)})
 	})
 	addSightings(t, srv, 25)
@@ -791,7 +791,7 @@ func (e countingEmbedder) Embed(ctx context.Context, texts []string) ([][]float3
 func TestUI_SearchEmptyQuery(t *testing.T) {
 	calls, mu := 0, new(sync.Mutex)
 	srv := apitest.Start(t, func(d *api.Deps) {
-		emb := countingEmbedder{Embedder: apitest.Embedder{Dim: config.Default().Embedding.Dim}, calls: &calls, mu: mu}
+		emb := countingEmbedder{Dim: config.Default().Embedding.Dim, calls: &calls, mu: mu}
 		d.Search = search.New(d.Chunks, d.Documents, d.Index, emb, search.Config{Log: slog.New(slog.DiscardHandler)})
 	})
 	for _, q := range []string{"", "?q=", "?q=%20%20", "?content_type=video"} {
@@ -1009,7 +1009,7 @@ func TestUI_SearchHomeIsMinimal(t *testing.T) {
 func TestUI_SearchType(t *testing.T) {
 	embeds, mu := 0, new(sync.Mutex)
 	srv := apitest.Start(t, func(d *api.Deps) {
-		emb := countingEmbedder{Embedder: apitest.Embedder{Dim: config.Default().Embedding.Dim}, calls: &embeds, mu: mu}
+		emb := countingEmbedder{Dim: config.Default().Embedding.Dim, calls: &embeds, mu: mu}
 		d.Search = search.New(d.Chunks, d.Documents, d.Index, emb, search.Config{Log: slog.New(slog.DiscardHandler)})
 	})
 	article := titled(t, srv, "https://example.com/article", "Kafka article", store.DocStateFetched)
@@ -2764,7 +2764,7 @@ func TestUI_SearchWordsOnlyASummaryHolds(t *testing.T) {
 	require.NoError(t, srv.Deps.Summaries.PutSummary(context.Background(), apitest.TenantID, store.Summary{
 		DocumentID: doc.ID, ExtractionID: ext.ID, Kind: store.SummaryKindProduct,
 		About: "Brewcraft, a made-up kettle maker's copper kettle.", InputHash: "h",
-		SummaryWriter: store.SummaryWriter{Model: "a-model", PromptVersion: "p"}}))
+		Model: "a-model", PromptVersion: "p"}))
 
 	got := searchAPI(t, srv, `{"query":"brewcraft"}`)
 	assert.Zero(t, got.BM25Hits+got.FieldsHits+got.TitleHits, "no passage, title, folder or site uses it")

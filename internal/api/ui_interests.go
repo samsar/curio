@@ -212,8 +212,8 @@ func (h pageHandlers) gone(w http.ResponseWriter, r *http.Request, id string, re
 func retiredView(b RetiredInterest) *ui.Retired {
 	out := &ui.Retired{Area: b.Level == string(store.InterestLevelArea), Label: b.Label, RetiredAt: b.RetiredAt}
 	for _, s := range b.Successors {
-		out.Successors = append(out.Successors, ui.Successor{InterestRef: ui.InterestRef{ID: s.ID, Label: s.Label,
-			Area: s.Level == string(store.InterestLevelArea), Retired: s.Retired}, Event: s.Event, Shared: s.Shared})
+		out.Successors = append(out.Successors, ui.Successor{ID: s.ID, Label: s.Label,
+			Area: s.Level == string(store.InterestLevelArea), Retired: s.Retired, Event: s.Event, Shared: s.Shared})
 	}
 	return out
 }

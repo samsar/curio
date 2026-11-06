@@ -273,8 +273,7 @@ func (g *GitHub) fetchWiki(ctx context.Context, info urlutil.GitHubURLInfo) (*Re
 	rawURL := fmt.Sprintf("%s/wiki/%s/%s/%s.md", g.rawBaseURL, url.PathEscape(info.Owner), url.PathEscape(info.Repo), escapePath(page))
 	body, err := g.apiGet(ctx, rawURL, "text/plain")
 	if err != nil {
-		var pe *PermanentError
-		if errors.As(err, &pe) {
+		if pe, ok := errors.AsType[*PermanentError](err); ok {
 			return nil, &PermanentError{Err: fmt.Errorf("github: wiki page %q not available (wiki disabled, private, or page missing): %w", page, pe.Err)}
 		}
 		return nil, err

@@ -2292,8 +2292,8 @@ func TestUnsorted_Page(t *testing.T) {
 	r := newRenderer(t)
 	docs := make([]UnsortedDoc, 0, 50)
 	for i := range 50 {
-		docs = append(docs, UnsortedDoc{Member: Member{DocumentID: "d" + strconv.Itoa(i), URL: "https://example.com/" +
-			strconv.Itoa(i), Similarity: 0.3, Fit: "unsorted"}, Nearest: InterestRef{ID: "k", Label: "Kafka <streams>"}})
+		docs = append(docs, UnsortedDoc{DocumentID: "d" + strconv.Itoa(i), URL: "https://example.com/" +
+			strconv.Itoa(i), Similarity: 0.3, Fit: "unsorted", Nearest: InterestRef{ID: "k", Label: "Kafka <streams>"}})
 	}
 	docs[1].Nearest, docs[2].Nearest = InterestRef{ID: "u"}, InterestRef{}
 	page := Unsorted{Layout: Layout{Title: "Unsorted", Nav: NavInterests}, Page: 1, Run: "run-1", Total: 60, Documents: docs,
@@ -2403,7 +2403,7 @@ func TestGone_Page(t *testing.T) {
 	at := time.Date(2026, 10, 3, 9, 30, 0, 0, time.UTC)
 	date := `<time datetime="2026-10-03T09:30:00Z" title="` + when(at) + `">` + localDay(at) + `</time>`
 	succ := func(event string, retired bool) Successor {
-		return Successor{InterestRef: InterestRef{ID: "s-" + event, Label: "To <" + event + ">", Retired: retired},
+		return Successor{ID: "s-" + event, Label: "To <" + event + ">", Retired: retired,
 			Event: event, Shared: 3}
 	}
 	layout := Layout{Title: "Kafka", Nav: NavInterests}

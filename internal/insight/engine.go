@@ -164,7 +164,7 @@ func (e *Engine) Rebuild(ctx context.Context, tenantID string, trigger store.Run
 	}
 	p := e.plan(in)
 	run := &store.InterestRun{TenantID: tenantID, Trigger: trigger, Grouper: e.grouper.Name(), Params: in.params,
-		VectorsReadAt: &in.readAt, RunOutcome: store.RunOutcome{Kind: p.kind(), SplitCheck: p.split, Shape: p.shape}}
+		VectorsReadAt: &in.readAt, Kind: p.kind(), SplitCheck: p.split, Shape: p.shape}
 	if err := e.insights.CreateRun(ctx, run); err != nil {
 		err = fmt.Errorf("create run: %w", err)
 		e.recordFailure(ctx, tenantID, "", len(in.dvs), err)

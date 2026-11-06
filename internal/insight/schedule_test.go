@@ -92,7 +92,7 @@ func (w *world) commit(readAt time.Time) {
 	finished := readAt.Add(time.Second)
 	w.done = &store.InterestRun{ID: fmt.Sprintf("run-%d", readAt.Unix()), Status: store.InterestRunDone,
 		Trigger: store.RunTriggerAuto, VectorsReadAt: &readAt, FinishedAt: &finished,
-		RunOutcome: store.RunOutcome{Kind: store.RunKindWarm, NumDocuments: len(w.assigned), Map: w.nextMap}}
+		Kind: store.RunKindWarm, NumDocuments: len(w.assigned), Map: w.nextMap}
 	w.state.Failures, w.state.LastFailureAt, w.state.LastError = 0, time.Time{}, ""
 	if w.state.FreshOwed != "" && !w.state.FreshOwedAt.After(readAt) {
 		w.state.FreshOwed, w.state.FreshOwedAt = "", time.Time{}
@@ -675,7 +675,7 @@ var simMapState = MapState{Status: store.MapBuilt, Kind: store.RunKindFresh, Too
 // whatever the run drew, and nothing with no done rebuild and the map on.
 func TestDecide_Map(t *testing.T) {
 	ran := func(m *store.RunMap) *store.InterestRun {
-		return &store.InterestRun{RunOutcome: store.RunOutcome{Map: m}}
+		return &store.InterestRun{Map: m}
 	}
 	failed := &store.RunMap{Status: store.MapFailed, Error: "the map took longer than 2m0s", Took: 2 * time.Minute,
 		Params: []byte(`{}`)}
@@ -697,7 +697,7 @@ func TestDecide_Map(t *testing.T) {
 		"a built map, the map off since": {done: ran(simMap), off: true, want: MapState{Status: MapOff}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			in := inputs{Reading: Reading{Done: tc.done, Fetched: 100}, mapOff: tc.off}
+			in := inputs{Done: tc.done, Fetched: 100, mapOff: tc.off}
 			v := decide(in, simStart, time.Time{}, SchedulerConfig{}.WithDefaults())
 			assert.Equal(t, tc.want, v.snap.Map)
 			assert.Equal(t, tc.want.Status == MapNone, v.mapOwed, "a map owed only by a run that drew none, the map on")
@@ -978,21 +978,21 @@ func TestLibrary_ARebuildEndingDuringARead(t *testing.T) {
 // first embedding check while it is pending; and no other state says
 // anything.
 func TestDecide_WaitingFor(t *testing.T) {
-	built := &store.InterestRun{RunOutcome: store.RunOutcome{Map: simMap, NumDocuments: 100}}
+	built := &store.InterestRun{Map: simMap, NumDocuments: 100}
 	reindex := store.InsightState{FreshOwed: store.FreshReindex}
 	for name, tc := range map[string]struct {
 		in    inputs
 		state RebuildState
 		want  WaitingFor
 	}{
-		"re-embedding": {inputs{Reading: Reading{Done: built, Fetched: 100, State: reindex, IndexBusy: 3,
-			LastIndexed: simStart}}, StateDue, WaitingReembedding},
-		"re-embedded, settling": {inputs{Reading: Reading{Done: built, Fetched: 100, State: reindex,
-			LastIndexed: simStart}}, StateDue, WaitingSettle},
-		"the first embedding check": {inputs{Reading: Reading{Done: built, Fetched: 100, State: reindex,
-			IndexBusy: 3}, driftUnchecked: true}, StateDue, WaitingEmbeddingCheck},
-		"current": {inputs{Reading: Reading{Done: built, Fetched: 100}}, StateCurrent, ""},
-		"held": {inputs{Reading: Reading{Done: built, Fetched: 100, State: reindex}, drift: "the embeddings drifted"},
+		"re-embedding": {inputs{Done: built, Fetched: 100, State: reindex, IndexBusy: 3,
+			LastIndexed: simStart}, StateDue, WaitingReembedding},
+		"re-embedded, settling": {inputs{Done: built, Fetched: 100, State: reindex,
+			LastIndexed: simStart}, StateDue, WaitingSettle},
+		"the first embedding check": {inputs{Done: built, Fetched: 100, State: reindex,
+			IndexBusy: 3, driftUnchecked: true}, StateDue, WaitingEmbeddingCheck},
+		"current": {inputs{Done: built, Fetched: 100}, StateCurrent, ""},
+		"held": {inputs{Done: built, Fetched: 100, State: reindex, drift: "the embeddings drifted"},
 			StateHeld, ""},
 	} {
 		t.Run(name, func(t *testing.T) {

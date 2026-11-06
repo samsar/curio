@@ -148,8 +148,8 @@ func (e *mapUnavailableError) withProblem(p Problem) any {
 
 // unavailable is the error of run's missing map (run nil for no run).
 func unavailable(run *store.InterestRun) error {
-	b := InterestMapUnavailable{Reason: mapNoRun, Problem: Problem{
-		Detail: "no rebuild of the interests is done yet: the first one draws the map"}}
+	b := InterestMapUnavailable{Reason: mapNoRun,
+		Detail: "no rebuild of the interests is done yet: the first one draws the map"}
 	switch {
 	case run == nil:
 	case run.Map == nil:

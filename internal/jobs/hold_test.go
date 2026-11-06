@@ -163,7 +163,7 @@ func TestIndexJobs_RideOutAnOllamaOutage(t *testing.T) {
 	for i := range 2 {
 		reembedding = append(reembedding, fetchedBeforeContext(t, deps, db, fmt.Sprintf("https://example.com/r%d", i)))
 	}
-	emb := &outage{fakeEmbedder: fakeEmbedder{dim: sqlitetest.Width(t, db)}}
+	emb := &outage{dim: sqlitetest.Width(t, db)}
 	emb.down.Store(true)
 	deps.Indexer = indexer.New(deps.Chunks, emb, indexer.Options{})
 	saved := make([]*store.Document, 0, 6)

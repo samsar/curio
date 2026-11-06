@@ -487,7 +487,7 @@ func TestEngine_ReadsBounded(t *testing.T) {
 	rewrites := []string{"striped horses", "equine camouflage", "savanna grazers"}
 	names := []string{"Okapi Field Guide", "Grevy Zebra", "Plains Zebra", "Mountain Zebra"}
 	p := &boundedProbe{t: t, wake: make(chan struct{}),
-		planStore: planStore{texts: slices.Concat([]string{question}, rewrites, names)}}
+		texts: slices.Concat([]string{question}, rewrites, names)}
 	// The question and each rewrite read six lists, each name three (the
 	// fields, the titles and the cards), and the date filter its count of
 	// the undated.

@@ -57,7 +57,7 @@ func newClusterWorld(t *testing.T, attempts int) *clusterWorld {
 		Status: store.JobStatusRunning, Attempts: attempts}
 	require.NoError(t, deps.Queue.Enqueue(ctx, w.job))
 	w.run = &store.InterestRun{TenantID: "local", Trigger: store.RunTriggerAuto, Grouper: "louvain",
-		RunOutcome: store.RunOutcome{Kind: store.RunKindWarm, Shape: store.InterestShapeAreas}}
+		Kind: store.RunKindWarm, Shape: store.InterestShapeAreas}
 	require.NoError(t, w.insights.CreateRun(ctx, w.run))
 	w.pool = NewPools(w.deps, PoolSizes{Fetch: 1, Index: 1}, WorkerOptions{Log: quietLog})[2]
 	return w
@@ -250,13 +250,13 @@ func doneRunWith(t *testing.T, ins *sqlitestore.Insights, centroid []float32) (*
 	t.Helper()
 	ctx := context.Background()
 	run := &store.InterestRun{TenantID: "local", Trigger: store.RunTriggerFirst, Grouper: "test",
-		RunOutcome: store.RunOutcome{Kind: store.RunKindFresh, Shape: store.InterestShapeFlat}}
+		Kind: store.RunKindFresh, Shape: store.InterestShapeFlat}
 	require.NoError(t, ins.CreateRun(ctx, run))
 	interest := "interest-" + run.ID
 	require.NoError(t, ins.CommitRun(ctx, store.RunCommit{RunID: run.ID, TenantID: "local",
 		Outcome:       store.RunOutcome{Kind: store.RunKindFresh, Shape: store.InterestShapeFlat, NumInterests: 1},
 		NewIdentities: []store.Interest{{ID: interest, Level: store.InterestLevelInterest}},
-		Groups: []store.InterestGroup{{Interest: store.Interest{ID: interest, Level: store.InterestLevelInterest}, Size: 1,
+		Groups: []store.InterestGroup{{ID: interest, Level: store.InterestLevelInterest, Size: 1,
 			Cohesion: 1, Centroid: centroid}},
 	}))
 	return run, interest

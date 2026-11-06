@@ -192,7 +192,7 @@ func TestIndexHandler_Reembed(t *testing.T) {
 		require.NoError(t, indexHandler(deps)(ctx, docJob(t, store.JobKindIndex, doc.ID)), "a reindex since")
 		backdate(t, db, doc.ID)
 		before := chunks(t, db, doc.ID)
-		emb := &countingEmbedder{fakeEmbedder: fakeEmbedder{dim: sqlitetest.Width(t, db)}}
+		emb := &countingEmbedder{dim: sqlitetest.Width(t, db)}
 		deps.Indexer = indexer.New(deps.Chunks, emb, indexer.Options{})
 
 		require.NoError(t, indexHandler(deps)(ctx, reembedJob(t, doc.ID)))
@@ -242,7 +242,7 @@ func TestIndexHandler_Reembed(t *testing.T) {
 		deps, db, _ := newTestDeps(t)
 		doc := fetchedBeforeContext(t, deps, db, "https://example.com/e")
 		text := dumpRowsOf(t, db, `SELECT text FROM chunks WHERE document_id = ?`, doc.ID)[0].(string)
-		emb := &shortEmbedder{fakeEmbedder: fakeEmbedder{dim: sqlitetest.Width(t, db)}, max: len(text)}
+		emb := &shortEmbedder{dim: sqlitetest.Width(t, db), max: len(text)}
 		deps.Indexer = indexer.New(deps.Chunks, emb, indexer.Options{})
 
 		require.NoError(t, indexHandler(deps)(ctx, reembedJob(t, doc.ID)))
@@ -377,8 +377,8 @@ func TestIndexHandler_LosesTheRaceToARefetch(t *testing.T) {
 			var logs bytes.Buffer
 			deps.Log = slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 			doc := fetchedBeforeContext(t, deps, db, "https://example.com/a")
-			deps.Indexer = indexer.New(deps.Chunks, &racingEmbedder{fakeEmbedder: fakeEmbedder{dim: sqlitetest.Width(t,
-				db)}, race: func() {
+			deps.Indexer = indexer.New(deps.Chunks, &racingEmbedder{dim: sqlitetest.Width(t,
+				db), race: func() {
 				// The refetch's fetch and index, run whole.
 				ff.res.Markdown = "# Title\n\nThe refetched body."
 				_, err := deps.Documents.RequeueFetch(ctx, "local", doc.ID)
@@ -434,8 +434,8 @@ func TestIndexHandler_LosesTheRaceToARefetch(t *testing.T) {
 	t.Run("a re-embed's document that failed meanwhile", func(t *testing.T) {
 		deps, db, _ := newTestDeps(t)
 		doc := fetchedBeforeContext(t, deps, db, "https://example.com/b")
-		deps.Indexer = indexer.New(deps.Chunks, &racingEmbedder{fakeEmbedder: fakeEmbedder{dim: sqlitetest.Width(t,
-			db)}, race: func() {
+		deps.Indexer = indexer.New(deps.Chunks, &racingEmbedder{dim: sqlitetest.Width(t,
+			db), race: func() {
 			_, err := deps.Documents.RequeueFetch(ctx, "local", doc.ID)
 			require.NoError(t, err)
 			require.NoError(t, deps.Documents.MarkFailed(ctx, doc.ID, store.FailureCauseAntiBot))
@@ -763,7 +763,7 @@ func TestReembed_FeedsOneAtATime(t *testing.T) {
 	for i := range 6 {
 		docs = append(docs, fetchedBeforeContext(t, deps, db, fmt.Sprintf("https://example.com/%d", i)))
 	}
-	emb := &feedLog{fakeEmbedder: fakeEmbedder{dim: sqlitetest.Width(t, db)}, db: db}
+	emb := &feedLog{dim: sqlitetest.Width(t, db), db: db}
 	deps.Indexer = indexer.New(deps.Chunks, emb, indexer.Options{})
 	r := NewReembed(ReembedOptions{Documents: deps.Documents, Insights: sqlitestore.NewInsights(db), TenantID: "local",
 		Log: quietLog, CheckEvery: 20 * time.Millisecond})
@@ -863,7 +863,7 @@ func TestReembed_FailureOfEveryDocument(t *testing.T) {
 			for i := range docs {
 				fetchedBeforeContext(t, deps, db, fmt.Sprintf("https://example.com/%d", i))
 			}
-			model := &brokenModel{fakeEmbedder: fakeEmbedder{dim: sqlitetest.Width(t, db)}}
+			model := &brokenModel{dim: sqlitetest.Width(t, db)}
 			model.err.Store(&tc.err)
 			deps.Indexer = indexer.New(deps.Chunks, model, indexer.Options{})
 			var logs syncBuffer
@@ -1118,7 +1118,7 @@ func TestReembed_FewDocumentsFailingOnTheirOwn(t *testing.T) {
 				_, err := db.Exec(`UPDATE documents SET title = 'BAD-DOC' WHERE id = ?`, id)
 				require.NoError(t, err)
 			}
-			deps.Indexer = indexer.New(deps.Chunks, &badDocuments{fakeEmbedder: fakeEmbedder{dim: sqlitetest.Width(t, db)},
+			deps.Indexer = indexer.New(deps.Chunks, &badDocuments{dim: sqlitetest.Width(t, db),
 				err: tc.err}, indexer.Options{})
 			var logs syncBuffer
 			log := slog.New(slog.NewJSONHandler(&logs, nil))

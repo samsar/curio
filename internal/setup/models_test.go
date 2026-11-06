@@ -273,8 +273,8 @@ func TestUp_RerankerWithheld(t *testing.T) {
 	h.ollama = setuptest.NewOllama(t, "0.34.4", embedModel)
 	home := h.writeHome(genModel)
 	cfg := mustRead(t, home.ConfigPath())
-	at := strings.LastIndex(cfg, "  base_url: ")
-	remote := cfg[:at] + "  base_url: http://gpu-box.lan:11434\n"
+	before, _, _ := strings.CutLast(cfg, "  base_url: ")
+	remote := before + "  base_url: http://gpu-box.lan:11434\n"
 	require.NoError(t, os.WriteFile(home.ConfigPath(), []byte(remote+"insight:\n  labeling: terms\nsearch:\n"+
 		"  understand: false\n  rerank: true\n"), 0o600))
 	res := checkStep(t, h.runner(setuptest.NewUI(t), setup.Options{}), "models")
@@ -308,8 +308,8 @@ func TestUp_PlannerWithheld(t *testing.T) {
 	h.ollama = setuptest.NewOllama(t, "0.34.4", embedModel)
 	home := h.writeHome(genModel)
 	cfg := mustRead(t, home.ConfigPath())
-	at := strings.LastIndex(cfg, "  base_url: ")
-	remote := cfg[:at] + "  base_url: http://gpu-box.lan:11434\n"
+	before, _, _ := strings.CutLast(cfg, "  base_url: ")
+	remote := before + "  base_url: http://gpu-box.lan:11434\n"
 	require.NoError(t, os.WriteFile(home.ConfigPath(), []byte(remote+"insight:\n  labeling: terms\nsummaries:\n"+
 		"  enabled: true\n"), 0o600))
 	res := checkStep(t, h.runner(setuptest.NewUI(t), setup.Options{}), "models")

@@ -199,8 +199,7 @@ func fetchHandler(d Deps) HandlerFunc {
 
 		res, err := f.Fetch(ctx, doc.URL)
 		if err != nil {
-			var pe *fetcher.PermanentError
-			if errors.As(err, &pe) {
+			if pe, ok := errors.AsType[*fetcher.PermanentError](err); ok {
 				// Double-%w keeps the fetcher's sentinel chain (e.g.
 				// fetcher.ErrDeadLink) matchable by the permanent-failure
 				// hook, which picks the document's terminal state from it.

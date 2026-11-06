@@ -246,8 +246,7 @@ func retryable(ctx context.Context, err error) bool {
 	if ctx.Err() != nil {
 		return false
 	}
-	var se *ollama.StatusError
-	if errors.As(err, &se) {
+	if se, ok := errors.AsType[*ollama.StatusError](err); ok {
 		return se.Code >= http.StatusInternalServerError
 	}
 	if errors.Is(err, context.DeadlineExceeded) {

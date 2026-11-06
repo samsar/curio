@@ -234,8 +234,7 @@ func (n *Native) Fetch(ctx context.Context, target string) (*Result, error) {
 	}
 	// Dead links, another site's login page, oversized or unsupported
 	// bodies, deterministic statuses: final, and nothing Jina can fix.
-	var pe *PermanentError
-	if errors.As(originErr, &pe) {
+	if _, ok := errors.AsType[*PermanentError](originErr); ok {
 		return nil, originErr
 	}
 	// A redirect can end on a host whose verdict is already cached. Its
@@ -376,8 +375,7 @@ func (n *Native) settle(requestedHost string, originErr, err error) error {
 func hostVerdict(err error, requestedHost string) (kind HostFailureKind, host string, ok bool) {
 	switch {
 	case errors.Is(err, ErrHostUnreachable):
-		var ue *url.Error
-		if errors.As(err, &ue) {
+		if ue, ok := errors.AsType[*url.Error](err); ok {
 			return HostFailUnreachable, orHost(hostOf(ue.URL), requestedHost), true
 		}
 		return HostFailUnreachable, requestedHost, true
@@ -1309,8 +1307,7 @@ func isPDFResponse(ct, rawURL string) bool {
 // errors.Is works through *url.Error → *net.OpError → *os.SyscallError on
 // both backends.
 func isHostUnreachable(err error) bool {
-	var dnsErr *net.DNSError
-	if errors.As(err, &dnsErr) {
+	if dnsErr, ok := errors.AsType[*net.DNSError](err); ok {
 		return dnsErr.IsNotFound
 	}
 	return errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.EHOSTUNREACH)
@@ -1922,8 +1919,7 @@ func jinaRetryable(err error) bool {
 		errors.Is(err, ErrDeadLink) || errors.Is(err, ErrTooLarge) || errors.Is(err, errJinaSiteBlocked) {
 		return false
 	}
-	var se *HTTPStatusError
-	if errors.As(err, &se) {
+	if se, ok := errors.AsType[*HTTPStatusError](err); ok {
 		return retryableStatus(se.StatusCode)
 	}
 	return true

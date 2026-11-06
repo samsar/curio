@@ -517,7 +517,7 @@ func (s *Server) AddRun(t testing.TB, spec RunSpec) Run {
 	}
 	for _, a := range spec.Areas {
 		id := b.identity(store.InterestLevelArea, a.Label)
-		group := store.InterestGroup{Interest: store.Interest{ID: id, Level: store.InterestLevelArea}, Cohesion: 0.4}
+		group := store.InterestGroup{ID: id, Level: store.InterestLevelArea, Cohesion: 0.4}
 		for _, in := range a.Interests {
 			out.Interests = append(out.Interests, b.interest(in, id))
 			group.Size += max(in.Size, len(in.Members))
@@ -672,7 +672,7 @@ func (s *Server) rebuildOf(t testing.TB, prev Run, replaced ...string) *rebuild 
 		if slices.Contains(replaced, g.ID) {
 			continue
 		}
-		rb.c.Groups = append(rb.c.Groups, store.InterestGroup{Interest: store.Interest{ID: g.ID, Level: g.Level},
+		rb.c.Groups = append(rb.c.Groups, store.InterestGroup{ID: g.ID, Level: g.Level,
 			ParentID: g.ParentID, Size: g.Size, Loose: g.Loose, Cohesion: g.Cohesion, Centroid: g.Centroid})
 		if g.Level == store.InterestLevelInterest {
 			rb.grouped += g.Size
@@ -780,7 +780,7 @@ func (s *Server) newCommit(t testing.TB, kind store.RunKind, shape store.Interes
 func (s *Server) newRun(t testing.TB, kind store.RunKind, shape store.InterestShape) *store.InterestRun {
 	t.Helper()
 	run := &store.InterestRun{TenantID: TenantID, Trigger: store.RunTriggerManual, Grouper: "apitest",
-		RunOutcome: store.RunOutcome{Kind: kind, Shape: shape}}
+		Kind: kind, Shape: shape}
 	if err := s.insights().CreateRun(context.Background(), run); err != nil {
 		t.Fatalf("create interest run: %v", err)
 	}
@@ -825,7 +825,7 @@ func (b *commitBuilder) interest(in Interest, parent string) string {
 	id := b.identity(store.InterestLevelInterest, in.Label)
 	size := max(in.Size, len(in.Members))
 	b.grouped += size
-	b.c.Groups = append(b.c.Groups, store.InterestGroup{Interest: store.Interest{ID: id, Level: store.InterestLevelInterest},
+	b.c.Groups = append(b.c.Groups, store.InterestGroup{ID: id, Level: store.InterestLevelInterest,
 		ParentID: parent, Size: size, Loose: len(in.Loose), Cohesion: 0.7})
 	for i, doc := range in.Members {
 		b.c.Assignments = append(b.c.Assignments, store.InterestAssignment{DocumentID: doc.ID, InterestID: id,

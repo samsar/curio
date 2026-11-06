@@ -239,7 +239,7 @@ func TestReport_NoComparisonInJSON(t *testing.T) {
 // with its side, never compared, and the groups both have still are.
 func TestCompareVariants_GroupsOnOneSide(t *testing.T) {
 	group := func(typ eval.GroupType, name string, ndcg float64) groupReport {
-		return groupReport{GroupScore: eval.GroupScore{Type: typ, Name: name, NDCGAt10: ndcg}}
+		return groupReport{Type: typ, Name: name, NDCGAt10: ndcg}
 	}
 	cur := variantReport{Groups: []groupReport{group(eval.GroupAll, "", 0.6), group(eval.GroupKind, "lookup", 0.5)}}
 	base := variantReport{Groups: []groupReport{group(eval.GroupAll, "", 0.5), group(eval.GroupKind, "keyword", 0.9)}}
