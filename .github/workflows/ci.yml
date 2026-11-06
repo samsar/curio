@@ -47,10 +47,10 @@ jobs:
         run: make vulncheck
 
   test-macos:
-    # macos-14 is the release runner and darwin/arm64 the only platform
+    # macos-15 is the release runner and darwin/arm64 the only platform
     # goreleaser ships, so its tests run here before a tag builds on it.
     name: Unit tests (macOS)
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

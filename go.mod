@@ -6,7 +6,7 @@ require (
 	charm.land/huh/v2 v2.0.3
 	codeberg.org/readeck/go-readability/v2 v2.1.2
 	github.com/JohannesKaufmann/html-to-markdown/v2 v2.5.2
-	github.com/andybalholm/brotli v1.2.6
+	github.com/andybalholm/brotli v1.2.7
 	github.com/asg017/sqlite-vec-go-bindings v0.1.6
 	github.com/bogdanfinn/fhttp v0.6.9
 	github.com/bogdanfinn/tls-client v1.16.0
@@ -66,7 +66,7 @@ require (
 	github.com/gorilla/css v1.0.1 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/itlightning/dateparse v0.2.1 // indirect
-	github.com/klauspost/compress v1.19.2 // indirect
+	github.com/klauspost/compress v1.20.2 // indirect
 	github.com/lucasb-eyer/go-colorful v1.4.0 // indirect
 	github.com/mattn/go-runewidth v0.0.20 // indirect
 	github.com/mfridman/interpolate v0.0.2 // indirect
