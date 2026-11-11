@@ -23,6 +23,7 @@ func TestBlockedIP(t *testing.T) {
 		"100.64.0.1", "192.0.2.1", "198.51.100.1", "203.0.113.1",
 		"198.18.0.1", "224.0.0.1", "240.0.0.1", "255.255.255.255",
 		"fe80::1", "fc00::1", "ff02::1", "2001:db8::1", "64:ff9b::7f00:1",
+		"fec0::1", "3fff::1", "::1.2.3.4",
 	}
 	for _, s := range blocked {
 		assert.True(t, blockedIP(net.ParseIP(s)), "should block %s", s)
@@ -81,6 +82,13 @@ func TestStockTransportBlocksPrivate(t *testing.T) {
 	rt := newStockRT(5*time.Second, false)
 	_, err := rt.do(context.Background(), srv.URL, nil)
 	require.ErrorIs(t, err, ErrBlockedAddress)
+}
+
+func TestStockTransportIgnoresEnvironmentProxy(t *testing.T) {
+	rt := newStockRT(5*time.Second, false)
+	tr, ok := rt.client.Transport.(*http.Transport)
+	require.True(t, ok)
+	assert.Nil(t, tr.Proxy, "the fetcher must dial the target itself, not an environment proxy")
 }
 
 func TestStockTransportAllowsPrivateWhenAsked(t *testing.T) {

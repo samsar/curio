@@ -472,6 +472,10 @@ fetcher:
 This turns the check off for the native fetcher. Leave it off unless the
 library really contains local addresses.
 
+The fetcher connects directly: `HTTP_PROXY` and `HTTPS_PROXY` are not used,
+because a proxy would hide the destination from the check (and a local
+proxy would itself look like a blocked address).
+
 ### Jina Reader
 
 The native fetcher asks [Jina Reader](https://jina.ai/reader)

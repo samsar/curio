@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/samsar/curio/internal/client"
+	"github.com/samsar/curio/internal/textutil"
 )
 
 // reindexFix is what lifts a hold on the interests: re-embedding the
@@ -96,9 +97,9 @@ func interestsText(s client.InterestsState, now time.Time) string {
 	case client.StateRebuilding:
 		return "rebuilding"
 	case client.StateHeld:
-		return fmt.Sprintf("rebuilds held: %s; run `%s`", s.HeldReason, reindexFix)
+		return fmt.Sprintf("rebuilds held: %s; run `%s`", textutil.TerminalLine(s.HeldReason), reindexFix)
 	case client.StateFailing:
-		return fmt.Sprintf("the last rebuild failed (%s); %s", s.LastError, retryText(s, now))
+		return fmt.Sprintf("the last rebuild failed (%s); %s", textutil.TerminalLine(s.LastError), retryText(s, now))
 	}
 	return currentText(s, now)
 }
@@ -176,10 +177,10 @@ func retryText(s client.InterestsState, now time.Time) string {
 func interestsCheck(s client.InterestsState, now time.Time) (status checkStatus, detail, hint string) {
 	switch {
 	case s.State == client.StateHeld:
-		return statusWarn, "rebuilds held: " + s.HeldReason,
+		return statusWarn, "rebuilds held: " + textutil.TerminalLine(s.HeldReason),
 			"run `" + reindexFix + "`: the interests are regrouped once the re-embedding finishes"
 	case s.State == client.StateFailing:
-		return statusWarn, fmt.Sprintf("the last rebuild failed: %s; %s", s.LastError, retryText(s, now)),
+		return statusWarn, fmt.Sprintf("the last rebuild failed: %s; %s", textutil.TerminalLine(s.LastError), retryText(s, now)),
 			"`curio daemon logs` has the details; once the cause is fixed, `curio interests rebuild` tries again without waiting"
 	case s.Map != nil && s.Map.Status == client.MapFailed:
 		return statusWarn, "the last rebuild's interest map failed: " + s.Map.Error,

@@ -174,6 +174,10 @@ func newStockRT(timeout time.Duration, allowPrivate bool) *stockRT {
 	// Follow redirects (net/http does up to 10 by default) so finalURL is
 	// what the server settled on.
 	tr := http.DefaultTransport.(*http.Transport).Clone()
+	// The guard must see the target, not an HTTP proxy: a proxy would hide
+	// the destination from the dialer, and a local proxy would itself look
+	// like a blocked address. curio's fetcher connects directly.
+	tr.Proxy = nil
 	tr.DialContext = newGuardDialer(allowPrivate).DialContext
 	return &stockRT{client: &http.Client{Timeout: timeout, Transport: tr}}
 }
@@ -228,6 +232,9 @@ func newChromeRT(timeout time.Duration, prof chromeProfileSpec, allowPrivate boo
 	opts := append([]tlsclient.HttpClientOption{
 		tlsclient.WithClientProfile(prof.tls),
 		tlsclient.WithTimeoutSeconds(secs),
+		// HTTP/3 (QUIC) has its own UDP dialer that bypasses WithDialContext;
+		// stay on TCP so every connection goes through the guard.
+		tlsclient.WithDisableHttp3(),
 		// Every dial, including each redirect hop, goes through the guard.
 		tlsclient.WithDialContext(newGuardDialer(allowPrivate).DialContext),
 		// Redirects are followed, so finalURL is the settled URL.

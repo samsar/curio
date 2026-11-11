@@ -37,6 +37,22 @@ func TestTerminalLine(t *testing.T) {
 	assert.Equal(t, `a\x1b[2Jb`, TerminalLine("a\x1b[2Jb"))
 }
 
+func TestTerminalWriterEscapesC1AndFormat(t *testing.T) {
+	var b bytes.Buffer
+	w := NewTerminalWriter(&b)
+	_, _ = w.Write([]byte("a\u009bb\u202ec"))
+	assert.Equal(t, `a\u009bb\u202ec`, b.String())
+}
+
+func TestTerminalWriterKeepsSplitRune(t *testing.T) {
+	var b bytes.Buffer
+	w := NewTerminalWriter(&b)
+	_, _ = w.Write([]byte{0xc2})
+	assert.Empty(t, b.String(), "an incomplete rune waits for its next byte")
+	_, _ = w.Write([]byte{0x9b})
+	assert.Equal(t, `\u009b`, b.String())
+}
+
 func TestTerminalWriter(t *testing.T) {
 	var b bytes.Buffer
 	w := NewTerminalWriter(&b)

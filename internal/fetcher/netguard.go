@@ -29,6 +29,9 @@ var blockedPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("192.88.99.0/24"),  // 6to4 relay anycast
 	netip.MustParsePrefix("240.0.0.0/4"),     // reserved
 	netip.MustParsePrefix("2001:db8::/32"),   // documentation
+	netip.MustParsePrefix("3fff::/20"),       // documentation (RFC 9637)
+	netip.MustParsePrefix("fec0::/10"),       // deprecated site-local
+	netip.MustParsePrefix("::/96"),           // IPv4-compatible (deprecated)
 	netip.MustParsePrefix("2001:10::/28"),    // ORCHID
 	netip.MustParsePrefix("2001:20::/28"),    // ORCHIDv2
 	netip.MustParsePrefix("2002::/16"),       // 6to4

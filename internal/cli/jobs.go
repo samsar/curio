@@ -136,8 +136,10 @@ func renderJob(w io.Writer, j client.Job) {
 		if j.Status == "failed" {
 			label = "err"
 		}
-		for _, line := range wrapLines(textutil.TerminalSafe(*j.LastError), 100) {
-			fmt.Fprintf(w, "  %s: %s\n", label, line)
+		for raw := range strings.SplitSeq(*j.LastError, "\n") {
+			for _, line := range wrapLines(textutil.TerminalSafe(raw), 100) {
+				fmt.Fprintf(w, "  %s: %s\n", label, line)
+			}
 		}
 	}
 	// Payload is debugging signal when no DocURL was joined (import,
