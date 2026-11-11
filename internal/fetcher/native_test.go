@@ -584,7 +584,7 @@ func TestSoft404TitleRE(t *testing.T) {
 		"This story was deleted",
 		"This video has been removed by the user",
 		"This post was deleted by its author",
-		"Content has been removed by the operator",
+		"Content has been removed by the owner",
 		// Can't find it:
 		"We cannot find the requested page",
 		"We could not find that page",
@@ -1735,7 +1735,7 @@ const (
 	associationNotFoundHTML = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>- Example Association</title></head><body>
 <nav><ul><li><a href="/about">About</a></li><li><a href="/membership">Membership</a></li><li><a href="/events">Events</a></li></ul></nav>
 <main><div id="MPContentArea"><h2>Page Not Found</h2><p>Sorry! The page you requested was not found.</p>
-<p>Use the navigation above or search the site to find what you were looking for. Example Association represents the operators and managers of commercial buildings, with programs for members, awards, and events throughout the year.</p></div></main>
+<p>Use the navigation above or search the site to find what you were looking for. Example Association represents the owners and managers of commercial buildings, with programs for members, awards, and events throughout the year.</p></div></main>
 <footer><p>© 2026 Example Association. All rights reserved.</p></footer></body></html>`
 
 	// associationQuotingHTML is an article that quotes the notice after its

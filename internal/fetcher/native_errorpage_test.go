@@ -54,7 +54,7 @@ The page you requested is not accessible. This may either be due to the server n
 
 Please try again in a few minutes.
 
-### If you're the operator of this website:
+### If you're the owner of this website:
 
 The SSL certificate presented by the server did not pass validation. This could indicate an expired SSL certificate or a certificate that does not include the requested domain name. Please contact your hosting provider to ensure that an up-to-date and valid SSL certificate issued by a Certificate Authority is configured for this domain name on the origin server.[Additional troubleshooting information here.](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-5xx-errors/error-526/)`
 
