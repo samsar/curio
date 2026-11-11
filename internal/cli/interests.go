@@ -12,6 +12,7 @@ import (
 
 	"github.com/samsar/curio/internal/client"
 	"github.com/samsar/curio/internal/daemonctl"
+	"github.com/samsar/curio/internal/textutil"
 )
 
 func newInterestsCmd(env *daemonctl.Env) *cobra.Command {
@@ -312,7 +313,7 @@ func renderInterest(w io.Writer, in *client.Interest, offset int) {
 
 // renderSummary writes a summary wrapped, when there is one.
 func renderSummary(w io.Writer, summary string) {
-	for _, line := range wrapLines(summary, 96) {
+	for _, line := range wrapLines(textutil.TerminalSafe(summary), 96) {
 		fmt.Fprintln(w, line)
 	}
 }
@@ -512,4 +513,6 @@ func label(in client.Interest) string {
 }
 
 // docName names a document: its title, its bookmark's, or its URL.
-func docName(title, bookmarkTitle, url string) string { return cmp.Or(title, bookmarkTitle, url) }
+func docName(title, bookmarkTitle, url string) string {
+	return textutil.TerminalLine(cmp.Or(title, bookmarkTitle, url))
+}

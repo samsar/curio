@@ -90,7 +90,7 @@ func TestNative_RendersMarkdown_Brotli(t *testing.T) {
 	srv := serveEncoded(t, "br", mustBrotli(t, []byte(html)))
 	defer srv.Close()
 
-	n := NewNative(NativeOptions{Timeout: 5 * time.Second, Backend: "chrome", JinaFallback: false})
+	n := newTestNative(NativeOptions{Timeout: 5 * time.Second, Backend: "chrome", JinaFallback: false})
 	res, err := n.Fetch(context.Background(), srv.URL)
 	require.NoError(t, err)
 	assertReadableMarkdown(t, res.Markdown)
@@ -106,7 +106,7 @@ func TestNative_RendersMarkdown_Gzip(t *testing.T) {
 			srv := serveEncoded(t, "gzip", mustGzip(t, []byte(html)))
 			defer srv.Close()
 
-			n := NewNative(NativeOptions{Timeout: 5 * time.Second, Backend: backend, JinaFallback: false})
+			n := newTestNative(NativeOptions{Timeout: 5 * time.Second, Backend: backend, JinaFallback: false})
 			res, err := n.Fetch(context.Background(), srv.URL)
 			require.NoError(t, err)
 			assertReadableMarkdown(t, res.Markdown)
@@ -143,7 +143,7 @@ func TestNative_EndlessHTMLHitsBodyCap(t *testing.T) {
 			jina := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { jinaHits.Add(1) }))
 			defer jina.Close()
 
-			n := NewNative(NativeOptions{Timeout: 30 * time.Second, Backend: backend, JinaFallback: true, JinaBaseURL: jina.URL + "/"})
+			n := newTestNative(NativeOptions{Timeout: 30 * time.Second, Backend: backend, JinaFallback: true, JinaBaseURL: jina.URL + "/"})
 			n.rt = limitBodies(n.rt, testBodyLimit)
 			start := time.Now()
 			_, err := n.Fetch(context.Background(), srv.URL+"/a")
@@ -169,7 +169,7 @@ func TestNative_DecompressionBombHitsBodyCap(t *testing.T) {
 			srv := serveEncoded(t, "gzip", bomb)
 			defer srv.Close()
 
-			n := NewNative(NativeOptions{Timeout: 30 * time.Second, Backend: backend})
+			n := newTestNative(NativeOptions{Timeout: 30 * time.Second, Backend: backend})
 			n.rt = limitBodies(n.rt, testBodyLimit)
 			_, err := n.Fetch(context.Background(), srv.URL)
 			var pe *PermanentError

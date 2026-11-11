@@ -65,7 +65,7 @@ func TestNative_HeadersFollowProfile(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			n := NewNative(NativeOptions{Timeout: 5 * time.Second, Backend: tc.backend})
+			n := newTestNative(NativeOptions{Timeout: 5 * time.Second, Backend: tc.backend})
 			_, err := n.Fetch(context.Background(), srv.URL)
 			require.NoError(t, err)
 			assert.Contains(t, ua, "Chrome/"+tc.major+".0.0.0")
@@ -103,7 +103,7 @@ func TestNative_JinaUserAgent(t *testing.T) {
 			}))
 			defer jina.Close()
 
-			n := unpaced(NewNative(NativeOptions{
+			n := unpaced(newTestNative(NativeOptions{
 				Timeout: 5 * time.Second, Backend: tc.backend, UserAgent: tc.override,
 				JinaFallback: true, JinaBaseURL: jina.URL + "/",
 			}), newFakeClock())
@@ -146,7 +146,7 @@ func TestNative_JinaSendsCurioUserAgent(t *testing.T) {
 	}))
 	defer jina.Close()
 
-	n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), newFakeClock())
+	n := unpaced(newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), newFakeClock())
 	res, err := n.Fetch(t.Context(), origin.URL)
 	require.NoError(t, err)
 	assert.Equal(t, "jina", res.Meta["via"])
@@ -167,7 +167,7 @@ func TestNewNative_WarnsOnMismatchedUserAgent(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.ua, func(t *testing.T) {
 			var logs bytes.Buffer
-			n := NewNative(NativeOptions{Backend: "chrome_120", UserAgent: tc.ua, Log: slog.New(slog.NewTextHandler(&logs, nil))})
+			n := newTestNative(NativeOptions{Backend: "chrome_120", UserAgent: tc.ua, Log: slog.New(slog.NewTextHandler(&logs, nil))})
 			assert.Equal(t, tc.ua, n.userAgent, "an override is sent as is")
 			assert.Equal(t, tc.warnings, strings.Count(logs.String(), "user_agent doesn't name"))
 		})
@@ -436,7 +436,7 @@ func TestChromeRT_ExplicitPortsUntouched(t *testing.T) {
 	var log requestLog
 	srv := httptest.NewServer(redirectingSite(&log))
 	defer srv.Close()
-	rt, err := newChromeRT(5*time.Second, chromeProfiles[0])
+	rt, err := newChromeRT(5*time.Second, chromeProfiles[0], true)
 	require.NoError(t, err)
 
 	assert.Equal(t, srv.URL+"/plain2", chromeGet(t, rt, srv.URL+"/rel"))

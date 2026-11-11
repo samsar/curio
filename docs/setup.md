@@ -452,6 +452,26 @@ fetcher:
     timeout_seconds: 30
 ```
 
+### Private and local addresses
+
+Bookmarks may not reach loopback, private (RFC 1918 and IPv6 ULA),
+link-local, carrier-grade NAT, multicast, documentation, benchmark or
+other non-public addresses. The native fetcher checks every connection,
+including each redirect hop, and dials the address it checked, so a page
+cannot use a changing DNS answer to reach the machine or its network. A
+fetch that meets one is permanent and is not sent to Jina.
+
+To fetch bookmarks on local dev servers, opt in:
+
+```yaml
+fetcher:
+  native:
+    allow_private_hosts: true
+```
+
+This turns the check off for the native fetcher. Leave it off unless the
+library really contains local addresses.
+
 ### Jina Reader
 
 The native fetcher asks [Jina Reader](https://jina.ai/reader)

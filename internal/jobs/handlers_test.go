@@ -1099,7 +1099,7 @@ func TestWorker_RefetchRejectsJinaJunk(t *testing.T) {
 
 			deps.Dispatcher = &fetcher.Single{F: fetcher.NewNative(fetcher.NativeOptions{
 				Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/",
-				DeadLinkDetection: true, Log: quietLog,
+				DeadLinkDetection: true, AllowPrivateHosts: true, Log: quietLog,
 			})}
 			refetch, err := deps.Documents.RequeueFetch(ctx, "local", doc.ID)
 			require.NoError(t, err)
@@ -1162,7 +1162,7 @@ func TestWorker_JinaRefusalPastACachedSite(t *testing.T) {
 	// (10 s).
 	deps.Dispatcher = &fetcher.Single{F: fetcher.NewNative(fetcher.NativeOptions{
 		Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/", JinaAPIKey: "test-key",
-		JinaSiteRequestsPerMinute: 6000, Log: quietLog,
+		JinaSiteRequestsPerMinute: 6000, AllowPrivateHosts: true, Log: quietLog,
 	})}
 
 	doc := &store.Document{TenantID: "local", URL: origin.URL + "/article", ContentType: store.ContentTypeArticle}

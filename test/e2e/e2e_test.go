@@ -391,6 +391,7 @@ fetcher:
   native:
     backend: stock
     jina_fallback: false
+    allow_private_hosts: true
 `, listen, ollamaURL)
 	require.NoError(t, os.WriteFile(home.ConfigPath(), []byte(cfg), 0o600))
 	return home

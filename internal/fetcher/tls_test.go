@@ -115,7 +115,7 @@ func routeDialer(routes map[string]string) func(ctx context.Context, network, ad
 // with its dials routed by routes and roots trusted.
 func newRoutedChromeRT(t *testing.T, roots *x509.CertPool, routes map[string]string) *chromeRT {
 	t.Helper()
-	rt, err := newChromeRT(5*time.Second, chromeProfiles[0],
+	rt, err := newChromeRT(5*time.Second, chromeProfiles[0], true,
 		tlsclient.WithDialContext(routeDialer(routes)),
 		tlsclient.WithTransportOptions(&tlsclient.TransportOptions{RootCAs: roots}),
 	)
@@ -205,7 +205,7 @@ func TestNative_UntrustedCertificateIsPermanent(t *testing.T) {
 			}))
 			defer jina.Close()
 
-			n := unpaced(NewNative(NativeOptions{
+			n := unpaced(newTestNative(NativeOptions{
 				Timeout: 5 * time.Second, Backend: backend, JinaFallback: true, JinaBaseURL: jina.URL + "/",
 			}), newFakeClock())
 			_, err := n.Fetch(t.Context(), origin.URL+"/a")
@@ -237,7 +237,7 @@ func TestNative_OtherTLSFailuresStayRetryable(t *testing.T) {
 	for name, addr := range servers {
 		for _, backend := range []string{"stock", "chrome"} {
 			t.Run(backend+"/"+name, func(t *testing.T) {
-				n := NewNative(NativeOptions{Timeout: 5 * time.Second, Backend: backend})
+				n := newTestNative(NativeOptions{Timeout: 5 * time.Second, Backend: backend})
 				_, err := n.Fetch(t.Context(), "https://"+addr+"/")
 				require.Error(t, err)
 				assert.NotErrorIs(t, err, ErrTLSCertificate)
@@ -282,7 +282,7 @@ func TestNative_JinaCertificateFailureIsJinasTrouble(t *testing.T) {
 
 	for _, backend := range []string{"stock", "chrome"} {
 		t.Run(backend, func(t *testing.T) {
-			n := unpaced(NewNative(NativeOptions{
+			n := unpaced(newTestNative(NativeOptions{
 				Timeout: 5 * time.Second, Backend: backend, JinaFallback: true, JinaBaseURL: jina.URL + "/",
 			}), newFakeClock())
 			_, err := n.Fetch(t.Context(), origin.URL)

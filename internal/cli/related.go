@@ -8,6 +8,7 @@ import (
 
 	"github.com/samsar/curio/internal/client"
 	"github.com/samsar/curio/internal/daemonctl"
+	"github.com/samsar/curio/internal/textutil"
 )
 
 func newRelatedCmd(env *daemonctl.Env) *cobra.Command {
@@ -42,20 +43,20 @@ func newRelatedCmd(env *daemonctl.Env) *cobra.Command {
 
 func renderRelatedResults(w io.Writer, res *client.RelatedResponse) {
 	if len(res.Items) == 0 {
-		fmt.Fprintf(w, "no related documents for %s (is it fetched and indexed?)\n", res.DocID)
+		fmt.Fprintf(w, "no related documents for %s (is it fetched and indexed?)\n", textutil.TerminalLine(res.DocID))
 		return
 	}
-	fmt.Fprintf(w, "%d documents related to %s\n\n", len(res.Items), res.DocID)
+	fmt.Fprintf(w, "%d documents related to %s\n\n", len(res.Items), textutil.TerminalLine(res.DocID))
 	for i, hit := range res.Items {
 		title := hit.Document.URL
 		if hit.Document.Title != nil && *hit.Document.Title != "" {
 			title = *hit.Document.Title
 		}
-		fmt.Fprintf(w, "%2d. %s\n", i+1, title)
-		fmt.Fprintf(w, "    %s   (similarity %.4f)\n", hit.Document.URL, hit.Score)
-		fmt.Fprintf(w, "    doc_id: %s\n", hit.Document.ID)
+		fmt.Fprintf(w, "%2d. %s\n", i+1, textutil.TerminalLine(title))
+		fmt.Fprintf(w, "    %s   (similarity %.4f)\n", textutil.TerminalLine(hit.Document.URL), hit.Score)
+		fmt.Fprintf(w, "    doc_id: %s\n", textutil.TerminalLine(hit.Document.ID))
 		if hit.MarkdownPath != "" {
-			fmt.Fprintf(w, "    path:   %s\n", hit.MarkdownPath)
+			fmt.Fprintf(w, "    path:   %s\n", textutil.TerminalLine(hit.MarkdownPath))
 		}
 		fmt.Fprintln(w)
 	}

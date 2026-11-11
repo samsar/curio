@@ -289,3 +289,16 @@ func TestRerankingLines(t *testing.T) {
 	renderHeader(&out, nil, &client.Reranking{Status: "off"}, time.UTC)
 	assert.Empty(t, out.String())
 }
+
+func TestRenderSearchResultsEscapesControls(t *testing.T) {
+	title := "A title\x1b[2J"
+	res := &client.SearchResponse{Query: "q", Items: []client.SearchHit{{
+		Document: client.Document{ID: "d1", URL: "https://example.com/\x1b]8;;x\x07", Title: &title},
+		Matches:  []client.ChunkMatch{{Snippet: "a snippet\x1b]52;c;Zm9v\x07"}},
+	}}}
+	var b bytes.Buffer
+	renderSearchResults(&b, res)
+	assert.NotContains(t, b.String(), "\x1b")
+	assert.NotContains(t, b.String(), "\x07")
+	assert.Contains(t, b.String(), `\x1b`)
+}

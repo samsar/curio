@@ -129,7 +129,7 @@ func TestReplay_BurstOfOneSite(t *testing.T) {
 	}
 
 	logs := &logRecorder{}
-	n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jinaBase,
+	n := unpaced(newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jinaBase,
 		DeadLinkDetection: true, Log: slog.New(logs)}), fc)
 	n.jinaSites = newSitePacer(testSiteInterval)
 	var busyJina []time.Time

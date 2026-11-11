@@ -9,6 +9,7 @@ import (
 
 	"github.com/samsar/curio/internal/client"
 	"github.com/samsar/curio/internal/daemonctl"
+	"github.com/samsar/curio/internal/textutil"
 )
 
 func newDocsCmd(env *daemonctl.Env) *cobra.Command {
@@ -121,31 +122,31 @@ directly. Pass --content to also stream the markdown to stdout.`,
 }
 
 func renderDocShow(w io.Writer, d *client.Document) {
-	fmt.Fprintf(w, "id:           %s\n", d.ID)
-	fmt.Fprintf(w, "url:          %s\n", d.URL)
+	fmt.Fprintf(w, "id:           %s\n", textutil.TerminalLine(d.ID))
+	fmt.Fprintf(w, "url:          %s\n", textutil.TerminalLine(d.URL))
 	if d.Title != nil && *d.Title != "" {
-		fmt.Fprintf(w, "title:        %s\n", *d.Title)
+		fmt.Fprintf(w, "title:        %s\n", textutil.TerminalLine(*d.Title))
 	}
 	if d.Author != nil && *d.Author != "" {
-		fmt.Fprintf(w, "author:       %s\n", *d.Author)
+		fmt.Fprintf(w, "author:       %s\n", textutil.TerminalLine(*d.Author))
 	}
-	fmt.Fprintf(w, "content_type: %s\n", d.ContentType)
-	fmt.Fprintf(w, "state:        %s\n", d.State)
+	fmt.Fprintf(w, "content_type: %s\n", textutil.TerminalLine(d.ContentType))
+	fmt.Fprintf(w, "state:        %s\n", textutil.TerminalLine(d.State))
 	if d.FailureCause != "" {
-		fmt.Fprintf(w, "cause:        %s\n", d.FailureCause)
+		fmt.Fprintf(w, "cause:        %s\n", textutil.TerminalLine(d.FailureCause))
 	}
 	fmt.Fprintf(w, "created_at:   %s\n", d.CreatedAt.Local().Format("2006-01-02 15:04:05 MST"))
 	if e := d.CurrentExtraction; e != nil {
 		fmt.Fprintf(w, "\nlatest extraction:\n")
-		fmt.Fprintf(w, "  id:           %s\n", e.ID)
-		fmt.Fprintf(w, "  fetcher:      %s\n", e.Fetcher)
-		fmt.Fprintf(w, "  status:       %s\n", e.Status)
+		fmt.Fprintf(w, "  id:           %s\n", textutil.TerminalLine(e.ID))
+		fmt.Fprintf(w, "  fetcher:      %s\n", textutil.TerminalLine(e.Fetcher))
+		fmt.Fprintf(w, "  status:       %s\n", textutil.TerminalLine(e.Status))
 		fmt.Fprintf(w, "  fetched_at:   %s\n", e.FetchedAt.Local().Format("2006-01-02 15:04:05 MST"))
 		if e.MarkdownPath != "" {
-			fmt.Fprintf(w, "  markdown:     %s\n", e.MarkdownPath)
+			fmt.Fprintf(w, "  markdown:     %s\n", textutil.TerminalLine(e.MarkdownPath))
 		}
 		if e.ErrorMessage != nil && *e.ErrorMessage != "" {
-			fmt.Fprintf(w, "  err:          %s\n", *e.ErrorMessage)
+			fmt.Fprintf(w, "  err:          %s\n", textutil.TerminalLine(*e.ErrorMessage))
 		}
 	}
 	renderDocumentSummary(w, d)
@@ -162,19 +163,19 @@ func renderDocList(w io.Writer, resp *client.DocumentList) {
 		if d.Title != nil && *d.Title != "" {
 			title = *d.Title
 		}
-		fmt.Fprintf(w, "%-8s %s\n", d.State, d.URL)
+		fmt.Fprintf(w, "%-8s %s\n", textutil.TerminalLine(d.State), textutil.TerminalLine(d.URL))
 		if title != d.URL {
-			fmt.Fprintf(w, "         (%s)\n", truncate(title, 100))
+			fmt.Fprintf(w, "         (%s)\n", truncate(textutil.TerminalLine(title), 100))
 		}
 		if d.LastError != "" {
-			fmt.Fprintf(w, "         err: %s\n", truncate(strings.TrimSpace(d.LastError), 200))
+			fmt.Fprintf(w, "         err: %s\n", truncate(textutil.TerminalLine(strings.TrimSpace(d.LastError)), 200))
 		}
 		if d.FailureCause != "" {
-			fmt.Fprintf(w, "         cause:  %s\n", d.FailureCause)
+			fmt.Fprintf(w, "         cause:  %s\n", textutil.TerminalLine(d.FailureCause))
 		}
-		fmt.Fprintf(w, "         doc_id: %s\n", d.ID)
+		fmt.Fprintf(w, "         doc_id: %s\n", textutil.TerminalLine(d.ID))
 		if d.MarkdownPath != "" {
-			fmt.Fprintf(w, "         path:   %s\n", d.MarkdownPath)
+			fmt.Fprintf(w, "         path:   %s\n", textutil.TerminalLine(d.MarkdownPath))
 		}
 		fmt.Fprintln(w)
 	}

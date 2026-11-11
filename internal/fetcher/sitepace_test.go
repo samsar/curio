@@ -240,7 +240,7 @@ func TestSitePacer_Concurrent(t *testing.T) {
 func pacedNative(t *testing.T, fc *fakeClock, origin fakeAnswer, jina func(n int) fakeAnswer) (*Native, func() map[string][]time.Time) {
 	t.Helper()
 	const jinaBase = "https://jina.test/"
-	n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jinaBase,
+	n := unpaced(newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jinaBase,
 		DeadLinkDetection: true}), fc)
 	n.jinaSites = newSitePacer(testSiteInterval)
 	var mu sync.Mutex

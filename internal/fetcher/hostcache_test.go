@@ -69,7 +69,7 @@ func newNativeWithJina(t *testing.T, mode jinaMode) (*Native, func() int32) {
 	default:
 		t.Fatalf("unknown jinaMode %q", mode)
 	}
-	return unpaced(NewNative(opts), newFakeClock()), hits.Load
+	return unpaced(newTestNative(opts), newFakeClock()), hits.Load
 }
 
 // hostCached reports whether n's host cache holds a fresh entry for host,
@@ -248,7 +248,7 @@ func TestNative_JinaOwn403IsNoVerdict(t *testing.T) {
 			defer jina.Close()
 
 			fc := newFakeClock()
-			n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), fc)
+			n := unpaced(newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), fc)
 			_, err := n.Fetch(context.Background(), origin.URL+"/a")
 			require.ErrorIs(t, err, tc.sentinel)
 			assert.NotErrorIs(t, err, errJinaRefused)
@@ -368,7 +368,7 @@ func TestNative_HostCacheKeyedByAnsweringHost(t *testing.T) {
 			src := newRedirectingServer(t, destURL+"/x")
 
 			fc := newFakeClock()
-			n := NewNative(NativeOptions{Timeout: 5 * time.Second, Backend: backend})
+			n := newTestNative(NativeOptions{Timeout: 5 * time.Second, Backend: backend})
 			n.clock = fc.clock()
 			_, err := n.Fetch(context.Background(), src.URL+"/a")
 			require.ErrorIs(t, err, ErrAntiBot)
@@ -386,7 +386,7 @@ func TestNative_HostCacheKeyedByAnsweringHost(t *testing.T) {
 			destURL := "http://localhost:" + strings.Split(closedAddr(t), ":")[1]
 			src := newRedirectingServer(t, destURL+"/x")
 
-			n := NewNative(NativeOptions{Timeout: 5 * time.Second, Backend: backend})
+			n := newTestNative(NativeOptions{Timeout: 5 * time.Second, Backend: backend})
 			_, err := n.Fetch(context.Background(), src.URL+"/a")
 			require.ErrorIs(t, err, ErrHostUnreachable)
 			var ue *url.Error
@@ -579,7 +579,7 @@ func TestNative_LoginSlugRedirectIsAnArticle(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	n := NewNative(NativeOptions{Timeout: 5 * time.Second})
+	n := newTestNative(NativeOptions{Timeout: 5 * time.Second})
 	res, err := n.Fetch(context.Background(), srv.URL+"/questions/63177503")
 	require.NoError(t, err)
 	assert.Equal(t, "readability", res.Meta["via"])
@@ -690,7 +690,7 @@ func TestNative_UnreachableClassification(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.unreachable, isHostUnreachable(tc.err))
 
-			n := NewNative(NativeOptions{Timeout: 5 * time.Second})
+			n := newTestNative(NativeOptions{Timeout: 5 * time.Second})
 			n.rt = fakeRT(func(string) (*fetchResponse, error) { return nil, tc.err })
 			_, err := n.Fetch(context.Background(), "https://dead.example/x")
 			require.Error(t, err)
@@ -717,7 +717,7 @@ func TestNative_DeadLinkNeverCached(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	n := NewNative(NativeOptions{Timeout: 5 * time.Second, DeadLinkDetection: true})
+	n := newTestNative(NativeOptions{Timeout: 5 * time.Second, DeadLinkDetection: true})
 	_, err := n.Fetch(context.Background(), srv.URL+"/gone")
 	require.ErrorIs(t, err, ErrDeadLink)
 	_, err = n.Fetch(context.Background(), srv.URL+"/alive")

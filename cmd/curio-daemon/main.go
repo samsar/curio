@@ -876,6 +876,7 @@ func newNativeFetcher(cfg config.Config) *fetcher.Native {
 		JinaSiteRequestsPerMinute: cfg.Fetcher.Native.JinaSiteRequestsPerMinute,
 		DeadLinkDetection:         cfg.Fetcher.Native.DeadLinkDetection,
 		Backend:                   cfg.Fetcher.Native.Backend,
+		AllowPrivateHosts:         cfg.Fetcher.Native.AllowPrivateHosts,
 		Log:                       slog.Default(),
 	})
 }

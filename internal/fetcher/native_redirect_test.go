@@ -180,7 +180,7 @@ func landingJinaNative(t *testing.T, backend string, jina, detection bool) (*Nat
 		_, _ = io.WriteString(w, landingReply)
 	}))
 	t.Cleanup(srv.Close)
-	n := NewNative(NativeOptions{
+	n := newTestNative(NativeOptions{
 		Timeout: 5 * time.Second, Backend: backend, DeadLinkDetection: detection,
 		JinaFallback: jina, JinaBaseURL: srv.URL + "/",
 	})

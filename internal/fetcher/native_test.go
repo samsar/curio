@@ -58,7 +58,7 @@ func TestNative_ReadabilityHappyPath(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	n := NewNative(NativeOptions{Timeout: 5 * time.Second})
+	n := newTestNative(NativeOptions{Timeout: 5 * time.Second})
 	res, err := n.Fetch(context.Background(), srv.URL)
 	require.NoError(t, err)
 	assert.Equal(t, "native", n.Name())
@@ -77,7 +77,7 @@ func TestNative_SiteName(t *testing.T) {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			_, _ = w.Write([]byte(page))
 		}))
-		res, err := NewNative(NativeOptions{Timeout: 5 * time.Second}).Fetch(context.Background(), srv.URL)
+		res, err := newTestNative(NativeOptions{Timeout: 5 * time.Second}).Fetch(context.Background(), srv.URL)
 		srv.Close()
 		require.NoError(t, err)
 		assert.Equal(t, want, res.SiteName)
@@ -93,7 +93,7 @@ func TestNative_LoginWall_TooShort(t *testing.T) {
 	defer srv.Close()
 
 	// No fallback so we see the raw error.
-	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: false})
+	n := newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: false})
 	_, err := n.Fetch(context.Background(), srv.URL)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrLoginWall)
@@ -107,7 +107,7 @@ func TestNative_LoginWall_TitlePattern(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: false})
+	n := newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: false})
 	_, err := n.Fetch(context.Background(), srv.URL)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrLoginWall)
@@ -126,7 +126,7 @@ func TestNative_LoginWall_RedirectToLoginPath(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: false})
+	n := newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: false})
 	_, err := n.Fetch(context.Background(), srv.URL+"/article")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrLoginWall)
@@ -147,7 +147,7 @@ func TestNative_JinaFallbackOnLoginWall(t *testing.T) {
 	}))
 	defer jina.Close()
 
-	n := NewNative(NativeOptions{
+	n := newTestNative(NativeOptions{
 		Timeout:      5 * time.Second,
 		JinaFallback: true,
 		JinaBaseURL:  jina.URL + "/",
@@ -166,7 +166,7 @@ func TestNative_HTTPError_NoFallback(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: false})
+	n := newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: false})
 	_, err := n.Fetch(context.Background(), srv.URL)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "HTTP 500")
@@ -223,7 +223,7 @@ func TestNative_RejectsNonHTMLContentType(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: false})
+			n := newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: false})
 			_, err := n.Fetch(context.Background(), srv.URL)
 			require.Error(t, err)
 
@@ -281,7 +281,7 @@ func TestNative_PDF_FallsBackToJina(t *testing.T) {
 	}))
 	defer jina.Close()
 
-	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"})
+	n := newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"})
 	res, err := n.Fetch(context.Background(), source.URL)
 	require.NoError(t, err)
 	assert.Equal(t, "jina", res.Meta["via"])
@@ -299,7 +299,7 @@ func TestNative_PDF_NoJinaIsPermanent(t *testing.T) {
 	}))
 	defer source.Close()
 
-	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: false})
+	n := newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: false})
 	_, err := n.Fetch(context.Background(), source.URL)
 	require.Error(t, err)
 	var pe *PermanentError
@@ -324,7 +324,7 @@ func TestNative_Hard404_DeadLink(t *testing.T) {
 			}))
 			defer jina.Close()
 
-			n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/", DeadLinkDetection: true})
+			n := newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/", DeadLinkDetection: true})
 			_, err := n.Fetch(context.Background(), srv.URL)
 			require.Error(t, err)
 
@@ -443,7 +443,7 @@ func TestNative_Soft404_RedirectToHomepage(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: false, DeadLinkDetection: true})
+	n := newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: false, DeadLinkDetection: true})
 	_, err := n.Fetch(context.Background(), srv.URL+"/blog/deleted-article")
 	require.Error(t, err)
 
@@ -463,7 +463,7 @@ func TestNative_DeadLinkDetectionDisabled(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: false}) // detection off (zero value)
+	n := newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: false}) // detection off (zero value)
 	_, err := n.Fetch(context.Background(), srv.URL)
 	require.Error(t, err)
 
@@ -672,7 +672,7 @@ func TestNative_HostCache_LoginWallHitDefers(t *testing.T) {
 	defer srv.Close()
 
 	fc := newFakeClock()
-	n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: false}), fc)
+	n := unpaced(newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: false}), fc)
 
 	// First attempt: real fetch, retryable login-wall error.
 	_, err := n.Fetch(context.Background(), srv.URL+"/first")
@@ -714,7 +714,7 @@ func TestNative_HostCache_AntiBotHitDefers(t *testing.T) {
 	defer srv.Close()
 
 	fc := newFakeClock()
-	n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: false}), fc)
+	n := unpaced(newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: false}), fc)
 
 	_, err := n.Fetch(context.Background(), srv.URL+"/a")
 	require.Error(t, err)
@@ -779,7 +779,7 @@ func TestNative_StatusMatrix(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			n := NewNative(NativeOptions{Timeout: 5 * time.Second, DeadLinkDetection: tc.detection})
+			n := newTestNative(NativeOptions{Timeout: 5 * time.Second, DeadLinkDetection: tc.detection})
 			_, err := n.Fetch(context.Background(), srv.URL+"/page")
 			require.Error(t, err)
 
@@ -806,7 +806,7 @@ func TestNative_RetryAfterHTTPDate(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	n := NewNative(NativeOptions{Timeout: 5 * time.Second})
+	n := newTestNative(NativeOptions{Timeout: 5 * time.Second})
 	n.clock = fc.clock()
 	_, err := n.Fetch(context.Background(), srv.URL)
 	var se *HTTPStatusError
@@ -840,7 +840,7 @@ func TestNative_ErrorAnswerKeepsConnection(t *testing.T) {
 				w.WriteHeader(http.StatusInternalServerError)
 				_, _ = w.Write([]byte(errorPage))
 			})
-			n := NewNative(NativeOptions{Timeout: 5 * time.Second, Backend: backend})
+			n := newTestNative(NativeOptions{Timeout: 5 * time.Second, Backend: backend})
 			for _, path := range []string{"/a", "/b", "/c"} {
 				_, err := n.Fetch(context.Background(), srv.URL+path)
 				require.Error(t, err)
@@ -856,7 +856,7 @@ func TestNative_ErrorAnswerKeepsConnection(t *testing.T) {
 			w.WriteHeader(http.StatusBadGateway)
 			_, _ = w.Write([]byte(errorPage))
 		})
-		n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), newFakeClock())
+		n := unpaced(newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), newFakeClock())
 		_, err := n.Fetch(context.Background(), origin.URL)
 		require.Error(t, err)
 		assert.Equal(t, int32(1), conns.Load())
@@ -906,7 +906,7 @@ func TestNative_JinaTruncatedBodyIsRetryable(t *testing.T) {
 	defer jina.Close()
 
 	fc := newFakeClock()
-	n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), fc)
+	n := unpaced(newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), fc)
 	res, err := n.Fetch(context.Background(), source.URL)
 	require.Error(t, err)
 	assert.Nil(t, res)
@@ -929,7 +929,7 @@ func TestNative_JinaBodyOverLimitIsPermanent(t *testing.T) {
 	}))
 	defer jina.Close()
 
-	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"})
+	n := newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"})
 	n.rt = limitBodies(n.rt, testBodyLimit)
 	_, err := n.Fetch(context.Background(), source.URL)
 	var pe *PermanentError
@@ -949,7 +949,7 @@ func TestNative_EventStreamRejectedUpFront(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	n := NewNative(NativeOptions{Timeout: 30 * time.Second})
+	n := newTestNative(NativeOptions{Timeout: 30 * time.Second})
 	start := time.Now()
 	_, err := n.Fetch(context.Background(), srv.URL)
 	assert.Less(t, time.Since(start), 5*time.Second)
@@ -987,7 +987,7 @@ func TestNative_PDFOverLimit(t *testing.T) {
 	for _, jinaOn := range []bool{true, false} {
 		t.Run(fmt.Sprintf("jina=%v", jinaOn), func(t *testing.T) {
 			origin := &countingReader{}
-			n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: jinaOn, JinaBaseURL: jinaBase})
+			n := newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: jinaOn, JinaBaseURL: jinaBase})
 			n.rt = limitBodies(fakeRT(func(target string) (*fetchResponse, error) {
 				u, err := url.Parse(target)
 				require.NoError(t, err)
@@ -1022,7 +1022,7 @@ func TestNative_ChromePlainHTTPSettlesOnItsOwnURL(t *testing.T) {
 	ca := newTestCA(t)
 	page := makeArticleHTML("Plain HTTP", strings.Repeat(`A paragraph that links <a href="/other">elsewhere</a>. `, 30))
 	site := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, page) })
-	n := NewNative(NativeOptions{Timeout: 5 * time.Second})
+	n := newTestNative(NativeOptions{Timeout: 5 * time.Second})
 	n.rt = limitBodies(newRoutedChromeRT(t, ca.pool, plainHTTPSite(t, ca, []string{"example.com"}, site)), maxResponseBytes)
 
 	res, err := n.Fetch(t.Context(), "http://example.com/article")
@@ -1051,7 +1051,7 @@ func TestNative_ChromeHostlessRedirectCachesNothing(t *testing.T) {
 			routes := plainHTTPSite(t, ca, []string{"example.com"}, site)
 			routes[":80"] = closedAddr(t)
 			routes[":443"] = closedAddr(t)
-			n := NewNative(NativeOptions{Timeout: 5 * time.Second})
+			n := newTestNative(NativeOptions{Timeout: 5 * time.Second})
 			n.rt = limitBodies(newRoutedChromeRT(t, ca.pool, routes), maxResponseBytes)
 
 			_, err := n.Fetch(t.Context(), "http://example.com/moved")
@@ -1334,7 +1334,7 @@ func newJinaHarness(t *testing.T, originStatus int, deadLinkDetection bool, repl
 		_, _ = io.WriteString(w, reply)
 	}))
 	t.Cleanup(jina.Close)
-	h.n = unpaced(NewNative(NativeOptions{
+	h.n = unpaced(newTestNative(NativeOptions{
 		Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/",
 		DeadLinkDetection: deadLinkDetection,
 	}), h.fc)
@@ -2394,7 +2394,7 @@ func TestJinaCallClass(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true,
+			n := newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true,
 				JinaBaseURL: "https://jina.test/", DeadLinkDetection: true})
 			n.rt = limitBodies(fakeRT(tc.reply.respond), testBodyLimit)
 			_, err := n.jinaOnce(context.Background(), target)
@@ -2407,7 +2407,7 @@ func TestJinaCallClass(t *testing.T) {
 // jinaOnce reads no more than errorBodyDrain of it.
 func TestJinaOnce_ErrorBodyReadIsBounded(t *testing.T) {
 	body := &countingReader{}
-	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: "https://jina.test/"})
+	n := newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: "https://jina.test/"})
 	n.rt = fakeRT(func(target string) (*fetchResponse, error) {
 		u, err := url.Parse(target)
 		if err != nil {
@@ -2460,7 +2460,7 @@ func TestNative_JinaRefusal(t *testing.T) {
 			defer origin.Close()
 			jina, jinaHits := refusingJina(t, hostOf(origin.URL))
 			fc := newFakeClock()
-			n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina}), fc)
+			n := unpaced(newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina}), fc)
 
 			_, err := n.Fetch(context.Background(), origin.URL+"/a")
 			var pe *PermanentError
@@ -2490,7 +2490,7 @@ func TestNative_JinaRefusal(t *testing.T) {
 			defer origin.Close()
 			jina, jinaHits := refusingJina(t, hostOf(origin.URL))
 			fc := newFakeClock()
-			n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina}), fc)
+			n := unpaced(newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina}), fc)
 
 			_, err := n.Fetch(context.Background(), origin.URL+"/a")
 			require.ErrorIs(t, err, ErrAntiBot)
@@ -2537,7 +2537,7 @@ func blockingJina(t *testing.T, fc *fakeClock, logs *logRecorder, origin, block 
 	const jinaBase = "https://jina.test/"
 	var mu sync.Mutex
 	hits := map[string]int{}
-	n = unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jinaBase,
+	n = unpaced(newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jinaBase,
 		DeadLinkDetection: true, Log: slog.New(logs)}), fc)
 	n.rt = fakeRT(func(target string) (*fetchResponse, error) {
 		page, isJina := strings.CutPrefix(target, jinaBase)
@@ -2694,7 +2694,7 @@ func TestNative_JinaSiteBlockWarnsOncePerBlock(t *testing.T) {
 	release := make(chan struct{})
 	var answered atomic.Int32
 	logs := &logRecorder{}
-	n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: causeJina,
+	n := unpaced(newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: causeJina,
 		Log: slog.New(logs)}), fc)
 	n.rt = fakeRT(func(target string) (*fetchResponse, error) {
 		if !strings.HasPrefix(target, causeJina) {
@@ -2757,7 +2757,7 @@ func TestNative_JinaHealthFromFetches(t *testing.T) {
 	)
 	var serving atomic.Bool
 	var logs bytes.Buffer
-	n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jinaBase,
+	n := unpaced(newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jinaBase,
 		JinaAPIKey: key, Log: slog.New(slog.NewTextHandler(&logs, nil))}), newFakeClock())
 	n.rt = fakeRT(func(target string) (*fetchResponse, error) {
 		switch {
@@ -2799,7 +2799,7 @@ func TestNative_JinaHealthIgnoresCancelledRequests(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var logs bytes.Buffer
-	n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jinaBase,
+	n := unpaced(newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jinaBase,
 		Log: slog.New(slog.NewTextHandler(&logs, nil))}), newFakeClock())
 	n.rt = fakeRT(func(target string) (*fetchResponse, error) {
 		if !strings.HasPrefix(target, jinaBase) {

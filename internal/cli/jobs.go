@@ -115,17 +115,17 @@ func renderJobList(w io.Writer, resp *client.JobList) {
 // job. If terminal width is the concern, pipe to less.
 func renderJob(w io.Writer, j client.Job) {
 	ts := j.UpdatedAt.Local().Format("2006-01-02 15:04:05 MST")
-	fmt.Fprintf(w, "%-7s  %-9s  attempts=%-2d  %s  %s\n", j.Status, j.Kind, j.Attempts, ts, j.ID)
+	fmt.Fprintf(w, "%-7s  %-9s  attempts=%-2d  %s  %s\n", textutil.TerminalLine(j.Status), textutil.TerminalLine(j.Kind), j.Attempts, ts, textutil.TerminalLine(j.ID))
 	if j.DocURL != "" {
-		fmt.Fprintf(w, "  url: %s\n", j.DocURL)
+		fmt.Fprintf(w, "  url: %s\n", textutil.TerminalLine(j.DocURL))
 		if j.DocTitle != "" && j.DocTitle != j.DocURL {
-			fmt.Fprintf(w, "  title: %s\n", truncate(j.DocTitle, 100))
+			fmt.Fprintf(w, "  title: %s\n", truncate(textutil.TerminalLine(j.DocTitle), 100))
 		}
 		if docID := extractDocID(j.Payload); docID != "" {
-			fmt.Fprintf(w, "  doc_id: %s\n", docID)
+			fmt.Fprintf(w, "  doc_id: %s\n", textutil.TerminalLine(docID))
 		}
 		if j.MarkdownPath != "" {
-			fmt.Fprintf(w, "  path: %s\n", j.MarkdownPath)
+			fmt.Fprintf(w, "  path: %s\n", textutil.TerminalLine(j.MarkdownPath))
 		}
 	}
 	if j.LastError != nil && *j.LastError != "" {
@@ -136,7 +136,7 @@ func renderJob(w io.Writer, j client.Job) {
 		if j.Status == "failed" {
 			label = "err"
 		}
-		for _, line := range wrapLines(*j.LastError, 100) {
+		for _, line := range wrapLines(textutil.TerminalSafe(*j.LastError), 100) {
 			fmt.Fprintf(w, "  %s: %s\n", label, line)
 		}
 	}
@@ -144,7 +144,7 @@ func renderJob(w io.Writer, j client.Job) {
 	// cluster, summarize, cards jobs). For fetch/index it's redundant with
 	// the URL we just printed.
 	if j.DocURL == "" && len(j.Payload) > 0 {
-		fmt.Fprintf(w, "  payload: %s\n", condense(string(j.Payload)))
+		fmt.Fprintf(w, "  payload: %s\n", textutil.TerminalLine(condense(string(j.Payload))))
 	}
 	// next attempt only makes sense while the job can still run. For
 	// terminal status (done, failed) the run_after field carries
