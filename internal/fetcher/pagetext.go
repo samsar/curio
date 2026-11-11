@@ -295,7 +295,7 @@ func (t *pageText) parkedDomain(target string) string {
 // (urlutil.Site): a page may report another site's sale.
 // Without a subject, the predicate must be the whole line, as a registrar's
 // "is for sale!" under the domain's name; a line that goes on after it is
-// about something else ("is parked. The owner left."). An expiry counts
+// about something else ("is parked. The operator left."). An expiry counts
 // only with its subject: "Registration has expired." alone is as likely
 // an event's sign-up page.
 func parkedNotice(line, host string) bool {
