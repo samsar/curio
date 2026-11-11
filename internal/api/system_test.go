@@ -1,0 +1,633 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/samsar/curio/internal/drift"
+	"github.com/samsar/curio/internal/embedder"
+	"github.com/samsar/curio/internal/fetcher"
+	"github.com/samsar/curio/internal/indexer"
+	"github.com/samsar/curio/internal/insight"
+	"github.com/samsar/curio/internal/jobs"
+	"github.com/samsar/curio/internal/ollama"
+	"github.com/samsar/curio/internal/rerank"
+	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/summarize"
+	"github.com/samsar/curio/internal/understand"
+)
+
+func TestStats(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	for i, st := range []store.DocState{store.DocStateFetched, store.DocStateFetched, store.DocStateFailed, store.DocStatePending} {
+		doc := s.seedDocument(t, "https://example.com/"+string(rune('a'+i)), st)
+		require.NoError(t, s.deps.Bookmarks.Create(ctx, &store.Bookmark{TenantID: "local", URL: doc.URL,
+			Source: store.SourceManual, SavedAt: time.Now().UTC(), DocumentID: &doc.ID}))
+	}
+	for _, st := range []store.JobStatus{store.JobStatusDone, store.JobStatusDone, store.JobStatusRunning} {
+		require.NoError(t, s.deps.Queue.Enqueue(ctx, &store.Job{TenantID: "local", Kind: store.JobKindFetch, Status: st}))
+	}
+
+	resp := s.do(t, request{method: http.MethodGet, path: "/v1/stats"})
+	require.Equal(t, http.StatusOK, resp.status, resp.body)
+	var got Stats
+	require.NoError(t, json.Unmarshal([]byte(resp.body), &got))
+	assert.Equal(t, 4, got.BookmarksTotal)
+	assert.Equal(t, 4, got.DocumentsTotal)
+	assert.Equal(t, map[string]int{"fetched": 2, "failed": 1, "pending": 1}, got.DocumentsByState)
+	assert.Equal(t, map[string]int{"done": 2, "running": 1, "pending": 1}, got.JobsByStatus,
+		"the fetch jobs, and the cards job the documents' writes queued")
+}
+
+var errInjected = errors.New("injected")
+
+type failingBookmarkCount struct{ store.BookmarkStore }
+
+func (failingBookmarkCount) Count(context.Context, string) (int, error) { return 0, errInjected }
+
+type failingDocumentCount struct{ store.DocumentStore }
+
+func (failingDocumentCount) CountByState(context.Context, string) (map[store.DocState]int, error) {
+	return nil, errInjected
+}
+
+type failingJobCount struct{ store.JobStore }
+
+func (failingJobCount) CountByStatus(context.Context, string) (map[store.JobStatus]int, error) {
+	return nil, errInjected
+}
+
+// TestStats_CountFailure: a count the store can't produce fails the request
+// rather than showing up as a zero or a missing field.
+func TestStats_CountFailure(t *testing.T) {
+	cases := map[string]func(*Deps){
+		"bookmarks": func(d *Deps) { d.Bookmarks = failingBookmarkCount{d.Bookmarks} },
+		"documents": func(d *Deps) { d.Documents = failingDocumentCount{d.Documents} },
+		"jobs":      func(d *Deps) { d.Queue = failingJobCount{d.Queue} },
+	}
+	for name, fault := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := newTestServer(t, fault)
+			assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/stats"}), http.StatusInternalServerError)
+		})
+	}
+}
+
+// pingingEmbedder is an embedder whose Ping fails with err.
+type pingingEmbedder struct {
+	embedder.Embedder
+	err error
+}
+
+func (p pingingEmbedder) Ping(context.Context) error { return p.err }
+
+// TestHealth_OllamaDetail: healthz turns the shared Ollama sentinels into
+// advice, whichever client produced them, and quotes anything else.
+func TestHealth_OllamaDetail(t *testing.T) {
+	cases := []struct {
+		name       string
+		err        error
+		wantDetail string
+	}{
+		{"model not pulled", fmt.Errorf("%w: nomic-embed-text", ollama.ErrModelNotLoaded), "model not pulled"},
+		{"unreachable", fmt.Errorf("%w: dial tcp: connection refused", ollama.ErrUnreachable), "ollama unreachable"},
+		{"anything else", errors.New("decode response: unexpected EOF"), "decode response: unexpected EOF"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestServer(t, func(d *Deps) { d.Embedder = pingingEmbedder{d.Embedder, tc.err} })
+			resp := s.do(t, request{method: http.MethodGet, path: "/v1/healthz"})
+			require.Equal(t, http.StatusOK, resp.status, resp.body)
+			var h Health
+			require.NoError(t, json.Unmarshal([]byte(resp.body), &h))
+			assert.False(t, h.OllamaReachable)
+			assert.Contains(t, h.OllamaDetail, tc.wantDetail)
+		})
+	}
+}
+
+// TestHealth_GenerationModel: healthz names the generation model the
+// daemon started with, so `curio up` can tell a daemon running another one
+// from config.yaml's; the field is there even when it is empty.
+func TestHealth_GenerationModel(t *testing.T) {
+	for _, model := range []string{"gemma4:26b", ""} {
+		s := newTestServer(t, func(d *Deps) { d.GenerationModel = model })
+		resp := s.do(t, request{method: http.MethodGet, path: "/v1/healthz"})
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		var h map[string]any
+		require.NoError(t, json.Unmarshal([]byte(resp.body), &h))
+		assert.Equal(t, model, h["generation_model"])
+	}
+}
+
+// TestHealth_GenerationRoles: healthz names each role the daemon uses and
+// its model, and says {} when it uses none, never null.
+func TestHealth_GenerationRoles(t *testing.T) {
+	for _, tc := range []struct {
+		roles map[string]string
+		want  string
+	}{
+		{map[string]string{"labels": "qwen3:4b-instruct"}, `"generation_roles":{"labels":"qwen3:4b-instruct"}`},
+		{map[string]string{}, `"generation_roles":{}`},
+		{nil, `"generation_roles":{}`},
+	} {
+		s := newTestServer(t, func(d *Deps) { d.GenerationRoles = tc.roles })
+		resp := s.do(t, request{method: http.MethodGet, path: "/v1/healthz"})
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		assert.Contains(t, resp.body, tc.want)
+	}
+}
+
+// TestHealth_Understanding: healthz says what the planner knows of its
+// model, its times in UTC and only the holds in effect; with no planner,
+// that understanding is off. It never asks the planner's model anything,
+// and never changes the status.
+func TestHealth_Understanding(t *testing.T) {
+	off := newTestServer(t, func(*Deps) {})
+	resp := off.do(t, request{method: http.MethodGet, path: "/v1/healthz"})
+	require.Equal(t, http.StatusOK, resp.status, resp.body)
+	assert.Contains(t, resp.body, `"understanding":{"on":false,"reason":"search understanding is off `+
+		`(search.understand: false)"}`)
+
+	at := time.Date(2026, 10, 14, 9, 30, 0, 0, time.FixedZone("CEST", 2*3600))
+	planner := &fakePlanner{block: true}
+	held := newTestServer(t, func(d *Deps) {
+		d.Planner = statePlanner{Planner: planner, state: understand.State{On: true, Model: "gemma4:26b",
+			Check: understand.CheckFit, CheckedAt: at, Last: understand.StatusTimeout, LastAt: at,
+			TimeoutHoldUntil: at.Add(2 * time.Minute),
+			Failure:          understand.Failure{Cause: "timeout:held", At: at, Err: "3 plans in a row took longer than 5s"}}}
+	})
+	resp = held.do(t, request{method: http.MethodGet, path: "/v1/healthz"})
+	require.Equal(t, http.StatusOK, resp.status, resp.body)
+	var h struct {
+		Status        string              `json:"status"`
+		Understanding UnderstandingHealth `json:"understanding"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(resp.body), &h))
+	assert.Equal(t, "ok", h.Status)
+	assert.Equal(t, UnderstandingHealth{On: true, Model: "gemma4:26b", Check: "fit", CheckedAt: at.UTC(),
+		LastStatus: "timeout", LastAt: at.UTC(), TimeoutHoldUntil: at.Add(2 * time.Minute).UTC(),
+		LastFailure: &UnderstandingFailure{Cause: "timeout:held", At: at.UTC(),
+			Error: "3 plans in a row took longer than 5s"}}, h.Understanding)
+	assert.NotContains(t, resp.body, "eviction_hold_until", "no hold, no field")
+	assert.Zero(t, planner.calls(), "healthz asks the planner nothing")
+}
+
+// TestHealth_Reranking: healthz says what the reranker knows of its
+// model, its times in UTC and only the holds in effect; with no reranker,
+// that reranking is off. It never asks the reranker's model anything, and
+// never changes the status.
+func TestHealth_Reranking(t *testing.T) {
+	off := newTestServer(t, func(*Deps) {})
+	resp := off.do(t, request{method: http.MethodGet, path: "/v1/healthz"})
+	require.Equal(t, http.StatusOK, resp.status, resp.body)
+	assert.Contains(t, resp.body, `"reranking":{"on":false,"reason":"search reranking is off (search.rerank: false)"}`)
+
+	at := time.Date(2026, 10, 14, 9, 30, 0, 0, time.FixedZone("CEST", 2*3600))
+	f := &fakeReranker{}
+	held := newTestServer(t, func(d *Deps) {
+		d.Reranker = stateReranker{fakeReranker: f, state: rerank.State{On: true, Model: "gemma4:26b",
+			Check: rerank.CheckFit, CheckedAt: at, Last: rerank.StatusTimeout, LastAt: at,
+			EvictionHoldUntil: at.Add(15 * time.Minute),
+			Failure:           rerank.Failure{Cause: "evicted", At: at, Err: "unloaded within its keep-alive 2 times"}}}
+	})
+	resp = held.do(t, request{method: http.MethodGet, path: "/v1/healthz"})
+	require.Equal(t, http.StatusOK, resp.status, resp.body)
+	var h struct {
+		Status    string          `json:"status"`
+		Reranking RerankingHealth `json:"reranking"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(resp.body), &h))
+	assert.Equal(t, "ok", h.Status)
+	assert.Equal(t, RerankingHealth{On: true, Model: "gemma4:26b", Check: "fit", CheckedAt: at.UTC(),
+		LastStatus: "timeout", LastAt: at.UTC(), EvictionHoldUntil: at.Add(15 * time.Minute).UTC(),
+		LastFailure: &UnderstandingFailure{Cause: "evicted", At: at.UTC(),
+			Error: "unloaded within its keep-alive 2 times"}}, h.Reranking)
+	assert.NotContains(t, resp.body, "timeout_hold_until", "no hold, no field")
+	assert.Zero(t, f.reranks(), "healthz asks the reranker nothing")
+}
+
+// TestHealth_YouTubeFetcher: healthz names the yt-dlp the daemon routes
+// YouTube videos to, and leaves the field out when there is none.
+func TestHealth_YouTubeFetcher(t *testing.T) {
+	for _, bin := range []string{"/opt/homebrew/bin/yt-dlp", ""} {
+		s := newTestServer(t, func(d *Deps) { d.YouTubeFetcher = bin })
+		resp := s.do(t, request{method: http.MethodGet, path: "/v1/healthz"})
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		var h map[string]any
+		require.NoError(t, json.Unmarshal([]byte(resp.body), &h))
+		got, present := h["youtube_fetcher"]
+		assert.Equal(t, bin != "", present, bin)
+		if present {
+			assert.Equal(t, bin, got)
+		}
+	}
+}
+
+// TestHealth_DocumentFields: healthz reports what the daemon's start did
+// to the documents' search fields, its time in UTC, the error only when
+// the start couldn't check or derive them; it never changes the status.
+func TestHealth_DocumentFields(t *testing.T) {
+	checked := time.Date(2026, 10, 14, 9, 30, 0, 0, time.FixedZone("CEST", 2*3600))
+	for _, tc := range []struct {
+		name   string
+		fields DocumentFields
+		want   string
+	}{
+		{"checked", DocumentFields{CheckedAt: checked},
+			`"document_fields":{"checked_at":"2026-10-14T07:30:00Z","rebuilt":false}`},
+		{"rebuilt", DocumentFields{CheckedAt: checked, Rebuilt: true},
+			`"document_fields":{"checked_at":"2026-10-14T07:30:00Z","rebuilt":true}`},
+		{"failed", DocumentFields{CheckedAt: checked, Error: "derive document fields: disk I/O error"},
+			`"document_fields":{"checked_at":"2026-10-14T07:30:00Z","rebuilt":false,` +
+				`"error":"derive document fields: disk I/O error"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestServer(t, func(d *Deps) { d.DocumentFields = tc.fields })
+			resp := s.do(t, request{method: http.MethodGet, path: "/v1/healthz"})
+			require.Equal(t, http.StatusOK, resp.status, resp.body)
+			assert.Contains(t, resp.body, tc.want)
+			assert.Contains(t, resp.body, `"status":"ok"`)
+		})
+	}
+}
+
+// failingStaleCount is a document index whose stale cards can't be
+// counted.
+type failingStaleCount struct{ store.DocumentIndex }
+
+func (failingStaleCount) CountStaleCards(context.Context, string) (int, error) { return 0, errInjected }
+
+// TestStats_CardsStale: stats counts the cards left to embed, the cards
+// job's backlog; one it can't count fails the whole answer, like the
+// other counts, and without a document index there are none.
+func TestStats_CardsStale(t *testing.T) {
+	stats := func(t *testing.T, s *testServer) map[string]any {
+		t.Helper()
+		resp := s.do(t, request{method: http.MethodGet, path: "/v1/stats"})
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		var got map[string]any
+		require.NoError(t, json.Unmarshal([]byte(resp.body), &got))
+		return got
+	}
+	s := newTestServer(t)
+	assert.InDelta(t, 0, stats(t, s)["cards_stale"], 0, "a new library has none, and says so")
+	s.seedDocument(t, "https://example.com/a", store.DocStateFetched)
+	s.seedDocument(t, "https://example.com/b", store.DocStatePending)
+	assert.InDelta(t, 2, stats(t, s)["cards_stale"], 0)
+
+	failing := newTestServer(t, func(d *Deps) { d.Index = failingStaleCount{d.Index} })
+	assertProblem(t, failing.do(t, request{method: http.MethodGet, path: "/v1/stats"}), http.StatusInternalServerError)
+
+	none := newTestServer(t, func(d *Deps) { d.Index = nil })
+	none.seedDocument(t, "https://example.com/a", store.DocStateFetched)
+	assert.InDelta(t, 0, stats(t, none)["cards_stale"], 0)
+}
+
+// failingReembedCount is a document store whose documents to re-embed
+// can't be counted.
+type failingReembedCount struct{ store.DocumentStore }
+
+func (failingReembedCount) CountToReembed(context.Context, string, int) (store.ReembedCount, error) {
+	return store.ReembedCount{}, errInjected
+}
+
+// reembedAt is a re-embed that reports progress.
+type reembedAt struct{ progress jobs.ReembedProgress }
+
+func (r reembedAt) Progress() jobs.ReembedProgress { return r.progress }
+
+// writerAt is a summaries' writer in a state a test sets.
+type writerAt struct{ state summarize.State }
+
+func (w *writerAt) State() summarize.State { return w.state }
+func (w *writerAt) Identity() store.SummaryWriter {
+	return store.SummaryWriter{Model: w.state.Model, PromptVersion: w.state.PromptVersion}
+}
+
+// summaryFeedAt is a summary pass at a fixed rate and brake, which counts
+// its kicks.
+type summaryFeedAt struct {
+	progress jobs.SummaryProgress
+	counts   store.SummaryCounts
+	kicks    atomic.Int32
+}
+
+func (f *summaryFeedAt) Progress() jobs.SummaryProgress { return f.progress }
+func (f *summaryFeedAt) Kick()                          { f.kicks.Add(1) }
+func (f *summaryFeedAt) kicked() int                    { return int(f.kicks.Load()) }
+
+func (f *summaryFeedAt) Counts(context.Context) (store.SummaryCounts, time.Time, error) {
+	return f.counts, time.Now(), nil
+}
+
+// holdAt is an embedder hold in a fixed state.
+type holdAt struct{ state jobs.HoldState }
+
+func (h holdAt) State() jobs.HoldState { return h.state }
+
+// TestHealth_HoldAndBrake: healthz reports the embedder hold and the
+// re-embed's brake only while each holds, in UTC, and neither changes its
+// status.
+func TestHealth_HoldAndBrake(t *testing.T) {
+	health := func(t *testing.T, s *testServer) map[string]any {
+		t.Helper()
+		resp := s.do(t, request{method: http.MethodGet, path: "/v1/healthz"})
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		var got map[string]any
+		require.NoError(t, json.Unmarshal([]byte(resp.body), &got))
+		assert.Equal(t, "ok", got["status"])
+		return got
+	}
+	east := time.FixedZone("EDT", -4*3600)
+	since := time.Date(2026, 10, 14, 10, 2, 0, 0, east)
+	until := time.Now().Add(time.Hour).Truncate(time.Second).In(east)
+
+	for name, d := range map[string]func(*Deps){
+		"none":      func(*Deps) {},
+		"open, off": func(d *Deps) { d.Hold, d.Reembed = holdAt{}, reembedAt{jobs.ReembedProgress{Active: true}} },
+		"typed nil": func(d *Deps) { d.Hold, d.Reembed = (*jobs.EmbedderHold)(nil), (*jobs.Reembed)(nil) },
+		"daemon-made": func(d *Deps) {
+			d.Hold, d.Reembed = jobs.NewEmbedderHold(nil, nil), jobs.NewReembed(jobs.ReembedOptions{})
+		},
+		"a brake whose time has passed": func(d *Deps) {
+			d.Reembed = reembedAt{jobs.ReembedProgress{Active: true,
+				Brake: jobs.ReembedBrake{Until: time.Now().Add(-time.Second), Failures: 3, Documents: []string{"d1"}}}}
+		},
+	} {
+		got := health(t, newTestServer(t, d))
+		assert.NotContains(t, got, "embedder_hold", name)
+		assert.NotContains(t, got, "reembed_brake", name)
+	}
+
+	got := health(t, newTestServer(t, func(d *Deps) {
+		d.Hold = holdAt{jobs.HoldState{Held: true, Since: since, Err: "ollama unreachable: connection refused"}}
+		d.Reembed = reembedAt{jobs.ReembedProgress{Active: true,
+			Brake: jobs.ReembedBrake{Until: until, Failures: 3, Documents: []string{"d1", "d2", "d3"},
+				Err: "HTTP 500: boom"}}}
+	}))
+	assert.Equal(t, map[string]any{"since": "2026-10-14T14:02:00Z", "error": "ollama unreachable: connection refused"},
+		got["embedder_hold"])
+	assert.Equal(t, map[string]any{"until": until.UTC().Format(time.RFC3339), "failures": 3.0,
+		"documents": []any{"d1", "d2", "d3"}, "error": "HTTP 500: boom"}, got["reembed_brake"])
+}
+
+// TestStats_Reembed: stats counts the fetched documents whose chunks
+// predate the chunk context, and those chunks, the re-embed's backlog,
+// with its rate and the time left at it while it runs and has one; it
+// leaves the object out when nothing is left, and one it can't count fails
+// the whole answer, like the other counts.
+func TestStats_Reembed(t *testing.T) {
+	stats := func(t *testing.T, s *testServer) map[string]any {
+		t.Helper()
+		resp := s.do(t, request{method: http.MethodGet, path: "/v1/stats"})
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		var got map[string]any
+		require.NoError(t, json.Unmarshal([]byte(resp.body), &got))
+		return got
+	}
+	seed := func(t *testing.T, s *testServer) {
+		t.Helper()
+		ctx := context.Background()
+		for i, versions := range [][]int{{0, 0, 0}, {indexer.ContextVersion}, {0}} {
+			doc := s.seedDocument(t, fmt.Sprintf("https://example.com/%d", i), store.DocStateFetched)
+			ext := &store.DocumentExtraction{DocumentID: doc.ID, Fetcher: "test", Status: store.ExtractionStatusOK,
+				FetchedAt: time.Now().UTC()}
+			require.NoError(t, s.deps.Extractions.Create(ctx, ext))
+			require.NoError(t, s.deps.Documents.SetCurrentExtraction(ctx, doc.ID, ext.ID))
+			inputs := make([]store.ChunkInput, len(versions))
+			for j, v := range versions {
+				inputs[j] = store.ChunkInput{Text: "text", ContextVersion: v, Embedding: unitVec()}
+			}
+			require.NoError(t, s.deps.Chunks.ReplaceForDocument(ctx, doc.ID, ext.ID, "", nil, inputs))
+		}
+	}
+	s := newTestServer(t)
+	assert.NotContains(t, stats(t, s), "reembed", "a new library has none")
+	seed(t, s)
+	assert.Equal(t, map[string]any{"documents": 2.0, "chunks": 4.0}, stats(t, s)["reembed"],
+		"the two embedded before chunk context, and their chunks; no rate without a re-embed running")
+
+	running := newTestServer(t, func(d *Deps) {
+		d.Reembed = reembedAt{jobs.ReembedProgress{Active: true, ChunksPerSecond: 0.5}}
+	})
+	seed(t, running)
+	assert.Equal(t, map[string]any{"documents": 2.0, "chunks": 4.0, "chunks_per_second": 0.5, "eta_seconds": 8.0},
+		stats(t, running)["reembed"], "4 chunks at half a chunk a second")
+	done := newTestServer(t, func(d *Deps) {
+		d.Reembed = reembedAt{jobs.ReembedProgress{ChunksPerSecond: 0.5}}
+	})
+	seed(t, done)
+	assert.Equal(t, map[string]any{"documents": 2.0, "chunks": 4.0}, stats(t, done)["reembed"],
+		"no rate from a re-embed that isn't running")
+
+	failing := newTestServer(t, func(d *Deps) { d.Documents = failingReembedCount{d.Documents} })
+	assertProblem(t, failing.do(t, request{method: http.MethodGet, path: "/v1/stats"}), http.StatusInternalServerError)
+}
+
+// driftMonitor is a DriftMonitor that reports report and counts
+// rebaselines, failing them with err.
+type driftMonitor struct {
+	mu          sync.Mutex
+	report      drift.Report
+	err         error
+	rebaselines int
+}
+
+func (m *driftMonitor) Report() drift.Report {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.report
+}
+
+func (m *driftMonitor) Rebaseline() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.rebaselines++
+	return m.err
+}
+
+func (m *driftMonitor) set(report drift.Report) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.report = report
+}
+
+func (m *driftMonitor) rebaselined() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.rebaselines
+}
+
+// drifted is a report whose check found both parts of the build changed,
+// and a sample re-embedded by the build serving at checkedAt changed.
+func drifted(checkedAt time.Time) drift.Report {
+	return drift.Report{CheckedAt: checkedAt, Changes: []drift.Change{
+		{What: drift.ModelDigest, Recorded: "sha256:0a109f42", Current: "sha256:ac6da0df"},
+		{What: drift.OllamaVersion, Recorded: "0.30.0", Current: "0.34.4"},
+	}, Evidence: drift.Evidence{Verified: true, At: checkedAt,
+		Comparison: drift.Comparison{Sampled: 64, Changed: 60, Identical: 4, MinCosine: 0.97134}}}
+}
+
+// driftedUnverified is drifted with a sample that couldn't be re-embedded.
+func driftedUnverified(checkedAt time.Time) drift.Report {
+	r := drifted(checkedAt)
+	r.Evidence = drift.Evidence{Reason: "after 3 attempts: ollama unreachable", At: checkedAt.Add(-time.Minute)}
+	return r
+}
+
+// TestHealth_EmbeddingDrift: healthz carries embedding_drift only while the
+// monitor reports a drift, with each change, the evidence as the monitor
+// words it and the fix, and status stays ok.
+func TestHealth_EmbeddingDrift(t *testing.T) {
+	healthz := func(t *testing.T, monitor DriftMonitor) map[string]any {
+		t.Helper()
+		s := newTestServer(t, func(d *Deps) { d.Drift = monitor })
+		resp := s.do(t, request{method: http.MethodGet, path: "/v1/healthz"})
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		var h map[string]any
+		require.NoError(t, json.Unmarshal([]byte(resp.body), &h))
+		assert.Equal(t, "ok", h["status"])
+		return h
+	}
+
+	for name, monitor := range map[string]DriftMonitor{
+		"no monitor":        nil,
+		"never checked":     &driftMonitor{},
+		"checked, no drift": &driftMonitor{report: drift.Report{CheckedAt: time.Now()}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.NotContains(t, healthz(t, monitor), "embedding_drift")
+		})
+	}
+
+	checked := time.Date(2026, 9, 27, 10, 40, 1, 0, time.FixedZone("EDT", -4*60*60))
+	changes := []any{
+		map[string]any{"what": "model_digest", "recorded": "sha256:0a109f42", "current": "sha256:ac6da0df"},
+		map[string]any{"what": "ollama_version", "recorded": "0.30.0", "current": "0.34.4"},
+	}
+	t.Run("drifted", func(t *testing.T) {
+		got := healthz(t, &driftMonitor{report: drifted(checked)})["embedding_drift"]
+		assert.Equal(t, map[string]any{
+			"changes": changes,
+			"verification": map[string]any{
+				"verified":   true,
+				"sampled":    float64(64),
+				"changed":    float64(60),
+				"min_cosine": 0.97134,
+				"detail":     "60 of 64 sampled chunks changed (worst cosine 0.9713)",
+				"sampled_at": "2026-09-27T14:40:01Z",
+			},
+			"fix":        "curio reindex --all",
+			"checked_at": "2026-09-27T14:40:01Z",
+		}, got)
+	})
+
+	t.Run("may have drifted", func(t *testing.T) {
+		got := healthz(t, &driftMonitor{report: driftedUnverified(checked)})["embedding_drift"]
+		assert.Equal(t, map[string]any{
+			"changes": changes,
+			"verification": map[string]any{
+				"verified":   false,
+				"sampled":    float64(0),
+				"changed":    float64(0),
+				"detail":     "not verified: after 3 attempts: ollama unreachable",
+				"sampled_at": "2026-09-27T14:39:01Z",
+			},
+			"fix":        "curio reindex --all",
+			"checked_at": "2026-09-27T14:40:01Z",
+		}, got)
+	})
+}
+
+// TestHealth_Upstreams: healthz reports each upstream as the daemon sees
+// it: every state, times in UTC, unset times, a cooldown that isn't in
+// effect and site pauses when there are none left out, and an empty recent
+// or upstream list sent as such, never as null.
+func TestHealth_Upstreams(t *testing.T) {
+	healthz := func(t *testing.T, upstreams func() []fetcher.UpstreamHealth) map[string]any {
+		t.Helper()
+		s := newTestServer(t, func(d *Deps) { d.Upstreams = upstreams })
+		resp := s.do(t, request{method: http.MethodGet, path: "/v1/healthz"})
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		var h map[string]any
+		require.NoError(t, json.Unmarshal([]byte(resp.body), &h))
+		return h
+	}
+
+	t.Run("none tracked", func(t *testing.T) {
+		assert.Equal(t, []any{}, healthz(t, nil)["upstreams"])
+	})
+
+	t.Run("each state", func(t *testing.T) {
+		toronto := time.FixedZone("EDT", -4*60*60)
+		failure := time.Date(2026, 9, 27, 10, 40, 1, 0, toronto)
+		states := []fetcher.UpstreamState{fetcher.UpstreamDisabled, fetcher.UpstreamIdle,
+			fetcher.UpstreamOK, fetcher.UpstreamDegraded, fetcher.UpstreamPaused, fetcher.UpstreamFailing}
+		upstreams := make([]fetcher.UpstreamHealth, len(states))
+		for i, state := range states {
+			upstreams[i] = fetcher.UpstreamHealth{Name: string(state), State: state,
+				Enabled: state != fetcher.UpstreamDisabled, Window: 15 * time.Minute}
+		}
+		upstreams[2].LastSuccess = failure.Add(-time.Hour)
+		upstreams[2].Recent = map[fetcher.CallClass]int{fetcher.CallOK: 12, fetcher.CallRefused: 2}
+		upstreams[4].LastFailure, upstreams[4].LastFailureClass = failure, fetcher.CallChallenged
+		upstreams[4].CooldownUntil = failure.Add(10 * time.Minute)
+		upstreams[2].SitePauses = []fetcher.SitePause{{Site: "business-magazine.example", Until: failure.Add(20 * time.Minute)},
+			{Site: "microblog.example", Until: failure.Add(time.Hour)}}
+
+		got := healthz(t, func() []fetcher.UpstreamHealth { return upstreams })["upstreams"].([]any)
+		require.Len(t, got, len(upstreams))
+		for i, u := range got {
+			assert.Equal(t, string(upstreams[i].State), u.(map[string]any)["state"])
+		}
+		assert.Equal(t, map[string]any{"name": "disabled", "enabled": false, "state": "disabled",
+			"window_seconds": float64(900), "recent": map[string]any{}}, got[0])
+		assert.Equal(t, map[string]any{"name": "ok", "enabled": true, "state": "ok",
+			"last_success_at": "2026-09-27T13:40:01Z", "window_seconds": float64(900),
+			"recent": map[string]any{"ok": float64(12), "refused": float64(2)},
+			"site_pauses": []any{
+				map[string]any{"site": "business-magazine.example", "until": "2026-09-27T15:00:01Z"},
+				map[string]any{"site": "microblog.example", "until": "2026-09-27T15:40:01Z"},
+			}}, got[2])
+		assert.Equal(t, map[string]any{"name": "paused", "enabled": true, "state": "paused",
+			"last_failure_at": "2026-09-27T14:40:01Z", "last_failure_class": "challenged",
+			"window_seconds": float64(900), "recent": map[string]any{},
+			"cooldown_until": "2026-09-27T14:50:01Z"}, got[4])
+	})
+}
+
+// TestHealth_InterestsReadNothing: healthz serves the scheduler's last
+// snapshot and reads no store for it, so a database that fails every call
+// doesn't fail it.
+func TestHealth_InterestsReadNothing(t *testing.T) {
+	s := newTestServer(t, func(d *Deps) {
+		// Any call through these panics: nothing implements them.
+		d.Insights = struct{ store.InsightStore }{}
+		d.Queue = struct{ store.JobStore }{}
+	})
+	s.interests.set(insight.Snapshot{State: insight.StateDue, Changed: 300, RebuildAt: 263})
+	var h Health
+	s.getJSON(t, "/v1/healthz", &h)
+	assert.Equal(t, InterestsState{State: "due", ChangedDocuments: 300, RebuildAt: 263}, h.Interests)
+	assert.Equal(t, "ok", h.Status, "interests are not health")
+}
+
+func TestWritingModels(t *testing.T) {
+	assert.Equal(t, "a:1, b:2", writingModels(Health{GenerationModel: "g:1",
+		GenerationRoles: map[string]string{"zeta": "b:2", "alpha": "a:1", "mid": "b:2"}}),
+		"distinct models, in the roles' sorted order")
+	assert.Empty(t, writingModels(Health{GenerationModel: "g:1", GenerationRoles: map[string]string{}}),
+		"no role in use: not generation.model, which nothing calls")
+}
