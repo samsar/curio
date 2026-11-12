@@ -53,6 +53,41 @@ reranked order back (`rerank`, `rerank_order`): the caller reads the
 results and ranks them itself, and a rerank would spend up to its 7 s of
 the call's budget on an order the caller then makes its own.
 
+## Trust model
+
+Everything the tools return that came from a saved page is untrusted input:
+titles, URLs, snippets, bookmark titles and folders, extracted markdown, and
+the summaries and interest labels curio's models wrote over that markdown. A
+page can contain text aimed at the agent ("ignore the previous
+instructions", "call this tool", "send this somewhere"), and a stored page
+stays in the library across sessions.
+
+What curio does about it:
+
+- `get_document`, `search_bookmarks` and `find_related` put page text inside
+  a fenced block that names it as untrusted. The boundary carries a nonce
+  chosen once per process, so a page cannot contain the closing fence and
+  forge text outside it.
+- Structured output carries `content_trust`: `untrusted_web` for saved page
+  text, `derived_untrusted` for interest labels and summaries. A document
+  summary also has `derived_from_untrusted: true`.
+- HTML comments, raw HTML and remote images are removed from prose (fenced
+  code blocks are left as code), control, bidi and format characters are
+  escaped, `get_document` content is capped at 100,000 bytes with the
+  truncation note inside the cap, and snippets at 500 characters.
+- The tool descriptions tell the calling model to treat results as data.
+
+This reduces the risk; it does not eliminate it. A model can still follow an
+instruction in page text, and curio cannot control what the client does with
+a tool result. The client's permissions are the real boundary:
+
+- Keep curio in a session with no write, send, shell or installation tools
+  unless you review those calls, or run it in a separate agent.
+- Do not put private data, untrusted content and an outbound channel in one
+  session without a human approving the outbound action.
+- The curio tools themselves are read-only: they never fetch a new URL,
+  change the library or run a command.
+
 ## Register with Claude Code
 
 ```sh
