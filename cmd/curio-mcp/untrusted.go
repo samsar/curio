@@ -258,12 +258,21 @@ func protectCodeSpans(s string) (string, []string) {
 		for i+n < len(s) && s[i+n] == '`' {
 			n++
 		}
+		if escapedAt(s, i) {
+			b.WriteString(s[i : i+n])
+			i += n
+			continue
+		}
 		closeAt := -1
 		for j := i + n; j < len(s); {
 			if s[j] == '`' {
 				m := 0
 				for j+m < len(s) && s[j+m] == '`' {
 					m++
+				}
+				if escapedAt(s, j) {
+					j += m
+					continue
 				}
 				if m == n {
 					closeAt = j
@@ -290,6 +299,16 @@ func protectCodeSpans(s string) (string, []string) {
 		i = closeAt + n
 	}
 	return b.String(), spans
+}
+
+// escapedAt reports whether the byte at i is escaped by an odd number of
+// preceding backslashes.
+func escapedAt(s string, i int) bool {
+	n := 0
+	for j := i - 1; j >= 0 && s[j] == '\\'; j-- {
+		n++
+	}
+	return n%2 == 1
 }
 
 func restoreCodeSpans(s string, spans []string, clean func(string) string) string {
@@ -421,7 +440,7 @@ func stripHTMLTags(s string) string {
 		}
 		_, after, ok := strings.Cut(rest, ">")
 		if !ok {
-			if resourceTag(rest) {
+			if unsafeUnclosedTag(rest) {
 				return b.String()
 			}
 			b.WriteByte('<')
@@ -443,6 +462,9 @@ func linkDestination(s string, open int) bool {
 	if j < 1 || s[j] != '(' || s[j-1] != ']' {
 		return false
 	}
+	if escapedAt(s, j) || escapedAt(s, j-1) {
+		return false
+	}
 	depth := 0
 	for k := j - 2; k >= 0; k-- {
 		switch s[k] {
@@ -450,7 +472,7 @@ func linkDestination(s string, open int) bool {
 			depth++
 		case '[':
 			if depth == 0 {
-				return k == 0 || s[k-1] != '\\'
+				return !escapedAt(s, k)
 			}
 			depth--
 		case '\n':
@@ -462,14 +484,22 @@ func linkDestination(s string, open int) bool {
 	return false
 }
 
-// resourceTag reports whether an unclosed tag could load a URL if a
-// renderer completed it.
-func resourceTag(rest string) bool {
+// unsafeUnclosedTag reports whether an unclosed tag could load a URL, or
+// open a raw HTML block that leaves later markup live, if a renderer
+// completed it. Inline text tags such as <b or <em stay as text.
+func unsafeUnclosedTag(rest string) bool {
 	lower := strings.ToLower(rest)
 	for _, name := range []string{
+		// Tags that load a resource.
 		"img", "image", "video", "audio", "source", "iframe", "embed", "object",
-		"link", "input", "track", "script", "style", "meta", "base", "body",
-		"table", "td", "th", "use", "feimage",
+		"link", "input", "track", "script", "style", "meta", "base", "use", "feimage",
+		// Block containers that make later tags live in a raw-HTML renderer.
+		"address", "article", "aside", "blockquote", "body", "canvas", "caption",
+		"col", "colgroup", "dd", "details", "dialog", "div", "dl", "dt", "fieldset",
+		"figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6",
+		"head", "header", "hgroup", "hr", "html", "li", "main", "math", "menu", "nav",
+		"noscript", "ol", "p", "pre", "section", "summary", "svg", "table", "tbody",
+		"td", "template", "tfoot", "th", "thead", "title", "tr", "ul",
 	} {
 		if strings.HasPrefix(lower, name) {
 			return true
