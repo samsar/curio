@@ -6,8 +6,10 @@ stores, what leaves the machine, and what it does not do.
 
 ## What curio stores
 
-Everything is under `~/.curio` (or `$CURIO_HOME` if you set it), except
-the launchd agent that starts the daemon at login. The home directory is
+The live library is under `~/.curio` (or `$CURIO_HOME` if you set it),
+except the launchd agent that starts the daemon at login. `curio up --fresh`
+backups (`~/.curio.bak-<date>`) are full copies of the library outside it.
+The home directory is
 created with mode `0700`, so only your user can open anything in it; curio
 writes config, content, log and marker files with mode `0600`. SQLite creates
 `curio.db` and its `-wal`/`-shm` files with the process umask (commonly

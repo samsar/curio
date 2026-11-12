@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -52,10 +53,10 @@ func untrustedBoundary() (begin, end string) {
 }
 
 // sanitizeMarkdown prepares saved page markdown for an agent: fenced code
-// blocks are left as code, while prose loses HTML comments, raw HTML and
-// remote images, so instructions cannot hide in them and a renderer cannot
-// fetch a tracking image. Control, bidi and format characters are escaped
-// everywhere, and the result is capped.
+// blocks at column 0 are left as code, while prose loses HTML comments, raw
+// HTML and remote images, so instructions cannot hide in them and a renderer
+// cannot fetch a tracking image. Control, bidi and format characters are
+// escaped everywhere, and the result is capped.
 func sanitizeMarkdown(s string) string {
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "\n")
@@ -81,19 +82,27 @@ func sanitizeMarkdown(s string) string {
 }
 
 // sanitizeProse is sanitizeMarkdown for text outside fenced code blocks.
+// Inline code spans are parked while HTML and images are removed, so a page
+// documenting markup does not lose its examples.
 func sanitizeProse(s string) string {
+	s, spans := protectCodeSpans(s)
 	s = stripHTMLComments(s)
 	s = stripRemoteImages(s)
-	return textutil.TerminalSafe(s)
+	s = neutralizeMarkdownImages(s)
+	s = textutil.TerminalSafe(s)
+	return restoreCodeSpans(s, spans, textutil.TerminalSafe)
 }
 
 // sanitizeLine prepares a single-line page-derived field for output: the
 // same removals as sanitizeMarkdown, with newlines and tabs escaped so the
 // field cannot forge another line.
 func sanitizeLine(s string) string {
+	s, spans := protectCodeSpans(s)
 	s = stripHTMLComments(s)
 	s = stripRemoteImages(s)
-	return textutil.TerminalLine(s)
+	s = neutralizeMarkdownImages(s)
+	s = textutil.TerminalLine(s)
+	return restoreCodeSpans(s, spans, textutil.TerminalLine)
 }
 
 // sanitizeLines maps sanitizeLine over a slice, keeping nil as nil.
@@ -141,7 +150,9 @@ func capRunes(s string, limit int) string {
 }
 
 // nextFence returns the offset of the next line that opens a fenced code
-// block, and its fence marker.
+// block at column 0, and its fence marker. A fence indented under a list or
+// blockquote is deliberately treated as prose: CommonMark's container rules
+// are subtle, and sanitizing it is safe, while trusting it is not.
 func nextFence(s string) (int, string, bool) {
 	offset := 0
 	for offset < len(s) {
@@ -152,18 +163,27 @@ func nextFence(s string) (int, string, bool) {
 			line = s[offset : offset+lineEnd+1]
 			next = offset + lineEnd + 1
 		}
-		trimmed := strings.TrimLeft(line, " ")
-		if len(line)-len(trimmed) <= 3 {
-			if fence, ok := fenceMarker(trimmed); ok {
-				return offset, fence, true
-			}
+		if fence, ok := fenceMarker(line); ok && blankBefore(s, offset) {
+			return offset, fence, true
 		}
 		offset = next
 	}
 	return 0, "", false
 }
 
-// fenceMarker reads a line that opens a fenced code block.
+// blankBefore reports whether offset starts a line after a blank line, or
+// the document. A fence after content can be inside a raw HTML block, where
+// a renderer reads it as HTML rather than code, so it is not trusted.
+func blankBefore(s string, offset int) bool {
+	if offset == 0 {
+		return true
+	}
+	end := offset - 1
+	start := strings.LastIndexByte(s[:end], '\n') + 1
+	return strings.TrimSpace(s[start:end]) == ""
+}
+
+// fenceMarker reads a line that opens a fenced code block at column 0.
 func fenceMarker(line string) (string, bool) {
 	if len(line) < 3 {
 		return "", false
@@ -220,6 +240,74 @@ func isClosingFence(line, fence string) bool {
 		n++
 	}
 	return n >= len(fence) && strings.TrimSpace(line[n:]) == ""
+}
+
+// protectCodeSpans replaces closed inline code spans with placeholders, so
+// the HTML and image passes cannot alter examples inside backticks. An
+// unclosed run is left as text, as CommonMark reads it.
+func protectCodeSpans(s string) (string, []string) {
+	var b strings.Builder
+	var spans []string
+	for i := 0; i < len(s); {
+		if s[i] != '`' {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		n := 0
+		for i+n < len(s) && s[i+n] == '`' {
+			n++
+		}
+		closeAt := -1
+		for j := i + n; j < len(s); {
+			if s[j] == '`' {
+				m := 0
+				for j+m < len(s) && s[j+m] == '`' {
+					m++
+				}
+				if m == n {
+					closeAt = j
+					break
+				}
+				j += m
+				continue
+			}
+			// Only a single-line span is parked. A multi-line backtick run
+			// is left to the prose passes: treating it as code could hide a
+			// list-indented fence that a renderer reads as prose.
+			if s[j] == '\n' {
+				break
+			}
+			j++
+		}
+		if closeAt < 0 {
+			b.WriteString(s[i : i+n])
+			i += n
+			continue
+		}
+		spans = append(spans, s[i:closeAt+n])
+		b.WriteString(codeSpanPlaceholder(len(spans) - 1))
+		i = closeAt + n
+	}
+	return b.String(), spans
+}
+
+func restoreCodeSpans(s string, spans []string, clean func(string) string) string {
+	for i, span := range spans {
+		s = strings.ReplaceAll(s, codeSpanPlaceholder(i), clean(span))
+	}
+	return s
+}
+
+func codeSpanPlaceholder(i int) string {
+	return boundaryNonce + "S" + strconv.Itoa(i) + "S"
+}
+
+// neutralizeMarkdownImages breaks any remaining image syntax in prose. The
+// AST-free filter and the HTML passes can both leave a "!" next to a "[",
+// and a tag between them can be removed after the image passes ran.
+func neutralizeMarkdownImages(s string) string {
+	return strings.ReplaceAll(s, "![", "! [")
 }
 
 // stripHTMLComments removes HTML comments, including an unclosed one and
@@ -293,17 +381,12 @@ func stripRemoteImages(s string) string {
 		}
 		return imagePlaceholder(alt)
 	})
-	// An HTML <img> or an inline image can leave a preceding "!" attached
-	// to its placeholder; replace any shortcut image the passes created.
-	s = shortcutImage.ReplaceAllStringFunc(s, func(m string) string {
-		return imagePlaceholder(shortcutImage.FindStringSubmatch(m)[1])
-	})
 	return stripHTMLTags(s)
 }
 
-// stripHTMLTags removes raw HTML tags, keeping markdown autolinks and a
-// literal "<" that does not start a tag. An unclosed tag takes the rest
-// with it rather than leaving a construct a renderer might complete.
+// stripHTMLTags removes raw HTML tags, keeping markdown autolinks, an
+// angle-bracket link destination, and a literal "<" that does not start a
+// tag. An unclosed tag takes the rest only when it could load a resource.
 func stripHTMLTags(s string) string {
 	s = autolink.ReplaceAllString(s, "$1")
 	s = emailAutolink.ReplaceAllString(s, "$1")
@@ -320,6 +403,16 @@ func stripHTMLTags(s string) string {
 			b.WriteByte('<')
 			return b.String()
 		}
+		// An angle-bracket link destination: [text](<path>).
+		if linkDestination(s, start) {
+			if before, after, ok := strings.Cut(rest, ">"); ok {
+				b.WriteByte('<')
+				b.WriteString(before)
+				b.WriteByte('>')
+				s = after
+				continue
+			}
+		}
 		c := rest[0]
 		if c != '/' && c != '!' && c != '?' && !isASCIILetter(c) {
 			b.WriteByte('<')
@@ -328,10 +421,61 @@ func stripHTMLTags(s string) string {
 		}
 		_, after, ok := strings.Cut(rest, ">")
 		if !ok {
-			return b.String()
+			if resourceTag(rest) {
+				return b.String()
+			}
+			b.WriteByte('<')
+			s = rest
+			continue
 		}
 		s = after
 	}
+}
+
+// linkDestination reports whether the "<" at open is the destination of a
+// markdown link, [text](<path>), rather than raw HTML that merely follows a
+// "](" in the page text.
+func linkDestination(s string, open int) bool {
+	j := open - 1
+	for j >= 0 && s[j] == ' ' {
+		j--
+	}
+	if j < 1 || s[j] != '(' || s[j-1] != ']' {
+		return false
+	}
+	depth := 0
+	for k := j - 2; k >= 0; k-- {
+		switch s[k] {
+		case ']':
+			depth++
+		case '[':
+			if depth == 0 {
+				return k == 0 || s[k-1] != '\\'
+			}
+			depth--
+		case '\n':
+			if depth == 0 {
+				return false
+			}
+		}
+	}
+	return false
+}
+
+// resourceTag reports whether an unclosed tag could load a URL if a
+// renderer completed it.
+func resourceTag(rest string) bool {
+	lower := strings.ToLower(rest)
+	for _, name := range []string{
+		"img", "image", "video", "audio", "source", "iframe", "embed", "object",
+		"link", "input", "track", "script", "style", "meta", "base", "body",
+		"table", "td", "th", "use", "feimage",
+	} {
+		if strings.HasPrefix(lower, name) {
+			return true
+		}
+	}
+	return false
 }
 
 func isASCIILetter(c byte) bool {
