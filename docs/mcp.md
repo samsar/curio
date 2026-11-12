@@ -71,9 +71,10 @@ What curio does about it:
 - Structured output carries `content_trust`: `untrusted_web` for saved page
   text, `derived_untrusted` for interest labels and summaries. A document
   summary also has `derived_from_untrusted: true`.
-- HTML comments and remote images are removed, control, bidi and format
-  characters are escaped, `get_document` is capped at 100,000 bytes and
-  snippets at 500 characters.
+- HTML comments, raw HTML and remote images are removed from prose (fenced
+  code blocks are left as code), control, bidi and format characters are
+  escaped, `get_document` content is capped at 100,000 bytes with the
+  truncation note inside the cap, and snippets at 500 characters.
 - The tool descriptions tell the calling model to treat results as data.
 
 This reduces the risk; it does not eliminate it. A model can still follow an

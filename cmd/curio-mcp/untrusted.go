@@ -24,6 +24,9 @@ const (
 const (
 	maxDocumentBytes = 100_000
 	maxSnippetRunes  = 500
+	// truncationReserve leaves room for the truncation note inside
+	// maxDocumentBytes, so a capped document is never over it.
+	truncationReserve = 80
 )
 
 // boundaryNonce is chosen once per process. A page cannot know it, so it
@@ -48,17 +51,40 @@ func untrustedBoundary() (begin, end string) {
 		"-----END CURIO UNTRUSTED CONTENT " + boundaryNonce + "-----"
 }
 
-// sanitizeMarkdown prepares saved page markdown for an agent: HTML
-// comments and remote images go, so instructions cannot hide in them and a
-// renderer cannot fetch a tracking image; control, bidi and format
-// characters are escaped; and the result is capped.
+// sanitizeMarkdown prepares saved page markdown for an agent: fenced code
+// blocks are left as code, while prose loses HTML comments, raw HTML and
+// remote images, so instructions cannot hide in them and a renderer cannot
+// fetch a tracking image. Control, bidi and format characters are escaped
+// everywhere, and the result is capped.
 func sanitizeMarkdown(s string) string {
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "\n")
+	var b strings.Builder
+	for {
+		start, fence, ok := nextFence(s)
+		if !ok {
+			b.WriteString(sanitizeProse(s))
+			break
+		}
+		b.WriteString(sanitizeProse(s[:start]))
+		rest := s[start:]
+		end, ok := fenceEnd(rest, fence)
+		if !ok {
+			// An unclosed fence is code to the end, as a renderer reads it.
+			b.WriteString(textutil.TerminalSafe(rest))
+			break
+		}
+		b.WriteString(textutil.TerminalSafe(rest[:end]))
+		s = rest[end:]
+	}
+	return capText(b.String(), maxDocumentBytes)
+}
+
+// sanitizeProse is sanitizeMarkdown for text outside fenced code blocks.
+func sanitizeProse(s string) string {
 	s = stripHTMLComments(s)
 	s = stripRemoteImages(s)
-	s = textutil.TerminalSafe(s)
-	return capText(s, maxDocumentBytes)
+	return textutil.TerminalSafe(s)
 }
 
 // sanitizeLine prepares a single-line page-derived field for output: the
@@ -91,23 +117,109 @@ func snippetText(s string) string {
 	return capRunes(s, maxSnippetRunes)
 }
 
-// capText truncates s to at most maxBytes on a rune boundary and says how
-// many characters it dropped.
+// capText truncates s so the returned text, including the truncation note,
+// is at most maxBytes, and says how many characters it dropped.
 func capText(s string, maxBytes int) string {
 	if len(s) <= maxBytes {
 		return s
 	}
-	kept := textutil.TruncateBytes(s, maxBytes)
+	limit := max(maxBytes-truncationReserve, 1)
+	kept := textutil.TruncateBytes(s, limit)
 	omitted := utf8.RuneCountInString(s) - utf8.RuneCountInString(kept)
 	return kept + fmt.Sprintf("\n\n[content truncated: %d more characters]", omitted)
 }
 
-// capRunes truncates s to at most max runes, marking the cut.
+// capRunes truncates s to at most limit runes, marking the cut.
 func capRunes(s string, limit int) string {
 	if utf8.RuneCountInString(s) <= limit {
 		return s
 	}
-	return string([]rune(s)[:limit]) + "…"
+	if limit <= 1 {
+		return "…"
+	}
+	return string([]rune(s)[:limit-1]) + "…"
+}
+
+// nextFence returns the offset of the next line that opens a fenced code
+// block, and its fence marker.
+func nextFence(s string) (int, string, bool) {
+	offset := 0
+	for offset < len(s) {
+		lineEnd := strings.IndexByte(s[offset:], '\n')
+		line := s[offset:]
+		next := len(s)
+		if lineEnd >= 0 {
+			line = s[offset : offset+lineEnd+1]
+			next = offset + lineEnd + 1
+		}
+		trimmed := strings.TrimLeft(line, " ")
+		if len(line)-len(trimmed) <= 3 {
+			if fence, ok := fenceMarker(trimmed); ok {
+				return offset, fence, true
+			}
+		}
+		offset = next
+	}
+	return 0, "", false
+}
+
+// fenceMarker reads a line that opens a fenced code block.
+func fenceMarker(line string) (string, bool) {
+	if len(line) < 3 {
+		return "", false
+	}
+	c := line[0]
+	if c != '`' && c != '~' {
+		return "", false
+	}
+	n := 0
+	for n < len(line) && line[n] == c {
+		n++
+	}
+	if n < 3 {
+		return "", false
+	}
+	if c == '`' && strings.ContainsRune(line[n:], '`') {
+		// CommonMark: a backtick fence's info string cannot hold a backtick.
+		return "", false
+	}
+	return line[:n], true
+}
+
+// fenceEnd returns the offset just past the closing fence line of the
+// block that starts at s, or false when the block is unclosed.
+func fenceEnd(s, fence string) (int, bool) {
+	i := strings.IndexByte(s, '\n')
+	if i < 0 {
+		return 0, false
+	}
+	offset := i + 1
+	for offset <= len(s) {
+		lineEnd := strings.IndexByte(s[offset:], '\n')
+		line := s[offset:]
+		next := len(s)
+		if lineEnd >= 0 {
+			line = s[offset : offset+lineEnd+1]
+			next = offset + lineEnd + 1
+		}
+		if isClosingFence(strings.TrimSpace(line), fence) {
+			return next, true
+		}
+		if next == offset {
+			break
+		}
+		offset = next
+	}
+	return 0, false
+}
+
+func isClosingFence(line, fence string) bool {
+	c := fence[0]
+	n := 0
+	for n < len(line) && line[n] == c {
+		n++
+	}
+	return n >= len(fence) && strings.TrimSpace(line[n:]) == ""
 }
 
 // stripHTMLComments removes HTML comments, including an unclosed one and
@@ -132,27 +244,33 @@ func stripHTMLComments(s string) string {
 			s = rest[2:]
 			continue
 		}
-		_, after, ok := strings.Cut(rest, "-->")
-		if !ok {
+		end := strings.Index(rest, "-->")
+		cut := 3
+		if bang := strings.Index(rest, "--!>"); bang >= 0 && (end < 0 || bang < end) {
+			end, cut = bang, 4
+		}
+		if end < 0 {
 			return b.String()
 		}
-		s = after
+		s = rest[end+cut:]
 	}
 }
 
 var (
-	markdownImage  = regexp.MustCompile(`!\[([^\]]*)\]\([^)]*\)`)
-	referenceImage = regexp.MustCompile(`!\[([^\]]*)\]\[[^\]]*\]`)
-	shortcutImage  = regexp.MustCompile(`!\[([^\]]*)\]`)
+	markdownImage  = regexp.MustCompile(`!\[([^\]\n]*)\]\([^)\n]*\)`)
+	referenceImage = regexp.MustCompile(`!\[([^\]\n]*)\]\[[^\]\n]*\]`)
+	shortcutImage  = regexp.MustCompile(`!\[([^\]\n]*)\]`)
 	htmlImage      = regexp.MustCompile(`(?is)<img\b[^>]*>`)
-	htmlSource     = regexp.MustCompile(`(?is)<source\b[^>]*>`)
 	htmlAlt        = regexp.MustCompile(`(?is)\balt\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))`)
+	autolink       = regexp.MustCompile(`<((?:https?://|mailto:)[^<>\s]+)>`)
+	emailAutolink  = regexp.MustCompile(`<([^<>\s@]+@[^<>\s@]+\.[^<>\s@]+)>`)
 )
 
 // stripRemoteImages replaces markdown and HTML images with their alt text,
-// and drops <source> elements: a renderer that sees the URL would fetch it,
-// a beacon that can report a document was read and, through a crafted URL,
-// leak data.
+// then removes all remaining raw HTML, including <source>, video posters,
+// SVG images and other tags a renderer could use to fetch a URL. A renderer
+// that saw one would fetch it: a beacon that can report a document was read
+// and, through a crafted URL, leak data.
 func stripRemoteImages(s string) string {
 	s = markdownImage.ReplaceAllStringFunc(s, func(m string) string {
 		return imagePlaceholder(markdownImage.FindStringSubmatch(m)[1])
@@ -175,11 +293,64 @@ func stripRemoteImages(s string) string {
 		}
 		return imagePlaceholder(alt)
 	})
-	return htmlSource.ReplaceAllString(s, "")
+	// An HTML <img> or an inline image can leave a preceding "!" attached
+	// to its placeholder; replace any shortcut image the passes created.
+	s = shortcutImage.ReplaceAllStringFunc(s, func(m string) string {
+		return imagePlaceholder(shortcutImage.FindStringSubmatch(m)[1])
+	})
+	return stripHTMLTags(s)
+}
+
+// stripHTMLTags removes raw HTML tags, keeping markdown autolinks and a
+// literal "<" that does not start a tag. An unclosed tag takes the rest
+// with it rather than leaving a construct a renderer might complete.
+func stripHTMLTags(s string) string {
+	s = autolink.ReplaceAllString(s, "$1")
+	s = emailAutolink.ReplaceAllString(s, "$1")
+	var b strings.Builder
+	for {
+		start := strings.IndexByte(s, '<')
+		if start < 0 {
+			b.WriteString(s)
+			return b.String()
+		}
+		b.WriteString(s[:start])
+		rest := s[start+1:]
+		if rest == "" {
+			b.WriteByte('<')
+			return b.String()
+		}
+		c := rest[0]
+		if c != '/' && c != '!' && c != '?' && !isASCIILetter(c) {
+			b.WriteByte('<')
+			s = rest
+			continue
+		}
+		_, after, ok := strings.Cut(rest, ">")
+		if !ok {
+			return b.String()
+		}
+		s = after
+	}
+}
+
+func isASCIILetter(c byte) bool {
+	return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z'
 }
 
 func imagePlaceholder(alt string) string {
-	alt = strings.TrimSpace(alt)
+	// Alt text is page-controlled and lands inside markdown brackets: drop
+	// the characters that could close the placeholder and start a new image
+	// or link, and collapse the rest to one short line.
+	alt = strings.Map(func(r rune) rune {
+		switch r {
+		case '!', '[', ']', '(', ')', '\\', '\n', '\r', '\t':
+			return ' '
+		}
+		return r
+	}, alt)
+	alt = strings.Join(strings.Fields(alt), " ")
+	alt = capRunes(alt, 200)
 	if alt == "" {
 		return "[image]"
 	}

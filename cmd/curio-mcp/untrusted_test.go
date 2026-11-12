@@ -47,8 +47,22 @@ func TestSanitizeMarkdown(t *testing.T) {
 	assert.True(t, utf8.ValidString(got))
 }
 
+// TestSanitizeMarkdownPreservesCodeFences: raw HTML inside a fenced code
+// block is shown as code, not evaluated, so only the prose is stripped.
+func TestSanitizeMarkdownPreservesCodeFences(t *testing.T) {
+	in := "before <!-- hidden -->\n```html\n<div>keep</div>\n<!-- keep -->\n```\n" +
+		"after <img src=\"https://evil.example/x\"> ![alt](https://evil.example/y)"
+	got := sanitizeMarkdown(in)
+	assert.NotContains(t, got, "hidden")
+	assert.NotContains(t, got, "evil.example")
+	assert.Contains(t, got, "<div>keep</div>")
+	assert.Contains(t, got, "<!-- keep -->")
+	assert.Contains(t, got, "[image: alt]")
+}
+
 func TestStripHTMLComments(t *testing.T) {
 	assert.Equal(t, "ab", stripHTMLComments("a<!-- one\ntwo -->b"))
+	assert.Equal(t, "ab", stripHTMLComments("a<!-- x --!>b"), "--!> also closes a comment")
 	assert.Equal(t, "a", stripHTMLComments("a<!-- unclosed"), "an unclosed comment swallows the rest")
 	assert.Equal(t, "ab", stripHTMLComments("a<!-->b"), "an empty comment")
 	assert.Equal(t, "ab", stripHTMLComments("a<!--->b"), "an empty comment with a dash")
@@ -60,12 +74,35 @@ func TestStripRemoteImages(t *testing.T) {
 		"![alt](https://evil.example/x.png \"title\")": "[image: alt]",
 		"![alt][ref]": "[image: alt]",
 		"![alt]":      "[image: alt]",
-		`<IMG SRC="https://evil.example/x.png" ALT="Pic">`: "[image: Pic]",
-		`<img src="https://evil.example/x.png">`:           "[image]",
-		`<source srcset="https://evil.example/x.png">`:     "",
+		`<IMG SRC="https://evil.example/x.png" ALT="Pic">`:         "[image: Pic]",
+		`<img src="https://evil.example/x.png">`:                   "[image]",
+		"<video poster=\"https://evil.example/p.mp4\"></video>":    "",
+		`<svg><image href="https://evil.example/x"></image></svg>`: "",
+		`<input type="image" src="https://evil.example/x">`:        "",
+		`<link rel="preload" href="https://evil.example/x">`:       "",
+		"<div>text</div>":             "text",
+		"see <https://example.com/a>": "see https://example.com/a",
+		"a < b":                       "a < b",
+		"<3":                          "<3",
 	}
 	for in, want := range cases {
 		assert.Equal(t, want, stripRemoteImages(in), in)
+	}
+}
+
+// TestStripRemoteImagesCannotBeRebuilt: alt text is page-controlled. It
+// must not close the placeholder and form a new image or link, including
+// when a reference definition follows.
+func TestStripRemoteImagesCannotBeRebuilt(t *testing.T) {
+	for _, in := range []string{
+		"![a![b]]\n\n[b]: https://evil.example/track.png",
+		`<img alt="![b" src="x">(https://evil.example/track.png)`,
+		`!<img alt="a" src="x">`,
+		"!![a](https://evil.example/orig.png)",
+	} {
+		got := stripRemoteImages(in)
+		assert.NotContains(t, got, "![", in)
+		assert.NotContains(t, got, "<img", in)
 	}
 }
 
@@ -75,12 +112,13 @@ func TestSanitizeLineEscapesLines(t *testing.T) {
 }
 
 func TestCapText(t *testing.T) {
-	got := capText(strings.Repeat("é", 10), 5)
+	got := capText(strings.Repeat("é", 100), 100)
 	assert.True(t, utf8.ValidString(got))
-	assert.Contains(t, got, "[content truncated: 8 more characters]")
+	assert.LessOrEqual(t, len(got), 100)
+	assert.Contains(t, got, "more characters")
 }
 
 func TestCapRunes(t *testing.T) {
-	assert.Equal(t, "abcd…", capRunes("abcdef", 4))
+	assert.Equal(t, "abc…", capRunes("abcdef", 4))
 	assert.Equal(t, "abc", capRunes("abc", 4))
 }
