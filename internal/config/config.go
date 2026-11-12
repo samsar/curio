@@ -149,6 +149,12 @@ type Native struct {
 	// checks; "stock" uses Go's net/http. "chrome_120|124|131|133" pin a
 	// profile. See internal/fetcher/transport.go.
 	Backend string `yaml:"backend"`
+	// AllowPrivateHosts lets bookmarks reach loopback, private, link-local
+	// and other non-public addresses. Off by default: the fetcher refuses
+	// them, on every redirect, so a page cannot make curio scan the
+	// machine or its network. Turn it on only for a library of local dev
+	// servers.
+	AllowPrivateHosts bool `yaml:"allow_private_hosts"`
 }
 
 type Web2MD struct {

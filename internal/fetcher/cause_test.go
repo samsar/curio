@@ -53,7 +53,7 @@ func fakeNative(t *testing.T, origin fakeAnswer, jina *fakeAnswer, detection boo
 	if jina != nil {
 		opts.JinaFallback, opts.JinaBaseURL = true, causeJina
 	}
-	n := unpaced(NewNative(opts), newFakeClock())
+	n := unpaced(newTestNative(opts), newFakeClock())
 	n.rt = limitBodies(fakeRT(func(target string) (*fetchResponse, error) {
 		if strings.HasPrefix(target, causeJina) {
 			return jina.respond(target)
@@ -142,7 +142,7 @@ const (
 // dead-link detection on, for the cases a real server answers.
 func fetchFrom(t *testing.T, backend, rawURL string) error {
 	t.Helper()
-	n := NewNative(NativeOptions{Timeout: 5 * time.Second, Backend: backend, DeadLinkDetection: true})
+	n := newTestNative(NativeOptions{Timeout: 5 * time.Second, Backend: backend, DeadLinkDetection: true})
 	_, err := n.Fetch(t.Context(), rawURL)
 	return err
 }
@@ -336,7 +336,7 @@ func nativeCauseCases() []causeCase {
 		}, store.FailureCauseLoginWall},
 		{"a redirect onto the site's login page, then its host cached", func(t *testing.T) error {
 			base := siteLoginWall(t)
-			n := NewNative(NativeOptions{Timeout: 5 * time.Second, DeadLinkDetection: true})
+			n := newTestNative(NativeOptions{Timeout: 5 * time.Second, DeadLinkDetection: true})
 			_, err := n.Fetch(t.Context(), base+"/docs/quarterly-report")
 			require.Error(t, err)
 			_, err = n.Fetch(t.Context(), base+"/docs/annual-report")
@@ -398,7 +398,7 @@ func nativeCauseCases() []causeCase {
 		{"an unreadable PDF, Jina off", viaFakes(fakeAnswer{status: http.StatusOK, contentType: "application/pdf",
 			body: "not a PDF at all"}, nil), store.FailureCauseUnsupported},
 		{"no URL", func(t *testing.T) error {
-			_, err := NewNative(NativeOptions{}).Fetch(t.Context(), "")
+			_, err := newTestNative(NativeOptions{}).Fetch(t.Context(), "")
 			return err
 		}, store.FailureCauseOther},
 	}, jinaTroubleCases())

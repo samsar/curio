@@ -12,6 +12,7 @@ import (
 
 	"github.com/samsar/curio/internal/client"
 	"github.com/samsar/curio/internal/daemonctl"
+	"github.com/samsar/curio/internal/textutil"
 )
 
 func newInterestsCmd(env *daemonctl.Env) *cobra.Command {
@@ -204,7 +205,7 @@ func renderOutline(w io.Writer, res *client.InterestList, page outlinePage, conf
 		}
 		fmt.Fprintf(w, "%s — %s  %s\n", label(in), plural(in.Size, "doc"), in.ID)
 		if page.flat && in.ParentID != "" {
-			fmt.Fprintf(w, "    in %s  %s\n", cmp.Or(in.ParentLabel, "(unlabeled area)"), in.ParentID)
+			fmt.Fprintf(w, "    in %s  %s\n", textutil.TerminalLine(cmp.Or(in.ParentLabel, "(unlabeled area)")), in.ParentID)
 		}
 		renderMembers(w, "    ", in.Members)
 	}
@@ -279,7 +280,7 @@ func renderInterest(w io.Writer, in *client.Interest, offset int) {
 	}
 	fmt.Fprintf(w, "  %s\n", in.ID)
 	if in.ParentID != "" {
-		fmt.Fprintf(w, "in %s  %s\n", cmp.Or(in.ParentLabel, "(unlabeled area)"), in.ParentID)
+		fmt.Fprintf(w, "in %s  %s\n", textutil.TerminalLine(cmp.Or(in.ParentLabel, "(unlabeled area)")), in.ParentID)
 	}
 	renderSummary(w, in.Summary)
 	var members, loose []client.InterestMember
@@ -312,7 +313,7 @@ func renderInterest(w io.Writer, in *client.Interest, offset int) {
 
 // renderSummary writes a summary wrapped, when there is one.
 func renderSummary(w io.Writer, summary string) {
-	for _, line := range wrapLines(summary, 96) {
+	for _, line := range wrapLines(textutil.TerminalSafe(summary), 96) {
 		fmt.Fprintln(w, line)
 	}
 }
@@ -356,7 +357,7 @@ func renderUnsortedMembers(w io.Writer, members []client.UnsortedMember) {
 			fmt.Fprintf(w, "  path:   %s\n", m.MarkdownPath)
 		}
 		if m.NearestID != "" {
-			fmt.Fprintf(w, "  nearest: %s (%s) %.2f\n", cmp.Or(m.NearestLabel, "(unlabeled)"), m.NearestID, m.Similarity)
+			fmt.Fprintf(w, "  nearest: %s (%s) %.2f\n", textutil.TerminalLine(cmp.Or(m.NearestLabel, "(unlabeled)")), m.NearestID, m.Similarity)
 		}
 	}
 }
@@ -394,11 +395,11 @@ func renderChanges(w io.Writer, c *client.InterestChanges) {
 // eventLine is one event: the identities it names, with their IDs.
 func eventLine(e client.InterestEvent) string {
 	ref := func(r *client.InterestRef) string {
-		return fmt.Sprintf("%s %s (%s)", e.Level, cmp.Or(r.Label, "(unlabeled)"), r.ID)
+		return fmt.Sprintf("%s %s (%s)", e.Level, textutil.TerminalLine(cmp.Or(r.Label, "(unlabeled)")), r.ID)
 	}
 	switch {
 	case e.From != nil && e.To != nil && e.Area != nil:
-		return fmt.Sprintf("%s → in %s (%s)", ref(e.From), cmp.Or(e.Area.Label, "(unlabeled area)"), e.Area.ID)
+		return fmt.Sprintf("%s → in %s (%s)", ref(e.From), textutil.TerminalLine(cmp.Or(e.Area.Label, "(unlabeled area)")), e.Area.ID)
 	case e.From != nil && e.To != nil:
 		return fmt.Sprintf("%s → %s, %s shared", ref(e.From), ref(e.To), plural(e.Shared, "doc"))
 	case e.From != nil:
@@ -471,10 +472,10 @@ func renderNoInterests(w io.Writer, res *client.InterestList, configPath string,
 			plural(s.ChangedDocuments, "document"))
 		fmt.Fprintln(w, "`curio interests rebuild` groups it now")
 	case client.StateHeld:
-		fmt.Fprintf(w, "no interests yet: rebuilds are held: %s\n", s.HeldReason)
+		fmt.Fprintf(w, "no interests yet: rebuilds are held: %s\n", textutil.TerminalLine(s.HeldReason))
 		fmt.Fprintf(w, "run `%s`; `curio interests rebuild` groups the library now anyway\n", reindexFix)
 	case client.StateFailing:
-		fmt.Fprintf(w, "the last rebuild failed: %s; %s\n", s.LastError, retryText(s, now))
+		fmt.Fprintf(w, "the last rebuild failed: %s; %s\n", textutil.TerminalLine(s.LastError), retryText(s, now))
 		fmt.Fprintln(w, "once the cause is fixed, `curio interests rebuild` tries again without waiting")
 	case client.StateOff:
 		fmt.Fprintf(w, "interests are turned off: set insight.enabled: true in %s and restart the daemon\n", configPath)
@@ -488,7 +489,7 @@ func renderNoInterests(w io.Writer, res *client.InterestList, configPath string,
 // command that shows it.
 func retiredError(r *client.RetiredInterest) error {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s %s was retired by the rebuild of %s", r.Level, cmp.Or(r.Label, r.ID),
+	fmt.Fprintf(&b, "%s %s was retired by the rebuild of %s", r.Level, textutil.TerminalLine(cmp.Or(r.Label, r.ID)),
 		r.RetiredAt.Local().Format("2006-01-02 15:04"))
 	if len(r.Successors) == 0 {
 		b.WriteString(": it dissolved, its documents going to other interests or to Unsorted " +
@@ -497,7 +498,7 @@ func retiredError(r *client.RetiredInterest) error {
 	}
 	b.WriteString(": its documents went to")
 	for _, s := range r.Successors {
-		fmt.Fprintf(&b, "\n  %s (%s, %s shared): curio interests show %s", cmp.Or(s.Label, "(unlabeled)"), s.Event,
+		fmt.Fprintf(&b, "\n  %s (%s, %s shared): curio interests show %s", textutil.TerminalLine(cmp.Or(s.Label, "(unlabeled)")), s.Event,
 			plural(s.Shared, "doc"), s.ID)
 	}
 	return errors.New(b.String())
@@ -506,10 +507,12 @@ func retiredError(r *client.RetiredInterest) error {
 // label is an area's or interest's label, or says it has none.
 func label(in client.Interest) string {
 	if in.Level == client.LevelArea {
-		return cmp.Or(in.Label, "(unlabeled area)")
+		return textutil.TerminalLine(cmp.Or(in.Label, "(unlabeled area)"))
 	}
-	return cmp.Or(in.Label, "(unlabeled)")
+	return textutil.TerminalLine(cmp.Or(in.Label, "(unlabeled)"))
 }
 
 // docName names a document: its title, its bookmark's, or its URL.
-func docName(title, bookmarkTitle, url string) string { return cmp.Or(title, bookmarkTitle, url) }
+func docName(title, bookmarkTitle, url string) string {
+	return textutil.TerminalLine(cmp.Or(title, bookmarkTitle, url))
+}

@@ -95,6 +95,11 @@ type NativeOptions struct {
 	// "chrome_131"/"chrome_133" pin a specific profile, and with it the
 	// User-Agent and sec-ch-ua sent. See transport.go.
 	Backend string
+	// AllowPrivateHosts lets a bookmark reach loopback, private, link-local
+	// and other non-public addresses. Off by default; the transport checks
+	// every dial and redirect, so a public page cannot redirect curio onto
+	// the machine or its network.
+	AllowPrivateHosts bool
 }
 
 const (
@@ -163,13 +168,13 @@ func NewNative(opts NativeOptions) *Native {
 			"profile", prof.name)
 	}
 
-	rt, err := newRoundTripper(opts.Backend, prof, opts.Timeout)
+	rt, err := newRoundTripper(opts.Backend, prof, opts.Timeout, opts.AllowPrivateHosts)
 	if err != nil {
 		// A fingerprint backend that won't initialize shouldn't take the
 		// fetcher down — degrade to stock net/http and carry on.
 		opts.Log.Warn("fetcher transport init failed, falling back to stock net/http",
 			"backend", opts.Backend, "err", err)
-		rt = newStockRT(opts.Timeout)
+		rt = newStockRT(opts.Timeout, opts.AllowPrivateHosts)
 	}
 	rt = limitBodies(rt, maxResponseBytes)
 	opts.Log.Info("native fetcher transport", "backend", rt.name())
@@ -476,6 +481,12 @@ func (n *Native) tryReadability(ctx context.Context, target string) (*Result, er
 		// retry, and Jina would fetch past the check. Not host-cached: see
 		// ErrTLSCertificate.
 		if errors.Is(err, ErrTLSCertificate) {
+			return nil, &PermanentError{Err: fmt.Errorf("native: fetch: %w", err)}
+		}
+		// A blocked address is policy, not a transient network failure: no
+		// retry and no Jina request for a URL that names the machine or its
+		// network.
+		if errors.Is(err, ErrBlockedAddress) {
 			return nil, &PermanentError{Err: fmt.Errorf("native: fetch: %w", err)}
 		}
 		// Distinguish dead-host (DNS, connection refused) from generic

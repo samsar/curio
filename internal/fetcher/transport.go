@@ -150,11 +150,11 @@ func (l bodyLimitRT) do(ctx context.Context, target string, headers []header) (*
 //
 // Returns an error only when a chrome backend was requested and tls-client
 // init failed; callers may then fall back to stock.
-func newRoundTripper(backend string, prof chromeProfileSpec, timeout time.Duration) (roundTripper, error) {
+func newRoundTripper(backend string, prof chromeProfileSpec, timeout time.Duration, allowPrivate bool) (roundTripper, error) {
 	if isStockBackend(backend) {
-		return newStockRT(timeout), nil
+		return newStockRT(timeout, allowPrivate), nil
 	}
-	return newChromeRT(timeout, prof)
+	return newChromeRT(timeout, prof, allowPrivate)
 }
 
 // isStockBackend reports whether backend names Go's net/http transport:
@@ -170,10 +170,16 @@ func isStockBackend(backend string) bool {
 // stockRT is the net/http backend.
 type stockRT struct{ client *http.Client }
 
-func newStockRT(timeout time.Duration) *stockRT {
+func newStockRT(timeout time.Duration, allowPrivate bool) *stockRT {
 	// Follow redirects (net/http does up to 10 by default) so finalURL is
 	// what the server settled on.
-	return &stockRT{client: &http.Client{Timeout: timeout}}
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	// The guard must see the target, not an HTTP proxy: a proxy would hide
+	// the destination from the dialer, and a local proxy would itself look
+	// like a blocked address. curio's fetcher connects directly.
+	tr.Proxy = nil
+	tr.DialContext = newGuardDialer(allowPrivate).DialContext
+	return &stockRT{client: &http.Client{Timeout: timeout, Transport: tr}}
 }
 
 func (*stockRT) name() string { return "stock" }
@@ -218,7 +224,7 @@ type chromeRT struct {
 // newChromeRT builds the chrome backend with prof's fingerprint. extra is
 // applied after curio's own options; production passes none, tests route
 // dials and trust their own roots through it.
-func newChromeRT(timeout time.Duration, prof chromeProfileSpec, extra ...tlsclient.HttpClientOption) (*chromeRT, error) {
+func newChromeRT(timeout time.Duration, prof chromeProfileSpec, allowPrivate bool, extra ...tlsclient.HttpClientOption) (*chromeRT, error) {
 	secs := int(timeout / time.Second)
 	if secs <= 0 {
 		secs = 30
@@ -226,6 +232,11 @@ func newChromeRT(timeout time.Duration, prof chromeProfileSpec, extra ...tlsclie
 	opts := append([]tlsclient.HttpClientOption{
 		tlsclient.WithClientProfile(prof.tls),
 		tlsclient.WithTimeoutSeconds(secs),
+		// HTTP/3 (QUIC) has its own UDP dialer that bypasses WithDialContext;
+		// stay on TCP so every connection goes through the guard.
+		tlsclient.WithDisableHttp3(),
+		// Every dial, including each redirect hop, goes through the guard.
+		tlsclient.WithDialContext(newGuardDialer(allowPrivate).DialContext),
 		// Redirects are followed, so finalURL is the settled URL.
 		tlsclient.WithCustomRedirectFunc(chromeCheckRedirect),
 	}, extra...)

@@ -33,7 +33,7 @@ func TestNative_LiveSites_RenderMarkdown(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Backend defaults to chrome; Jina off so we test the direct fetch.
-			n := NewNative(NativeOptions{Timeout: 20 * time.Second, JinaFallback: false})
+			n := newTestNative(NativeOptions{Timeout: 20 * time.Second, JinaFallback: false})
 			ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 			defer cancel()
 
@@ -50,7 +50,7 @@ func TestNative_LiveSites_RenderMarkdown(t *testing.T) {
 // real PDF: pure-Go local extraction first, Jina as fallback. Asserts we get
 // readable markdown regardless of which tier handled it; logs the tier.
 func TestNative_LivePDF(t *testing.T) {
-	n := NewNative(NativeOptions{Timeout: 30 * time.Second, JinaFallback: true})
+	n := newTestNative(NativeOptions{Timeout: 30 * time.Second, JinaFallback: true})
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 

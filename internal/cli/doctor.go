@@ -529,7 +529,7 @@ func cardsCheck(stale int, pending, running []client.Job) (status checkStatus, d
 		return statusOK, left + "; the cards job runs at " + localTime(pending[0].RunAfter), ""
 	case len(pending) > 0:
 		return statusWarn, left + "; the cards job waits to run at " + localTime(pending[0].RunAfter) + ": " +
-			*pending[0].LastError, "`curio jobs --status pending` shows it; it runs again by itself"
+			textutil.TerminalLine(*pending[0].LastError), "`curio jobs --status pending` shows it; it runs again by itself"
 	}
 	return statusWarn, left + ", and no cards job is queued to embed them",
 		"restart the daemon (`curio daemon stop`, then any curio command starts it): its start queues the job"

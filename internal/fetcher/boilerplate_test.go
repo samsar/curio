@@ -269,7 +269,7 @@ func TestNative_JinaAnswerStoredWithoutChrome(t *testing.T) {
 	}))
 	defer jina.Close()
 
-	n := unpaced(NewNative(NativeOptions{
+	n := unpaced(newTestNative(NativeOptions{
 		Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/",
 	}), newFakeClock())
 	res, err := n.Fetch(t.Context(), origin.URL)
@@ -294,7 +294,7 @@ func TestNative_JinaJudgedBeforeCleaning(t *testing.T) {
 	}))
 	defer jina.Close()
 
-	n := unpaced(NewNative(NativeOptions{
+	n := unpaced(newTestNative(NativeOptions{
 		Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/",
 	}), newFakeClock())
 	res, err := n.Fetch(t.Context(), origin.URL)

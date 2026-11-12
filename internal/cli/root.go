@@ -19,6 +19,7 @@ import (
 	"github.com/samsar/curio/internal/daemonctl"
 	"github.com/samsar/curio/internal/importer"
 	"github.com/samsar/curio/internal/setup"
+	"github.com/samsar/curio/internal/textutil"
 	"github.com/samsar/curio/internal/version"
 )
 
@@ -40,7 +41,7 @@ const ownsEnvironment = "curio.owns-environment"
 // unanswered, prints nothing: its error is the interruption itself, which
 // the user just caused.
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	return run(ctx, newRootCmd(), args, stdout, stderr)
+	return run(ctx, newRootCmd(), args, textutil.NewTerminalWriter(stdout), stderr)
 }
 
 // run is Run over root, which tests build with fakes.
@@ -67,7 +68,7 @@ func run(ctx context.Context, root *cobra.Command, args []string, stdout, stderr
 	case ctx.Err() != nil, errors.Is(err, setup.ErrAborted):
 		return exitInterrupted
 	}
-	fmt.Fprintf(stderr, "Error: %v\n", err)
+	fmt.Fprintf(stderr, "Error: %s\n", textutil.TerminalSafe(err.Error()))
 	if !started {
 		fmt.Fprintf(stderr, "Run '%s --help' for usage.\n", cmd.CommandPath())
 	}

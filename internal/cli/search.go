@@ -61,7 +61,7 @@ func newSearchCmd(env *daemonctl.Env) *cobra.Command {
 				return err
 			}
 			for _, w := range res.Warnings {
-				fmt.Fprintln(cmd.ErrOrStderr(), "warning:", w)
+				fmt.Fprintln(cmd.ErrOrStderr(), "warning:", textutil.TerminalSafe(w))
 			}
 			renderHeader(cmd.OutOrStdout(), res.Understanding, res.Reranking, time.Local)
 			renderSearchResults(cmd.OutOrStdout(), res)
@@ -276,14 +276,14 @@ func renderSearchResults(w io.Writer, res *client.SearchResponse) {
 		case hit.BookmarkTitle != "":
 			title = hit.BookmarkTitle
 		}
-		fmt.Fprintf(w, "%2d. %s\n", i+1, title)
-		fmt.Fprintf(w, "    %s   (score %.4f)\n", hit.Document.URL, hit.Score)
+		fmt.Fprintf(w, "%2d. %s\n", i+1, textutil.TerminalLine(title))
+		fmt.Fprintf(w, "    %s   (score %.4f)\n", textutil.TerminalLine(hit.Document.URL), hit.Score)
 		// Doc ID and on-disk path for direct follow-up: open the file,
 		// run `curio docs show <id>`, or `curio refetch <id>` without
 		// going hunting.
-		fmt.Fprintf(w, "    doc_id: %s\n", hit.Document.ID)
+		fmt.Fprintf(w, "    doc_id: %s\n", textutil.TerminalLine(hit.Document.ID))
 		if hit.MarkdownPath != "" {
-			fmt.Fprintf(w, "    path:   %s\n", hit.MarkdownPath)
+			fmt.Fprintf(w, "    path:   %s\n", textutil.TerminalLine(hit.MarkdownPath))
 		}
 		if len(hit.Matches) > 0 {
 			m := hit.Matches[0]
@@ -295,7 +295,7 @@ func renderSearchResults(w io.Writer, res *client.SearchResponse) {
 			// at 180 chars. 100 cols keeps it readable in narrow
 			// terminals; the `--content` flag on `curio docs show`
 			// is the right tool for the full body.
-			for _, line := range wrapLines(snippet, 100) {
+			for _, line := range wrapLines(textutil.TerminalLine(snippet), 100) {
 				fmt.Fprintf(w, "    %s\n", line)
 			}
 		} else {
@@ -310,12 +310,12 @@ func renderSearchResults(w io.Writer, res *client.SearchResponse) {
 // has no page to read.
 func renderSavedAs(w io.Writer, hit client.SearchHit) {
 	if saved := savedAs(hit.Bookmarks); saved != "" {
-		for _, line := range wrapLines("saved as: "+saved, 100) {
+		for _, line := range wrapLines("saved as: "+textutil.TerminalLine(saved), 100) {
 			fmt.Fprintf(w, "    %s\n", line)
 		}
 	}
 	if why := docmeta.Unavailable(hit.Document.State); why != "" {
-		fmt.Fprintf(w, "    %s (%s); its bookmark matched\n", why, hit.Document.State)
+		fmt.Fprintf(w, "    %s (%s); its bookmark matched\n", why, textutil.TerminalLine(hit.Document.State))
 	}
 }
 

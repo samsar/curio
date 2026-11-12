@@ -258,7 +258,7 @@ func TestNative_JinaLimiterIsShared(t *testing.T) {
 	}))
 	defer jina.Close()
 
-	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"})
+	n := newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"})
 	n.jinaLimiter = rate.NewLimiter(rate.Every(time.Hour), 1)
 	n.jinaSites = newSitePacer(0)
 
@@ -304,7 +304,7 @@ func TestNative_JinaRateLimitCooldown(t *testing.T) {
 		defer jina.Close()
 
 		fc := newFakeClock()
-		n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), fc)
+		n := unpaced(newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), fc)
 		res, err := n.Fetch(context.Background(), source.URL)
 		require.NoError(t, err)
 		assert.Equal(t, "jina", res.Meta["via"])
@@ -318,7 +318,7 @@ func TestNative_JinaRateLimitCooldown(t *testing.T) {
 		defer jina.Close()
 
 		fc := newFakeClock()
-		n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), fc)
+		n := unpaced(newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), fc)
 		n.jinaCooldown.extend(fc.now(), 3*time.Second) // left by another worker's 429
 		_, err := n.Fetch(context.Background(), source.URL)
 		require.NoError(t, err)
@@ -346,7 +346,7 @@ func TestNative_JinaLongCooldownDefers(t *testing.T) {
 	defer origin.Close()
 
 	fc := newFakeClock()
-	n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), fc)
+	n := unpaced(newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), fc)
 	for i, path := range []string{"/a", "/b", "/c"} {
 		_, err := n.Fetch(context.Background(), origin.URL+path)
 		require.ErrorIs(t, err, ErrAntiBot)
@@ -414,7 +414,7 @@ func TestNative_JinaChallengePausesJina(t *testing.T) {
 
 			var logs bytes.Buffer
 			fc := newFakeClock()
-			n := unpaced(NewNative(NativeOptions{
+			n := unpaced(newTestNative(NativeOptions{
 				Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/", JinaAPIKey: key,
 				Log: slog.New(slog.NewTextHandler(&logs, nil)),
 			}), fc)
@@ -480,7 +480,7 @@ func TestNative_JinaChallengeWarnsOncePerPause(t *testing.T) {
 
 	var logs bytes.Buffer
 	fc := newFakeClock()
-	n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/",
+	n := unpaced(newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/",
 		Log: slog.New(slog.NewTextHandler(&logs, nil))}), fc)
 	warnings := func() int { return strings.Count(logs.String(), "CDN challenged curio, pausing Jina calls") }
 
@@ -531,7 +531,7 @@ func TestNative_JinaLongCooldownDoesNotQueue(t *testing.T) {
 	}))
 	defer origin.Close()
 
-	n := NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"})
+	n := newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"})
 	n.jinaCooldown.extend(time.Now(), 120*time.Second) // another worker's 429
 	pauseEnds := n.jinaCooldown.deadline()
 
@@ -569,7 +569,7 @@ func TestNative_JinaServerErrorBackoff(t *testing.T) {
 	defer jina.Close()
 
 	fc := newFakeClock()
-	n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), fc)
+	n := unpaced(newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), fc)
 	_, err := n.Fetch(context.Background(), source.URL)
 	require.Error(t, err)
 	assert.Equal(t, int32(jinaAttempts), jinaHits.Load())
@@ -609,7 +609,7 @@ func TestNative_JinaAPIKey(t *testing.T) {
 			defer jina.Close()
 
 			var logs bytes.Buffer
-			n := unpaced(NewNative(NativeOptions{
+			n := unpaced(newTestNative(NativeOptions{
 				Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/",
 				JinaAPIKey: tc.optKey, Log: slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 			}), newFakeClock())
@@ -655,7 +655,7 @@ func TestNative_OriginConcurrencyPerHost(t *testing.T) {
 	}))
 	defer calm.Close()
 
-	n := NewNative(NativeOptions{Timeout: 30 * time.Second})
+	n := newTestNative(NativeOptions{Timeout: 30 * time.Second})
 	var wg sync.WaitGroup
 	errs := make([]error, 6)
 	for i := range errs {
@@ -699,7 +699,7 @@ func TestNative_QueuedFetchesSeeFreshVerdict(t *testing.T) {
 	defer srv.Close()
 
 	fc := newFakeClock()
-	n := NewNative(NativeOptions{Timeout: 30 * time.Second})
+	n := newTestNative(NativeOptions{Timeout: 30 * time.Second})
 	n.clock = fc.clock()
 	var wg sync.WaitGroup
 	errs := make([]error, 6)
@@ -742,7 +742,7 @@ func TestNative_QueuedFetchPastAFreshEntry(t *testing.T) {
 	defer jina.Close()
 
 	fc := newFakeClock()
-	n := unpaced(NewNative(NativeOptions{Timeout: 30 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), fc)
+	n := unpaced(newTestNative(NativeOptions{Timeout: 30 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), fc)
 	host := hostOf(origin.URL)
 	holders := func() int {
 		n.originSlots.mu.Lock()
@@ -794,7 +794,7 @@ func TestNative_RedirectOntoACachedHost(t *testing.T) {
 	})
 
 	fc := newFakeClock()
-	n := unpaced(NewNative(NativeOptions{Timeout: 30 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), fc)
+	n := unpaced(newTestNative(NativeOptions{Timeout: 30 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), fc)
 	n.hostCache.Put("localhost", HostFailAntiBot, cachedOrigin403, fc.now())
 	host := hostOf(base)
 	holders := func() int {
@@ -837,7 +837,7 @@ func TestNative_CachedHostSkipsTheOrigin(t *testing.T) {
 	defer jina.Close()
 
 	fc := newFakeClock()
-	n := unpaced(NewNative(NativeOptions{Timeout: 30 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), fc)
+	n := unpaced(newTestNative(NativeOptions{Timeout: 30 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), fc)
 	host := hostOf(origin.URL)
 	n.hostCache.Put(host, HostFailAntiBot, "native: HTTP 403 Forbidden: "+ErrAntiBot.Error(), fc.now())
 
@@ -880,7 +880,7 @@ func TestNative_CachedHostVerdictWritesNothing(t *testing.T) {
 	defer jina.Close()
 
 	fc := newFakeClock()
-	n := unpaced(NewNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), fc)
+	n := unpaced(newTestNative(NativeOptions{Timeout: 5 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), fc)
 	host := hostOf(origin.URL)
 	_, err := n.Fetch(context.Background(), origin.URL+"/a")
 	require.ErrorIs(t, err, errJinaRejected)
@@ -935,7 +935,7 @@ func TestNative_OriginSlotFreeDuringJina(t *testing.T) {
 			}))
 			defer jina.Close()
 
-			n := unpaced(NewNative(NativeOptions{Timeout: 30 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), newFakeClock())
+			n := unpaced(newTestNative(NativeOptions{Timeout: 30 * time.Second, JinaFallback: true, JinaBaseURL: jina.URL + "/"}), newFakeClock())
 			var wg sync.WaitGroup
 			for i := range originRequestsPerHost {
 				wg.Go(func() {

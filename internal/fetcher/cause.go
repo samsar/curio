@@ -91,7 +91,8 @@ func classify(err error) store.FailureCause {
 		return store.FailureCauseAntiBot
 	case errors.Is(err, ErrLoginWall):
 		return store.FailureCauseLoginWall
-	case errors.Is(err, ErrUnsupported), errors.Is(err, ErrFetcherNotFound), errors.Is(err, errPDFUnreadable):
+	case errors.Is(err, ErrBlockedAddress), errors.Is(err, ErrUnsupported), errors.Is(err, ErrFetcherNotFound),
+		errors.Is(err, errPDFUnreadable):
 		return store.FailureCauseUnsupported
 	case errors.Is(err, errRateLimited), errors.Is(err, errJinaSiteBlocked), code == http.StatusTooManyRequests:
 		return store.FailureCauseRateLimited
