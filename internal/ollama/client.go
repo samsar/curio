@@ -279,6 +279,33 @@ func (c *Client) PostJSON(ctx context.Context, path string, in, out any, maxBody
 	return decodeJSON(resp.Body, out, maxBody)
 }
 
+// PostStream posts in as JSON to path and returns the body of a 2xx reply,
+// which Ollama streams a line at a time, for the caller to read and close.
+// A stream lasts as long as its reply, so it ignores the client's
+// per-request timeout and is bounded by ctx alone; ending ctx closes the
+// connection, which stops Ollama's generation. A non-2xx reply is what
+// PostJSON returns for it.
+func (c *Client) PostStream(ctx context.Context, path string, in any) (io.ReadCloser, error) {
+	body, err := json.Marshal(in)
+	if err != nil {
+		return nil, fmt.Errorf("encode request: %w", err)
+	}
+	untimed := &http.Client{Transport: c.http.Transport}
+	resp, err := c.sendWith(ctx, untimed, http.MethodPost, path, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	if !ok(resp) {
+		defer resp.Body.Close()
+		err := statusError(resp)
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, fmt.Errorf("%w: %w", ErrModelNotLoaded, err)
+		}
+		return nil, err
+	}
+	return resp.Body, nil
+}
+
 // send makes one request. A transport failure wraps ErrUnreachable and its
 // cause, so errors.Is sees both (syscall.ECONNREFUSED,
 // context.DeadlineExceeded, ...).

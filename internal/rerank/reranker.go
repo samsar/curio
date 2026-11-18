@@ -142,7 +142,8 @@ func New(lifetime context.Context, gen generator.Generator, opts Options) *Reran
 		r.now = time.Now
 	}
 	r.gate = modelgate.New(lifetime, gen, modelgate.Options{Words: gateWords, Model: r.model,
-		KeepAlive: opts.KeepAlive, Shared: opts.Shared, ShortSharer: opts.ShortSharer, Using: opts.Using, Now: r.now, Log: r.log,
+		KeepAlive: opts.KeepAlive, Shared: opts.Shared, ShortSharer: opts.ShortSharer, Using: opts.Using,
+		Traffic: opts.Traffic, Server: opts.Model.BaseURL, Now: r.now, Log: r.log,
 		Check: r.runCheck})
 	if !opts.On {
 		r.offReason = opts.OffReason
@@ -265,6 +266,7 @@ func (r *Reranker) Rerank(ctx context.Context, req Request) (Outcome, error) {
 			}
 			return refused(ref), nil
 		}
+		asked := time.Now()
 		rctx, cancel := context.WithTimeout(ctx, r.timeout)
 		defer cancel()
 		waited, turn := r.takeTurn(rctx)
@@ -284,9 +286,11 @@ func (r *Reranker) Rerank(ctx context.Context, req Request) (Outcome, error) {
 		if err != nil {
 			out = r.failed(err)
 		}
-		if waited && out.Status == StatusTimeout {
-			// Part of its time went to another search's rerank: its timeout
-			// says no more of the model's speed than a wait that ran out.
+		if out.Status == StatusTimeout && (waited || r.gate.HeldSince(asked)) {
+			// Part of its time went to another search's rerank, or to
+			// another feature's long call (an answer) holding the model:
+			// its timeout says no more of the model's speed than a wait
+			// that ran out.
 			return out, nil
 		}
 		r.settle(out)

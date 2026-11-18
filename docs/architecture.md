@@ -525,6 +525,30 @@ the five lists' weights in RRF (`bm25_weight`, `vector_weight`,
 chunk-to-doc collapse strategy (max vs sum vs top-3-avg), `default_k`,
 and `embed_timeout_seconds`.
 
+## Ask: a cited answer over the search path
+
+```
+question ──► route: its mode, else English word rules (ask.RouteFor)
+         ──► await the answers role's model (a cold load and its check are waited for)
+answer   ──► internal/retrieve: understand ─► search ─► rerank the head (as POST /v1/search)
+         ──► the first readable pages, 30 deep, as numbered sources (failed and dead: listed apart),
+             each its chunks nearest the question's vector (one vec0 KNN, RankChunks)
+         ──► the prompt: fixed <source n="N"> blocks, every text neutralized, fit to num_ctx
+         ──► stream the answer (POST /v1/ask: NDJSON, one event a line) ──► read its citations
+evidence ──► retrieve ─► one passage of each of 20 pages, judged (one structured call), quotes
+             grounded ─► the sides as sources ─► stream, both sides cited
+interests──► understand for the saved window ─► insight.ReadTimeline ─► a table event ─► stream, [Tn]
+list     ──► retrieve 50 deep ─► group by interest (RunInterestsOf) ─► a groups event ─► stream, [Gn]
+```
+
+`curio ask` and `POST /v1/ask` retrieve exactly as a search does, through
+`internal/retrieve`, which `POST /v1/search` and `cmd/askeval` share, so
+the same plan, filters and rerank rank the pages an answer is written
+from. The interests route reads `GET /v1/interests/timeline`'s table, the
+same one curio-mcp's `saves_over_time` reads. Every way an ask ends
+without an answer is a status of its `done` event, never an error. See
+decisions.md "Ask: a cited, streamed answer over the search path".
+
 ## Pluggability: where interfaces live
 
 The interfaces with explicit swap paths:

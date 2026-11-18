@@ -1,0 +1,252 @@
+# Synthetic: made-up questions, written by an agent that saw neither curio's routing rules nor any
+# library, each labelled with the route it should take (hard marks a deliberate near miss). The dev
+# half of a blind set; TestRouteFor_Dev holds RouteFor to it. One question's article is changed ("a list"
+# to "the list"), which routes alike, so that no four words of it match a private evaluation's.
+questions:
+- q: how does garbage collection work in Go?
+  route: answer
+- q: Why did the Western Roman Empire collapse while the Eastern one held on for another thousand years?
+  route: answer
+- q: What's the difference between a Roth IRA and a traditional IRA?
+  route: answer
+- q: when was python 3 released
+  route: answer
+- q: explain the CAP theorem like I'm five
+  route: answer
+  hard: true
+- q: My laptop fan gets really loud whenever I compile, what did that thermal paste guide recommend?
+  route: answer
+  hard: true
+- q: my sourdough starter smells like nail polish remover, what does that mean
+  route: answer
+  hard: true
+- q: I keep getting shin splints when I run. What causes them?
+  route: answer
+  hard: true
+- q: what happened to Kodak after it filed for bankruptcy in 2012?
+  route: answer
+  hard: true
+- q: why did the Fed raise interest rates so fast in 2022
+  route: answer
+  hard: true
+- q: what did Netflix change about its business model back in 2007?
+  route: answer
+  hard: true
+- q: how has Python packaging changed over the past decade?
+  route: answer
+  hard: true
+- q: how much faster was the Rust version than the C one in that benchmark post?
+  route: answer
+  hard: true
+- q: Why is Rust faster than C in some of those benchmarks?
+  route: answer
+  hard: true
+- q: how do index funds track the market
+  route: answer
+- q: whats the difference between baking soda and baking powder
+  route: answer
+- q: how does a Kalman filter estimate position from noisy sensors
+  route: answer
+- q: explain the offside rule in football
+  route: answer
+- q: how does TCP congestion control decide how fast to send
+  route: answer
+- q: what did that piece on Japan rail passes say about which pass to buy for a two-week trip?
+  route: answer
+- q: how does compound interest differ from simple interest
+  route: answer
+- q: Explain CRISPR gene editing.
+  route: answer
+- q: In that post about seed rounds, how much equity do founders usually give up?
+  route: answer
+- q: how do I set up nginx as a reverse proxy for two apps
+  route: answer
+  hard: true
+- q: what did the article I saved last month say about index funds versus ETFs?
+  route: answer
+  hard: true
+- q: what do my saved articles say about cold brew coffee ratios?
+  route: answer
+  hard: true
+- q: why does my bread always come out dense
+  route: answer
+  hard: true
+- q: How does the Linux kernel schedule threads across cores?
+  route: answer
+- q: When did the Berlin Wall fall, and what led up to it?
+  route: answer
+- q: how much protein per day do you need if you lift weights 4 times a week
+  route: answer
+- q: In 2019 what did the EU actually decide about upload filters?
+  route: answer
+  hard: true
+- q: What are the tradeoffs between microservices and a monolith for a team of three engineers who deploy once a week and have no dedicated ops person?
+  route: answer
+- q: how does React's useEffect cleanup function work
+  route: answer
+- q: what's the latest thinking on when fusion power might be commercially viable
+  route: answer
+  hard: true
+- q: what evidence do I have that blue light from screens ruins sleep
+  route: evidence
+- q: Do my saved pages back up the claim that standing desks help with back pain?
+  route: evidence
+- q: are there arguments against adopting microservices early at a startup?
+  route: evidence
+- q: Is Rust faster than C?
+  route: evidence
+  hard: true
+- q: Does intermittent fasting actually help with weight loss?
+  route: evidence
+- q: is there any proof that stretching before a run prevents injuries
+  route: evidence
+- q: Do the articles I saved support the claim that a four-day work week doesn't hurt output?
+  route: evidence
+- q: is MSG actually bad for you or is that a myth
+  route: evidence
+- q: any counterarguments to the claim that cold showers boost your immune system?
+  route: evidence
+- q: Is the 10,000 hour rule real
+  route: evidence
+- q: is it really true that we only use 10 percent of our brains
+  route: evidence
+- q: What's the evidence for and against seed oils being unhealthy?
+  route: evidence
+- q: 'back up or debunk: dark mode is easier on the eyes'
+  route: evidence
+- q: do I have anything that contradicts the idea that SQL databases can't scale?
+  route: evidence
+  hard: true
+- q: is nuclear power safer than wind per unit of energy produced
+  route: evidence
+- q: Were the Middle Ages really a dark age for science?
+  route: evidence
+- q: how strong is the case that sugar makes kids hyperactive
+  route: evidence
+- q: Does TDD actually reduce defects, or is that just folklore?
+  route: evidence
+- q: Is Python slower than Java for web backends?
+  route: evidence
+  hard: true
+- q: does what I've saved show that minimalist running shoes reduce injuries?
+  route: evidence
+  hard: true
+- q: what was i into back in 2018
+  route: interests
+- q: What did I save the most last year?
+  route: interests
+- q: what have I been reading about these days
+  route: interests
+- q: How has my bookmarking changed since covid?
+  route: interests
+- q: three years ago what was I bookmarking
+  route: interests
+- q: what am I saving more of now than I used to?
+  route: interests
+- q: how much have I saved about photography over the years?
+  route: interests
+  hard: true
+- q: what have I been saving lately?
+  route: interests
+  hard: true
+- q: What are my top interests this year?
+  route: interests
+- q: give me a timeline of my interests
+  route: interests
+- q: Have my reading habits changed over the past decade?
+  route: interests
+- q: what topics am I saving less of these days
+  route: interests
+- q: Show me how my areas of interest have grown or shrunk over time.
+  route: interests
+- q: What new topics did I pick up this year?
+  route: interests
+- q: Compare what I saved in 2019 with what I save now.
+  route: interests
+- q: Did I save more about startups or about design over the last two years?
+  route: interests
+  hard: true
+- q: when did i stop saving things about crypto
+  route: interests
+  hard: true
+- q: what's been on my mind recently, judging by what I bookmark?
+  route: interests
+- q: Which of my interests is growing fastest right now?
+  route: interests
+- q: what did I save in December 2022?
+  route: interests
+- q: has my interest in machine learning gone up or down since 2020?
+  route: interests
+  hard: true
+- q: In which year did I save the most about travel?
+  route: interests
+  hard: true
+- q: I feel like I used to save mostly programming stuff and now it's all cooking and travel, is that actually true over the last few years?
+  route: interests
+  hard: true
+- q: what was I bookmarking around this time last year?
+  route: interests
+- q: What did I save in the first half of 2023?
+  route: interests
+- q: any interests I dropped recently?
+  route: interests
+- q: is there anything I used to save a lot about but don't anymore
+  route: interests
+- q: How has my saving about health and fitness changed over the last 2 years?
+  route: interests
+  hard: true
+- q: my intrests this year
+  route: interests
+- q: what did I mostly read in 2017 compared to 2024
+  route: interests
+- q: what do i have on fermentation?
+  route: list
+- q: Show me all my pages about carbon taxes.
+  route: list
+- q: give me an overview of what I've saved on fundraising
+  route: list
+- q: What have I saved about Go?
+  route: list
+  hard: true
+- q: all my bookmarks about the French Revolution
+  route: list
+- q: Can you pull up every article I have on index funds?
+  route: list
+- q: anything on Kafka?
+  route: list
+- q: Round up all the curry recipes I've saved.
+  route: list
+- q: what have I got on visiting Japan
+  route: list
+  hard: true
+- q: collect all my saved pages about type systems
+  route: list
+- q: list every bookmark related to Roman history
+  route: list
+- q: which pages have I saved about React hooks?
+  route: list
+- q: What do I have saved on sleep science? All of it.
+  route: list
+- q: Overview of my saved material on UX research methods, please
+  route: list
+- q: all my music theory bookmarks
+  route: list
+- q: I've saved a bunch of stuff on climbing, can you show me all of it?
+  route: list
+  hard: true
+- q: list everything I bookmarked about Elixir last year
+  route: list
+  hard: true
+- q: show me the pages I saved about Iceland in 2019
+  route: list
+  hard: true
+- q: What do I have on the history of jazz?
+  route: list
+- q: Pull together everything I saved on venture debt.
+  route: list
+- q: give me the list of my bookmarks about Swift concurrency
+  route: list
+- q: what articles do I have about mortgages
+  route: list
+- q: overview of my bookmarks on Premier League tactics
+  route: list

@@ -441,11 +441,12 @@ func TestLoaded(t *testing.T) {
 	assert.False(t, loaded)
 }
 
-// The Ollama generator is what callers that need structure or warmth
-// type-assert to.
+// The Ollama generator is what callers that need structure, warmth or a
+// stream type-assert to.
 var (
-	_ JSONGenerator = (*Ollama)(nil)
-	_ Warmer        = (*Ollama)(nil)
+	_ JSONGenerator   = (*Ollama)(nil)
+	_ Warmer          = (*Ollama)(nil)
+	_ StreamGenerator = (*Ollama)(nil)
 )
 
 func TestGenerate_ClientErrorsAreNotRetried(t *testing.T) {

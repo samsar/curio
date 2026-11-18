@@ -43,9 +43,9 @@ import (
 // embedding model doesn't answer, and ReembedBrake the re-embed's brake
 // while it stops the re-embed: each present only while it holds, and
 // neither changes Status. Understanding is what the planner knows of its
-// model, Reranking what the reranker knows of its, and Summaries what the
-// summaries' writer knows of its, each from memory alone; none changes
-// Status either.
+// model, Reranking what the reranker knows of its, Summaries what the
+// summaries' writer knows of its, and Asking what the asker knows of its,
+// each from memory alone; none changes Status either.
 type Health struct {
 	Status          string              `json:"status"`
 	PID             int                 `json:"pid"`
@@ -70,6 +70,7 @@ type Health struct {
 	Understanding   UnderstandingHealth `json:"understanding"`
 	Reranking       RerankingHealth     `json:"reranking"`
 	Summaries       SummariesHealth     `json:"summaries"`
+	Asking          AskingHealth        `json:"asking"`
 }
 
 // UnderstandingHealth mirrors the openapi UnderstandingHealth schema: what
@@ -389,6 +390,7 @@ func (d Deps) health(ctx context.Context) (Health, error) {
 		Understanding:   d.understanding(),
 		Reranking:       d.reranking(),
 		Summaries:       d.summaries(),
+		Asking:          d.asking(),
 	}, nil
 }
 

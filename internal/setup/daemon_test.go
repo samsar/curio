@@ -92,19 +92,21 @@ func TestUp_DaemonAnotherRoleModel(t *testing.T) {
 	assert.Equal(t, []string{"gemma4:12b"}, h.ollama.Pulls()[pulled:])
 	assert.Equal(t, 1, h.agent.Count("Restart"))
 	assert.True(t, ui.Said("restarted curio-daemon to write with gemma4:12b"))
-	assert.Equal(t, map[string]string{"labels": "gemma4:12b", "planner": genModel},
-		healthz(t, h).GenerationRoles, "the planner writes with generation.model; summaries are off by default")
+	assert.Equal(t, map[string]string{"labels": "gemma4:12b", "planner": genModel, "answers": genModel},
+		healthz(t, h).GenerationRoles,
+		"the planner and the answers write with generation.model; summaries are off by default")
 	assert.Equal(t, genModel, healthz(t, h).GenerationModel, "generation.model as config.yaml sets it")
 }
 
-// TestUp_DaemonWritesNothing: with insight, search understanding and
-// summaries off, no role writes, so a change of generation.model pulls
+// TestUp_DaemonWritesNothing: with insight, search understanding,
+// summaries and Ask off, no role writes, so a change of generation.model pulls
 // nothing and restarts nothing.
 func TestUp_DaemonWritesNothing(t *testing.T) {
 	h := newHarness(t)
 	home := h.writeHome(genModel)
 	require.NoError(t, os.WriteFile(home.ConfigPath(), []byte(mustRead(t, home.ConfigPath())+
-		"insight:\n  enabled: false\nsearch:\n  understand: false\nsummaries:\n  enabled: false\n"), 0o600))
+		"insight:\n  enabled: false\nsearch:\n  understand: false\nsummaries:\n  enabled: false\n"+
+		"ask:\n  enabled: false\n"), 0o600))
 	ui := setuptest.NewUI(t, setuptest.Yes().About("Pull qwen3-embedding:0.6b"), setuptest.Yes().About("launchd"))
 	_, _, err := h.up(ui, setup.Options{})
 	require.NoError(t, err, "%v", ui.Events())
@@ -123,17 +125,20 @@ func TestUp_DaemonWritesNothing(t *testing.T) {
 // config.yaml, curio up pulls its model and restarts a daemon that started
 // without the role, once, and the new daemon writes for it: interest
 // labels with insight turned on, search understanding with
-// search.understand, as after an upgrade from before the planner, and
-// summaries with summaries.enabled true, which they are off without.
+// search.understand, as after an upgrade from before the planner,
+// summaries with summaries.enabled true, which they are off without, and
+// answers with Ask, as after an upgrade from before it.
 func TestUp_DaemonRoleNowInUse(t *testing.T) {
 	const (
 		labelsOff     = "insight:\n  enabled: false\n"
 		plannerOff    = "search:\n  understand: false\n"
 		summariesOff  = "summaries:\n  enabled: false\n"
-		everyFeatOff  = labelsOff + plannerOff + summariesOff
-		labelsOnly    = plannerOff + summariesOff
-		plannerOnly   = labelsOff + summariesOff
-		summariesOnly = labelsOff + plannerOff + "summaries:\n  enabled: true\n"
+		answersOff    = "ask:\n  enabled: false\n"
+		everyFeatOff  = labelsOff + plannerOff + summariesOff + answersOff
+		labelsOnly    = plannerOff + summariesOff + answersOff
+		plannerOnly   = labelsOff + summariesOff + answersOff
+		summariesOnly = labelsOff + plannerOff + "summaries:\n  enabled: true\n" + answersOff
+		answersOnly   = labelsOff + plannerOff + summariesOff
 	)
 	for _, tc := range []struct {
 		name    string
@@ -144,6 +149,7 @@ func TestUp_DaemonRoleNowInUse(t *testing.T) {
 		{"labels", labelsOnly, "interest labels", map[string]string{"labels": genModel}},
 		{"planner", plannerOnly, "search understanding", map[string]string{"planner": genModel}},
 		{"summaries", summariesOnly, "document summaries", map[string]string{"summaries": genModel}},
+		{"answers", answersOnly, "answers to questions", map[string]string{"answers": genModel}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)

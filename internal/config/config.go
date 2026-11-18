@@ -37,6 +37,7 @@ type Config struct {
 	Insight    Insight    `yaml:"insight"`
 	Generation Generation `yaml:"generation"`
 	Summaries  Summaries  `yaml:"summaries"`
+	Ask        Ask        `yaml:"ask"`
 	UI         UI         `yaml:"ui"`
 
 	// deprecated are the keys the loaded file sets that nothing reads
@@ -357,6 +358,9 @@ const (
 	// RoleReranker reorders the head of a search's ranking by reading each
 	// candidate.
 	RoleReranker Role = "reranker"
+	// RoleAnswers answers a question from the pages its search finds,
+	// citing them.
+	RoleAnswers Role = "answers"
 )
 
 // roles are every role, in the order they are listed and pulled: what
@@ -374,6 +378,7 @@ var roles = []struct {
 	{RolePlanner, "search understanding", func(c Config) bool { return c.Search.Understand }, false},
 	{RoleSummaries, "document summaries", Config.SummariesOn, false},
 	{RoleReranker, "search reranking", Config.RerankOn, false},
+	{RoleAnswers, "answers to questions", Config.AskOn, false},
 }
 
 // Roles lists every role.
@@ -397,8 +402,8 @@ func (r Role) UsedFor() string {
 }
 
 // PullsAlone reports whether the daemon pulls r's model on its own, with
-// generation.auto_pull. The planner's, the summaries' and the reranker's
-// don't: each can be on by default, and a home that labels nothing with a
+// generation.auto_pull. The planner's, the summaries', the reranker's and
+// the answers' don't: each can be on by default, and a home that labels nothing with a
 // writing model would otherwise download gigabytes on its first start
 // after an upgrade. Their model is pulled by curio up, which asks first,
 // or with the pull of another role in use that writes with the same
@@ -427,18 +432,20 @@ func (c Config) SharesModelWith(r, o Role) bool {
 
 // KeepAliveOf is how long r's requests ask Ollama to keep its model loaded
 // after them; 0 sends none, which leaves Ollama's default of 5 minutes.
-// The labels send none; the planner and the reranker search's keep-alive
-// (search.understand_keep_alive_minutes); the summaries that one while the
-// planner or the reranker is in use and writes with their model, so a page
-// summarized between two searches never cuts their warm window, and none
+// The labels send none; the planner, the reranker and the answers search's
+// keep-alive (search.understand_keep_alive_minutes), so an answer between
+// two searches never cuts their warm window; the summaries that one while
+// any of those three is in use and writes with their model, so a page
+// summarized between two searches never cuts it either, and none
 // otherwise, so the pass frees its model a few minutes after its last page.
 func (c Config) KeepAliveOf(r Role) time.Duration {
 	search := time.Duration(c.Search.UnderstandKeepAliveMinutes) * time.Minute
 	switch r {
-	case RolePlanner, RoleReranker:
+	case RolePlanner, RoleReranker, RoleAnswers:
 		return search
 	case RoleSummaries:
-		if c.SharesModelWith(r, RolePlanner) || c.SharesModelWith(r, RoleReranker) {
+		if c.SharesModelWith(r, RolePlanner) || c.SharesModelWith(r, RoleReranker) ||
+			c.SharesModelWith(r, RoleAnswers) {
 			return search
 		}
 	case RoleLabels:
@@ -540,9 +547,9 @@ func (g Generation) Role(r Role) ModelSpec {
 // RolesInUse lists the roles whose feature is on, in Roles' order: labels
 // while insight is enabled and labels its interests with an LLM, the
 // planner while search understands questions, the summaries while they
-// are written (SummariesOn), and the reranker while searches may be
-// reranked (RerankOn). A role not in use has no writing model to build,
-// pull or check.
+// are written (SummariesOn), the reranker while searches may be reranked
+// (RerankOn), and the answers while questions are answered (AskOn). A
+// role not in use has no writing model to build, pull or check.
 func (c Config) RolesInUse() []Role {
 	var out []Role
 	for _, r := range roles {
@@ -671,6 +678,7 @@ func Default() Config {
 		},
 		// Summaries are off unless config.yaml sets summaries.enabled true
 		// (SummariesOn).
+		Ask: defaultAsk(),
 	}
 }
 
@@ -896,6 +904,9 @@ func (c Config) Validate() error {
 	if c.Insight.LabelingTimeoutSeconds <= 0 {
 		return fmt.Errorf("insight.labeling_timeout_seconds must be positive, got %d",
 			c.Insight.LabelingTimeoutSeconds)
+	}
+	if err := validateAsk(c.Ask); err != nil {
+		return err
 	}
 	return validateGeneration(c.Generation)
 }

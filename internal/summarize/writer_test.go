@@ -223,6 +223,9 @@ func TestDecodeAnswer_Invalid(t *testing.T) {
 		{"not JSON", `secret words`, "shape"},
 		{"two objects", with("kind", "article") + `{}`, "shape"},
 		{"an unknown key", `{"kind":"article","secret":"words"}`, "shape"},
+		{"a case-variant key beside its key", `{"kind":"article","KIND":"secret"}`, "shape"},
+		{"a case-variant key alone", `{"Kind":"article","about":"secret words"}`, "shape"},
+		{"a repeated key", `{"kind":"article","about":"secret","about":"words"}`, "shape"},
 		{"a wrong type", with("entities", "secret words"), "shape"},
 		{"a kind outside the set", with("kind", "essay"), "kind"},
 		{"too many entities", with("entities", many(maxEntities+1, 3)), "entities"},
@@ -576,11 +579,13 @@ func TestKeepAlive(t *testing.T) {
 	}
 
 	cfg := config.Default()
+	cfg.Ask.Enabled = new(false)
 	cfg.Search.UnderstandKeepAliveMinutes = 45
 	assert.Equal(t, 45*time.Minute, OptionsFrom(cfg).KeepAlive, "the planner's, on its model")
 	cfg.Search.Understand = false
 	assert.Zero(t, OptionsFrom(cfg).KeepAlive, "no planner in use: Ollama's default")
 	cfg = config.Default()
+	cfg.Ask.Enabled = new(false)
 	cfg.Generation.Roles = map[config.Role]config.ModelSpec{config.RoleSummaries: {Model: "gemma4:26b"}}
 	assert.Zero(t, OptionsFrom(cfg).KeepAlive, "another model than the planner's")
 	cfg.Generation.Roles = map[config.Role]config.ModelSpec{config.RolePlanner: {BaseURL: "http://127.0.0.1:11435"}}

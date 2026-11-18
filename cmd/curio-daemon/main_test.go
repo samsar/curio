@@ -28,6 +28,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/samsar/curio/internal/api"
+	"github.com/samsar/curio/internal/ask"
 	"github.com/samsar/curio/internal/client"
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/curiohome"
@@ -37,6 +38,7 @@ import (
 	"github.com/samsar/curio/internal/insight"
 	"github.com/samsar/curio/internal/jobs"
 	"github.com/samsar/curio/internal/rerank"
+	"github.com/samsar/curio/internal/retrieve"
 	"github.com/samsar/curio/internal/store"
 	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
 	"github.com/samsar/curio/internal/store/sqlite/sqlitetest"
@@ -1091,7 +1093,7 @@ func TestNewInsightEngine_InsightOffWritesNothing(t *testing.T) {
 	require.NoError(t, err)
 	_, source := rebuildLabel(t, eng, insights)
 	assert.Equal(t, store.LabelSourceTerms, source)
-	cfg.Search.Understand, cfg.Summaries.Enabled = false, new(false)
+	cfg.Search.Understand, cfg.Summaries.Enabled, cfg.Ask.Enabled = false, new(false), new(false)
 	for _, target := range pullTargets(cfg) {
 		assert.Equal(t, "embeddings", target.usedFor, "only the embedding model is pulled")
 	}
@@ -1174,6 +1176,15 @@ func TestPullTargets(t *testing.T) {
 		}, []pullTarget{embeddings, {baseURL: "http://gpu-box.lan:11434", model: "qwen3:4b-instruct",
 			usedFor: "interest labels, search understanding, document summaries, search reranking",
 			timeout: 2 * time.Minute}}},
+		{"the answers on generation.model: they join the labels' pull", func(c *config.Config) {
+			c.Ask.Enabled = new(true)
+		}, []pullTarget{embeddings, {baseURL: local, model: "qwen3:4b-instruct",
+			usedFor: "interest labels, search understanding, document summaries, answers to questions",
+			timeout: 2 * time.Minute}}},
+		{"the answers on their own model: never pulled alone", func(c *config.Config) {
+			c.Ask.Enabled = new(true)
+			c.Generation.Roles = map[config.Role]config.ModelSpec{config.RoleAnswers: {Model: "gemma4:26b"}}
+		}, []pullTarget{embeddings, writing}},
 		{"the labels role on its own server", func(c *config.Config) {
 			c.Generation.Roles = map[config.Role]config.ModelSpec{config.RoleLabels: {BaseURL: "http://127.0.0.1:11500/"}}
 		}, []pullTarget{embeddings, {baseURL: "http://127.0.0.1:11500", model: "qwen3:4b-instruct",
@@ -1181,8 +1192,11 @@ func TestPullTargets(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := config.Default()
-			// Turned on (they are off by default), unless the case says.
+			// Turned on (they are off by default), unless the case says;
+			// Ask off, unless the case says, which joins a pull as the
+			// planner does.
 			cfg.Summaries.Enabled = new(true)
+			cfg.Ask.Enabled = new(false)
 			tc.mutate(&cfg)
 			require.NoError(t, cfg.Validate())
 			assert.Equal(t, tc.want, pullTargets(cfg))
@@ -1192,11 +1206,16 @@ func TestPullTargets(t *testing.T) {
 
 // TestGenerationRoles: healthz's roles are those in use, each with the
 // model it resolves to: the summaries' only while config.yaml turns them
-// on.
+// on, and the answers' by default only for a model measured as the
+// answer writer.
 func TestGenerationRoles(t *testing.T) {
 	cfg := config.Default()
 	assert.Equal(t, map[string]string{"labels": "qwen3:4b-instruct", "planner": "qwen3:4b-instruct"},
-		generationRoles(cfg), "summaries off by default")
+		generationRoles(cfg), "summaries off by default, and answers for an unmeasured model")
+	cfg.Generation.Roles = map[config.Role]config.ModelSpec{config.RoleAnswers: {Model: "gemma4:26b"}}
+	assert.Equal(t, map[string]string{"labels": "qwen3:4b-instruct", "planner": "qwen3:4b-instruct",
+		"answers": "gemma4:26b"}, generationRoles(cfg), "answers on by default for a measured model")
+	cfg.Ask.Enabled = new(false)
 	cfg.Generation.Roles = map[config.Role]config.ModelSpec{config.RoleLabels: {Model: "gemma4:12b"},
 		config.RolePlanner: {Model: "gemma4:26b"}, config.RoleSummaries: {Model: "gemma4:26b-a4b-it-qat"}}
 	assert.Equal(t, map[string]string{"labels": "gemma4:12b", "planner": "gemma4:26b"}, generationRoles(cfg),
@@ -1226,7 +1245,7 @@ func TestGenerationRoles(t *testing.T) {
 // model at its own server, its background work stopping with stop: a
 // warm-up in flight is abandoned, and Wait returns.
 func TestNewReranker(t *testing.T) {
-	off, err := newReranker(context.Background(), config.Default(), nil)
+	off, err := newReranker(context.Background(), config.Default(), nil, nil)
 	require.NoError(t, err)
 	_, out := off.Decide("kafka", understand.KindOne, true)
 	assert.Equal(t, rerank.StatusOff, out.Status)
@@ -1257,7 +1276,7 @@ func TestNewReranker(t *testing.T) {
 	cfg.Generation.Roles = map[config.Role]config.ModelSpec{config.RoleReranker: {Model: "gemma4:26b",
 		BaseURL: srv.URL}}
 
-	r, err := newReranker(context.Background(), cfg, nil)
+	r, err := newReranker(context.Background(), cfg, nil, nil)
 	require.NoError(t, err)
 	out, err = r.Rerank(context.Background(), rerank.Request{Question: "kafka", Kind: understand.KindList,
 		Planned: true, Candidates: []rerank.Candidate{{ID: "a", Rank: 1, Title: "a"}, {ID: "b", Rank: 2, Title: "b"}}})
@@ -1275,6 +1294,76 @@ func TestNewReranker(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the reranker's background work didn't stop")
 	}
+}
+
+// TestNewAsker: the asker is built whatever its role: off with its reason
+// while Ask is off; on, it waits for the role's model to load at its own
+// server, and its background work stops with stop, which ends an ask in
+// flight unavailable, and Wait returns.
+func TestNewAsker(t *testing.T) {
+	cfg := config.Default()
+	cfg.Ask.Enabled = new(false)
+	off, err := newAsker(context.Background(), cfg, retrieve.Retriever{}, ask.Stores{}, nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, ask.OffReason, off.State().Reason)
+	off.stop()
+	off.Wait()
+
+	loading := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/ps":
+			fmt.Fprint(w, `{"models":[]}`)
+		case "/api/tags":
+			fmt.Fprint(w, `{"models":[{"name":"gemma4:26b"}]}`)
+		case "/api/generate":
+			var req struct {
+				Model string `json:"model"`
+			}
+			assert.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			loading <- req.Model
+			<-r.Context().Done()
+		}
+	}))
+	t.Cleanup(srv.Close)
+	cfg = config.Default()
+	cfg.Generation.BaseURL = "http://127.0.0.1:1"
+	cfg.Generation.Roles = map[config.Role]config.ModelSpec{config.RoleAnswers: {Model: "gemma4:26b",
+		BaseURL: srv.URL}}
+	a, err := newAsker(context.Background(), cfg, retrieve.Retriever{},
+		ask.Stores{Library: countsOf{store.DocStateFetched: 1}}, nil, nil)
+	require.NoError(t, err)
+	ended := make(chan ask.Done, 1)
+	go func() {
+		_ = a.Ask(context.Background(), ask.Request{Question: "kafka"}, func(e ask.Event) error {
+			if d, ok := e.(ask.Done); ok {
+				ended <- d
+			}
+			return nil
+		})
+	}()
+	assert.Equal(t, "gemma4:26b", <-loading, "the role's model, loading at its server")
+	done := make(chan struct{})
+	go func() {
+		a.stop()
+		a.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the asker's background work didn't stop")
+	}
+	d := <-ended
+	assert.Equal(t, ask.StatusUnavailable, d.Status)
+	assert.Equal(t, "the daemon is stopping; ask again once it has restarted", d.Reason)
+}
+
+// countsOf is a library whose documents count as given.
+type countsOf map[store.DocState]int
+
+func (c countsOf) CountByState(context.Context, string) (map[store.DocState]int, error) {
+	return c, nil
 }
 
 // TestNewPlanner: the planner writes with the planner role's model, at its
@@ -1303,7 +1392,7 @@ func TestNewPlanner(t *testing.T) {
 	cfg.Generation.Roles = map[config.Role]config.ModelSpec{config.RolePlanner: {Model: "gemma4:26b",
 		BaseURL: srv.URL}}
 
-	p, err := newPlanner(context.Background(), cfg, nil)
+	p, err := newPlanner(context.Background(), cfg, nil, nil)
 	require.NoError(t, err)
 	out, err := p.Plan(context.Background(), "kafka")
 	require.NoError(t, err)
@@ -1311,6 +1400,37 @@ func TestNewPlanner(t *testing.T) {
 	assert.Equal(t, "gemma4:26b", <-loading, "the role's model, loading at its server")
 	p.stop()
 	p.Wait()
+}
+
+// TestNewDaemon_SharesTheTraffic: the planner, the reranker and the asker
+// newDaemon builds record their calls in one modelgate.Traffic, so a plan
+// or a rerank that waited behind an answer is never held against its
+// model; a Traffic of each's own would see no answer to wait behind.
+func TestNewDaemon_SharesTheTraffic(t *testing.T) {
+	home := newHome(t, freeLoopbackAddr(t))
+	cfg, err := config.Load(home.ConfigPath())
+	require.NoError(t, err)
+	cfg.Search.Understand = true
+	meta, err := home.Meta()
+	require.NoError(t, err)
+	db, err := sqlitestore.Open(context.Background(), home.DBPath())
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, db.Close()) })
+	d, err := start(context.Background(), cfg, home, meta, db, api.NewStartup())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		d.planner.stop()
+		d.reranker.stop()
+		d.asker.stop()
+		d.planner.Wait()
+		d.reranker.Wait()
+		d.asker.Wait()
+	})
+
+	require.NotNil(t, d.planner, "search.understand is on")
+	require.NotNil(t, d.planner.traffic)
+	assert.Same(t, d.planner.traffic, d.reranker.traffic, "the reranker's")
+	assert.Same(t, d.planner.traffic, d.asker.traffic, "the asker's")
 }
 
 // syncBuffer is a bytes.Buffer safe for a logger's concurrent writes and
@@ -2111,7 +2231,7 @@ func TestWritingRoles_ShareTheContextSize(t *testing.T) {
 	failed, err := writer.Check(context.Background())
 	require.NoError(t, err)
 	assert.NotEmpty(t, failed, "{} is no summary")
-	p, err := newPlanner(context.Background(), cfg, nil)
+	p, err := newPlanner(context.Background(), cfg, nil, nil)
 	require.NoError(t, err)
 	failed, err = p.Check(context.Background())
 	require.NoError(t, err)

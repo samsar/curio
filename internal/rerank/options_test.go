@@ -1,6 +1,7 @@
 package rerank
 
 import (
+	"fmt"
 	"reflect"
 	"slices"
 	"testing"
@@ -262,4 +263,40 @@ func TestOptionsFrom_MeasuredDefault(t *testing.T) {
 	assert.True(t, o.On, "asked for: held, and said")
 	assert.False(t, o.ByDefault)
 	assert.NotEmpty(t, o.Held())
+}
+
+// TestOptionsFrom_AgreesWithRerankOn: the reranker is on exactly when
+// config says so, and config counts the role in use exactly then, so
+// healthz's reranking and its generation_roles never disagree.
+func TestOptionsFrom_AgreesWithRerankOn(t *testing.T) {
+	understand := map[string]func(*config.Config){
+		"understanding on":  func(*config.Config) {},
+		"understanding off": func(c *config.Config) { c.Search.Understand = false },
+		"planner withheld by its base URL": func(c *config.Config) {
+			c.Generation.BaseURL = "http://gpu.example:11434"
+			c.Generation.Roles = map[config.Role]config.ModelSpec{
+				config.RoleReranker:  {BaseURL: "http://gpu.example:11434"},
+				config.RoleSummaries: {BaseURL: "http://gpu.example:11434"},
+			}
+		},
+		"planner withheld by the budget": func(c *config.Config) { c.Search.EmbedTimeoutSeconds = 23 },
+	}
+	for name, change := range understand {
+		for _, summaries := range []bool{true, false} {
+			for _, rerank := range []*bool{nil, new(true), new(false)} {
+				for _, model := range []string{"gemma4:26b", "gemma4:12b"} {
+					c := config.Default()
+					c.Generation.Model = model
+					c.Summaries.Enabled = new(summaries)
+					c.Search.Rerank = rerank
+					change(&c)
+					require.NoError(t, c.Validate())
+					on := c.RerankOn()
+					desc := fmt.Sprintf("%s, summaries %v, rerank %v, %s", name, summaries, rerank, model)
+					assert.Equal(t, on, OptionsFrom(c).On, desc)
+					assert.Equal(t, on, slices.Contains(c.RolesInUse(), config.RoleReranker), desc)
+				}
+			}
+		}
+	}
 }

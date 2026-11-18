@@ -1129,10 +1129,11 @@ func TestWorker_ClaimsOnlyAdmittedKinds(t *testing.T) {
 	defer stop()
 
 	assert.Equal(t, fetch.ID, receive(t, handled, 5*time.Second, "the fetch job").ID)
-	assert.Never(t, func() bool {
+	neverWithin(t, 200*time.Millisecond, 10*time.Millisecond, func() bool {
 		j, err := q.GetByID(context.Background(), summarize.ID)
-		return !assert.NoError(t, err) || j.Status != store.JobStatusPending
-	}, 200*time.Millisecond, 10*time.Millisecond)
+		require.NoError(t, err)
+		return j.Status != store.JobStatusPending
+	}, "the closed kind's job is claimed")
 	claimed := q.kindsClaimed()
 	require.NotEmpty(t, claimed)
 	for _, kinds := range claimed {

@@ -2,6 +2,7 @@ package indexer
 
 import (
 	"fmt"
+	"math/rand/v2"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -207,4 +208,58 @@ func FuzzContext(f *testing.F) {
 			t.Fatalf("context is not valid UTF-8: %q", got)
 		}
 	})
+}
+
+// TestHeadingPath: what Context appended is read back from the context
+// whatever the title, site and headings hold, " — " included, an
+// untitled document's too; a context the document no longer makes, or
+// one without a path, reads as none.
+func TestHeadingPath(t *testing.T) {
+	r := rand.New(rand.NewPCG(7, 11))
+	words := []string{"Kafka", "consumer", "—", "groups", "|", "Setup", "a", "Q&A", "naïve", "›", "-", "Ünïcode"}
+	phrase := func(n int) string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = words[r.IntN(len(words))]
+		}
+		return strings.Join(out, " ")
+	}
+	for range 500 {
+		doc := DocumentContext{URL: "https://example.com/" + phrase(1)}
+		if r.IntN(4) > 0 {
+			doc.Title = phrase(1 + r.IntN(6))
+		} else if r.IntN(2) == 0 {
+			doc.Bookmarks = []docmeta.Bookmark{{Title: phrase(1 + r.IntN(4))}}
+		}
+		if r.IntN(2) == 0 {
+			doc.Site = &store.DocumentSite{Name: phrase(1 + r.IntN(3)), Host: "example.com"}
+		}
+		headings := make([]string, r.IntN(4))
+		for i := range headings {
+			headings[i] = phrase(1 + r.IntN(5))
+		}
+		// The title and site Context names the document by, which the
+		// path leaves out when a heading repeats one.
+		title := collapse(doc.Title)
+		if title == "" {
+			saved, _ := docmeta.SavedAs(doc.Bookmarks)
+			title = saved.Title
+		}
+		site := docmeta.Host(doc.URL)
+		if doc.Site != nil {
+			site = docmeta.SiteOrHost(doc.Site.Name, doc.Site.Host)
+		}
+		ctx := Context(doc, headings)
+		assert.Equal(t, headingPath(headings, title, site), HeadingPath(ctx, doc), "%q", ctx)
+	}
+
+	doc := DocumentContext{URL: "https://example.com/a", Title: "Tuning — rebalances",
+		Site: &store.DocumentSite{Name: "Example — Notes", Host: "example.com"}}
+	ctx := Context(doc, []string{"Setup", "Timeouts — and heartbeats"})
+	assert.Equal(t, "Setup › Timeouts — and heartbeats", HeadingPath(ctx, doc))
+	assert.Empty(t, HeadingPath(Context(doc, nil), doc), "no path")
+	renamed := doc
+	renamed.Title = "Tuning rebalances"
+	assert.Empty(t, HeadingPath(ctx, renamed), "a title changed since")
+	assert.Empty(t, HeadingPath("", doc), "embedded without its context")
 }

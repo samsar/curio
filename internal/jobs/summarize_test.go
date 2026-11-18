@@ -421,9 +421,9 @@ func TestSummaryPass_ModelNotPulled(t *testing.T) {
 		assert.Equal(c, 1, e.summarizeCount(store.JobStatusDone))
 		assert.Zero(c, e.summarizeCount(store.JobStatusPending)+e.summarizeCount(store.JobStatusRunning))
 	}, 5*time.Second, 5*time.Millisecond)
-	assert.Never(t, func() bool {
+	neverWithin(t, 200*time.Millisecond, 5*time.Millisecond, func() bool {
 		return e.summarizeCount(store.JobStatusPending)+e.summarizeCount(store.JobStatusRunning) > 0
-	}, 200*time.Millisecond, 5*time.Millisecond, "no job is kept while the model isn't pulled")
+	}, "no job is kept while the model isn't pulled")
 
 	e.model.mu.Lock()
 	e.model.probeErr, e.model.pingErr = nil, nil
@@ -532,8 +532,8 @@ func TestSummaryPass_CheckWaitOutlivesItsJob(t *testing.T) {
 			_, err := e.db.Exec(`UPDATE jobs SET run_after = `+sqlAgo(0)+` WHERE kind = ? AND status = ?`,
 				store.JobKindSummarize, store.JobStatusPending)
 			require.NoError(t, err)
-			assert.Never(t, func() bool { return e.summarizeJobs() > jobs+1 }, 500*time.Millisecond,
-				5*time.Millisecond, "a job a few milliseconds while the check waits")
+			neverWithin(t, 500*time.Millisecond, 5*time.Millisecond, func() bool { return e.summarizeJobs() > jobs+1 },
+				"a job a few milliseconds while the check waits")
 			require.EventuallyWithT(t, func(c *assert.CollectT) {
 				assert.Zero(c, e.summarizeCount(store.JobStatusRunning))
 				var due, waiting int
@@ -603,7 +603,7 @@ func TestSummaryPass_HeldOrNotPulled(t *testing.T) {
 			for range 3 {
 				e.deps.SummaryFeed.Kick()
 			}
-			assert.Never(t, func() bool { return e.summarizeJobs() > 3 }, 300*time.Millisecond, 5*time.Millisecond,
+			neverWithin(t, 300*time.Millisecond, 5*time.Millisecond, func() bool { return e.summarizeJobs() > 3 },
 				"no job queued after them")
 			assert.Zero(t, e.model.callsMade(), "no page asked")
 		})
@@ -945,8 +945,9 @@ func TestSummaryPass_HeldWithinOneDocument(t *testing.T) {
 			require.EventuallyWithT(t, func(c *assert.CollectT) {
 				assert.Equal(c, 1, e.summarizeCount(store.JobStatusDone), "the summary in flight is written")
 			}, 5*time.Second, 5*time.Millisecond)
-			assert.Never(t, func() bool { return e.summarizeCount(store.JobStatusRunning) > 0 },
-				100*time.Millisecond, 5*time.Millisecond, "held: no job claimed after the one in flight")
+			neverWithin(t, 100*time.Millisecond, 5*time.Millisecond,
+				func() bool { return e.summarizeCount(store.JobStatusRunning) > 0 },
+				"held: no job claimed after the one in flight")
 			_, err = gate.Update(e.ctx, tc.release)
 			require.NoError(t, err)
 			require.EventuallyWithT(t, func(c *assert.CollectT) {
@@ -1017,9 +1018,9 @@ func TestSummaryPass_CheckReachesNoVerdict(t *testing.T) {
 	for range 3 {
 		feed.Kick()
 	}
-	assert.Never(t, func() bool {
+	neverWithin(t, 200*time.Millisecond, 5*time.Millisecond, func() bool {
 		return e.model.probesMade() > 1 || e.summarizeCount(store.JobStatusPending) > 1
-	}, 200*time.Millisecond, 5*time.Millisecond, "kicks queue nothing beside it, and nothing asks the model")
+	}, "kicks queue nothing beside it, and nothing asks the model")
 	assert.Equal(t, summarize.FeedOne, e.deps.Writer.Feed())
 	assert.Equal(t, summarize.CheckUnchecked, e.writer.State().Check)
 	assert.False(t, e.writer.State().CheckRetryAt.IsZero())

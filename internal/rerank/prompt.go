@@ -13,7 +13,7 @@ import (
 // listwiseTemplate asks an instruct model for the candidates' numbers in
 // order. The fixed instructions come first, so a model's prompt cache can
 // reuse them; the question and the candidates follow, each candidate one
-// line of JSON whose text is neutralized (neutralize), so a page can write
+// line of JSON whose text is neutralized (textutil.Neutralize), so a page can write
 // nothing that reads as an instruction's structure. Every example here is
 // made up. A change of wording changes PromptVersion, and calls for the
 // grid and the fitness check to be measured again.
@@ -118,12 +118,12 @@ func orderSchema(m int) json.RawMessage {
 // from 1 in their order. A replacer never reads its own output, so text
 // holding a placeholder stays as written.
 func listwisePrompt(question string, cands []Candidate, in Inputs) string {
-	share := listwiseShare(neutralize(question, maxQuestionBytes), len(cands))
+	share := listwiseShare(textutil.Neutralize(question, maxQuestionBytes), len(cands))
 	rows := make([]string, len(cands))
 	for i, c := range cands {
 		rows[i] = listwiseLine(i+1, c, in, share)
 	}
-	return strings.NewReplacer("{question}", neutralize(question, maxQuestionBytes),
+	return strings.NewReplacer("{question}", textutil.Neutralize(question, maxQuestionBytes),
 		"{candidates}", strings.Join(rows, "\n")).Replace(listwiseTemplate)
 }
 
@@ -132,7 +132,7 @@ func listwisePrompt(question string, cands []Candidate, in Inputs) string {
 // template, a Qwen3-Reranker build's is that template.
 func pointwisePrompt(question string, c Candidate, f Family, s Settings) (prompt string, raw bool) {
 	block := pointwiseBlock(c, s.Inputs, s.PointwiseBytes)
-	q := neutralize(question, maxQuestionBytes)
+	q := textutil.Neutralize(question, maxQuestionBytes)
 	if f == FamilyQwen3Reranker {
 		return strings.NewReplacer("{instruction}", qwenInstruction, "{question}", q, "{candidate}", block).
 			Replace(qwenTemplate), true
