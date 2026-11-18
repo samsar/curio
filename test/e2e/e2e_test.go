@@ -99,6 +99,10 @@ type fakeOllama struct {
 	// probabilities by how many of the question's words a page shares,
 	// which passes the reranker's fitness check.
 	reranks bool
+	// answers plays the answer writer's model: a streamed answer citing
+	// the source that shares the most of the question's words, the
+	// abstention when none does, which passes the writer's fitness check.
+	answers bool
 
 	mu                    sync.Mutex
 	digest, version, salt string
@@ -196,8 +200,10 @@ func (f *fakeOllama) generate(w http.ResponseWriter, r *http.Request) {
 		Prompt   *string         `json:"prompt"`
 		Format   json.RawMessage `json:"format"`
 		Logprobs bool            `json:"logprobs"`
+		Stream   bool            `json:"stream"`
 	}
-	if !assert.NoError(f.t, json.NewDecoder(r.Body).Decode(&req)) || (f.plan == nil && f.summary == nil && !f.reranks) {
+	if !assert.NoError(f.t, json.NewDecoder(r.Body).Decode(&req)) ||
+		(f.plan == nil && f.summary == nil && !f.reranks && !f.answers) {
 		http.Error(w, `{"error":"model not found"}`, http.StatusNotFound)
 		return
 	}
@@ -206,6 +212,9 @@ func (f *fakeOllama) generate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
+	case f.answers && req.Stream:
+		f.answer(w, *req.Prompt)
+		return
 	case f.reranks && req.Logprobs:
 		f.firstTokens(w, *req.Prompt)
 		return
@@ -277,6 +286,59 @@ func (f *fakeOllama) order(w http.ResponseWriter, prompt string) {
 	quoted, err := json.Marshal(string(reply))
 	assert.NoError(f.t, err)
 	fmt.Fprintf(w, `{"response":%s,"done":true,"done_reason":"stop"}`, quoted)
+}
+
+// sourceRE finds an answer prompt's sources: each one's number and lines.
+var sourceRE = regexp.MustCompile(`(?s)<source n="(\d+)">\n(.*?)</source>`)
+
+// answerStopwords are the question words an answer's sources are never
+// matched by.
+var answerStopwords = map[string]bool{"what": true, "when": true, "where": true, "which": true, "does": true,
+	"with": true, "that": true, "this": true, "from": true, "have": true}
+
+// answerOverlap is how many of question's words of four letters or more,
+// by their first five letters, text shares, stopwords aside.
+func answerOverlap(question, text string) int {
+	stems := func(s string) map[string]bool {
+		out := map[string]bool{}
+		for _, w := range strings.FieldsFunc(strings.ToLower(s), func(r rune) bool { return r < 'a' || r > 'z' }) {
+			if len(w) >= 4 && !answerStopwords[w] {
+				out[w[:min(5, len(w))]] = true
+			}
+		}
+		return out
+	}
+	q, n := stems(question), 0
+	for w := range stems(text) {
+		if q[w] {
+			n++
+		}
+	}
+	return n
+}
+
+// answer streams an answer to an answer prompt: a sentence citing the
+// source sharing the most of the question's words, in two pieces, or the
+// abstention when none shares one; what a source asks is never followed.
+func (f *fakeOllama) answer(w http.ResponseWriter, prompt string) {
+	_, question, _ := strings.Cut(prompt, "\nQuestion: ")
+	best, most := "", 0
+	for _, m := range sourceRE.FindAllStringSubmatch(prompt, -1) {
+		if n := answerOverlap(question, m[2]); n > most {
+			best, most = m[1], n
+		}
+	}
+	pieces := []string{"None of your saved pages ", "answers this."}
+	if best != "" {
+		pieces = []string{"Your page says so ", "[" + best + "]."}
+	}
+	for _, p := range pieces {
+		line, err := json.Marshal(map[string]any{"response": p, "done": false})
+		assert.NoError(f.t, err)
+		fmt.Fprintf(w, "%s\n", line)
+		w.(http.Flusher).Flush()
+	}
+	fmt.Fprint(w, `{"response":"","done":true,"done_reason":"stop","context":[1,2,3]}`+"\n")
 }
 
 // firstTokens answers a pointwise rerank: yes and no, likelier yes the

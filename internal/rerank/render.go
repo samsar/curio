@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/samsar/curio/internal/textutil"
 )
@@ -65,55 +63,12 @@ const (
 	listSeparator     = " | "
 )
 
-// neutralize is s as a candidate's field or a question is sent: valid
-// UTF-8, its invalid bytes dropped; control characters and Unicode's
-// format characters dropped (but the zero-width non-joiner and joiner,
-// which words need); '<' and '>' replaced by '‹' and '›', so no text can
-// write a chat template's tokens (Ollama parses "<|im_end|>" inside a
-// prompt as the special token); every run of whitespace one space,
-// trimmed; at most maxBytes, cut on a rune boundary. One pass, stopping
-// once maxBytes are written, so a page of any length costs at most its
-// share.
-func neutralize(s string, maxBytes int) string {
-	var b strings.Builder
-	b.Grow(min(len(s), maxBytes))
-	space := false
-	for _, r := range s {
-		switch {
-		case r == utf8.RuneError: // an invalid byte
-			continue
-		case unicode.IsSpace(r):
-			space = b.Len() > 0
-			continue
-		case unicode.IsControl(r), unicode.Is(unicode.Cf, r) && r != '\u200c' && r != '\u200d':
-			continue
-		case r == '<':
-			r = '‹'
-		case r == '>':
-			r = '›'
-		}
-		n := utf8.RuneLen(r)
-		if space {
-			n++
-		}
-		if b.Len()+n > maxBytes {
-			break
-		}
-		if space {
-			b.WriteByte(' ')
-			space = false
-		}
-		b.WriteRune(r)
-	}
-	return b.String()
-}
-
 // list is items neutralized and joined, at most maxBytes, whole items
 // first: an item that doesn't fit is cut only when it is the first.
 func list(items []string, maxBytes int) string {
 	var b strings.Builder
 	for _, it := range items {
-		it = neutralize(it, maxBytes)
+		it = textutil.Neutralize(it, maxBytes)
 		if it == "" {
 			continue
 		}
@@ -147,22 +102,22 @@ type field struct {
 // folders when shown.
 func fields(c Candidate, in Inputs) []field {
 	out := []field{
-		{"title", "title", neutralize(c.Title, titleBytes)},
+		{"title", "title", textutil.Neutralize(c.Title, titleBytes)},
 		{"saved_as", "saved as", list(c.SavedAs, savedAsBytes)},
-		{"site", "site", neutralize(c.Site, siteBytes)},
-		{"author", "author", neutralize(c.Author, authorBytes)},
-		{"note", "note", neutralize(c.note(), noteBytes)},
+		{"site", "site", textutil.Neutralize(c.Site, siteBytes)},
+		{"author", "author", textutil.Neutralize(c.Author, authorBytes)},
+		{"note", "note", textutil.Neutralize(c.note(), noteBytes)},
 	}
 	summary := c.Summary
 	if in.Input == InputPassage {
 		summary = nil
 	}
 	if summary != nil {
-		out = append(out, field{"kind", "kind", neutralize(summary.Kind, kindBytes)},
-			field{"about", "about", neutralize(summary.About, aboutBytes)})
+		out = append(out, field{"kind", "kind", textutil.Neutralize(summary.Kind, kindBytes)},
+			field{"about", "about", textutil.Neutralize(summary.About, aboutBytes)})
 	}
 	if in.Input != InputSummary {
-		out = append(out, field{"passage", "passage", neutralize(c.Passage, passageBytes)})
+		out = append(out, field{"passage", "passage", textutil.Neutralize(c.Passage, passageBytes)})
 	}
 	if summary != nil {
 		out = append(out, field{"descriptions", "descriptions", list(summary.Descriptions, descriptionsBytes)},

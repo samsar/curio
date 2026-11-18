@@ -98,6 +98,7 @@ func printStatus(ctx context.Context, w io.Writer, env *daemonctl.Env) (answerin
 	fmt.Fprint(w, understandingWarning(health.Understanding))
 	fmt.Fprint(w, rerankingWarning(health.Reranking))
 	fmt.Fprint(w, summariesWarning(health.Summaries))
+	fmt.Fprint(w, askingWarning(health.Asking))
 
 	sctx, scancel := context.WithTimeout(ctx, 1*time.Second)
 	defer scancel()

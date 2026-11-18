@@ -175,6 +175,7 @@ over HTTP; auto-starts the daemon if it's not running. New here? Run
 		newJobsCmd(&env),
 		newDocsCmd(&env),
 		newSearchCmd(&env),
+		newAskCmd(&env),
 		newRelatedCmd(&env),
 		newInterestsCmd(&env),
 		newEvalCmd(&env),

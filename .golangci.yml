@@ -93,10 +93,11 @@ linters:
             - "$all"
             - "!**/cmd/clusterreport/**"
             - "!**/cmd/searcheval/**"
+            - "!**/cmd/askeval/**"
             - "!**/internal/devtool/**"
           deny:
             - pkg: github.com/samsar/curio/internal/devtool
-              desc: devtool is for the developer's tools (cmd/clusterreport, cmd/searcheval); shipped code opens databases through cmd/curio-daemon
+              desc: devtool is for the developer's tools (cmd/clusterreport, cmd/searcheval, cmd/askeval); shipped code opens databases through cmd/curio-daemon
         # The dashboard's view layer and page handlers render what the
         # shared Deps functions return; they never query the database, so a
         # view can be rebuilt client-side from /v1 later.
@@ -113,10 +114,12 @@ linters:
               desc: pages get their data through the Deps functions the JSON handlers use
         # Search ranks whatever plan it is given, and never asks a language
         # model what a question means or how to order its hits: the planner
-        # (internal/understand) and the reranker (internal/rerank) read
-        # search, never the reverse, so the engine, the developer's tools and
-        # every caller rank alike with or without them. Its tests may read
-        # their share of config.Search.
+        # (internal/understand), the reranker (internal/rerank), the path
+        # that runs them around a search (internal/retrieve) and the answers
+        # written from its hits (internal/ask) read search, never the
+        # reverse, so the engine, the developer's tools and every caller
+        # rank alike with or without them. Its tests may read their share of
+        # config.Search.
         search-llm-free:
           list-mode: lax
           files:
@@ -133,6 +136,10 @@ linters:
               desc: search ranks without a writing model; the gate is for the planner's and the reranker's calls
             - pkg: github.com/samsar/curio/internal/rerank
               desc: rerank reads search's hits, never the reverse
+            - pkg: github.com/samsar/curio/internal/retrieve
+              desc: retrieve runs a search with its plan and its rerank; search never reads it
+            - pkg: github.com/samsar/curio/internal/ask
+              desc: an ask answers from search's hits; search never reads it
         # The terminal UI library is the setup wizard's alone: nothing else
         # prompts, and the daemon and the MCP sidecar must not link it.
         prompts-in-setup:

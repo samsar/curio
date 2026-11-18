@@ -17295,6 +17295,839 @@ inside the box, the margin is gone, and `overflow-y: hidden` guards it
 
 ---
 
+## Ask: a cited, streamed answer over the search path
+
+**Decision:** a fifth writing role, `answers`, answers a question from
+the pages its search finds: the question is retrieved exactly as a search
+is (understood, searched, reranked), the ranking's first readable pages
+are read as numbered sources, and the role's model streams an answer
+citing them as [n], which curio checks once it is written (`curio ask`,
+`POST /v1/ask`). Every way an ask ends without an answer is a status. It
+is on by default for a model measured as the answer writer (gemma4:26b),
+and for any other once `ask.enabled: true` asks for it, its fitness check
+guarding it. Questions
+about the whole library take a fixed plan instead, routed by English word
+rules: evidence for a claim, how the interests changed, and everything on
+a topic. The bars below were written before the measurement ran; the
+measurement and what it found follow them.
+
+**Why:** a library holds answers its owner no longer remembers holding.
+A search shows the pages; an answer reads them, and the citations let a
+person check each claim against its page, while the pages curio couldn't
+read are named rather than guessed from.
+
+### Choosing Ask's prompt and K (written before the measurement runs)
+
+This section is committed alone, before any ask-evaluation report is
+generated: its commit precedes the `generated_at` of every report the
+judgment reads.
+
+**The data.** A fresh copy of the operator's 2.8 database with every
+summary written (the full pass's copy, schema 22), never a copy another
+run migrated, config.yaml as the operator's with `summaries.enabled`
+true, so the reranker is on by default as PR 5 measured it, `TODAY=`
+2026-11-03, and a private question file written from the library by a
+separate agent before the measurement: 40 questions of the kinds one,
+multi, evidence, library, list and unanswerable, each with the pages
+that answer it (none for unanswerable and library) and one to four
+facts a good answer states. The writer, the planner and the reranker
+are gemma4:26b; the judge is gemma4:12b, a model other than the writer.
+Calls run one at a time, warm, after one warm-up ask that isn't counted.
+
+**The metrics,** per question kind and overall:
+
+- citation validity: valid citations among every citation written;
+- citation support: of the cited sentences that make a claim, judged
+  against the cited sources exactly as the writer was shown them,
+  supported plus half of partly supported;
+- claims cited: claim sentences carrying a valid citation, of all claim
+  sentences;
+- source recall: of the answerable questions with pages listed, those
+  whose answer cites at least one of them;
+- fact coverage: facts the judge finds stated, of all facts;
+- abstention: unanswerable questions answered with the abstention; and
+  false abstention: answerable questions answered with it;
+- routing accuracy: the route taken equals the question's mode, the
+  answer route when it names none;
+- time to the first token and in all, from the start of the ask, p50
+  and p95.
+
+**Ask ships as built when all of these hold:**
+
+- citation validity = 1.000;
+- citation support ≥ 0.85;
+- claims cited ≥ 0.90;
+- source recall ≥ 0.80;
+- abstention ≥ 0.75 and false abstention ≤ 0.15;
+- routing ≥ 0.90;
+- first token p50 ≤ 6 s;
+- total p50 ≤ 20 s and p95 ≤ 40 s.
+
+**When a bar fails,** the prompt or K (`ask.sources`) changes at most
+twice, each change for the whole question file and never for one
+question, and every attempt is reported with its numbers. If a bar
+still fails, Ask ships with the numbers stated plainly here and in the
+PR, and the owner decides before it merges.
+
+#### Amended before attempt 3 (2026-11-18)
+
+This subsection is committed alone, before any report of attempt 3
+exists: its commit precedes every attempt-3 report's `generated_at`.
+
+Its commit is `acc10ac` on the PR's branch, at 2026-11-18 09:18:19 UTC;
+the earliest attempt-3 report, the discarded run below, was generated at
+09:19:59 UTC. A squash merge keeps only the branch's last state, so the
+commit and its time are recorded here. This paragraph, and the move of
+the subsection here from where it was first misplaced (inside the
+Summaries section), came after the reports; the text is otherwise as
+committed.
+
+**(a) Why a third attempt.** The two changes the bars allowed were spent
+(attempts 1 and 2). Since then the deferred fixed plans landed and route
+(evidence for a claim, how the interests changed, everything on a topic),
+which the 15 questions that name a plan and the library questions were
+waiting for; and attempt 2 showed thin passages (a source's best chunk cut
+from its start, often mostly the chunk before's carried-over tail) and
+short answers (p50 51 tokens of 768; fact coverage 0.188 and 0.258 by the
+two judges).
+
+**(b) The variants,** all over the 40 questions, one run each on a fresh
+copy of the same database, with the same config, `TODAY=` and judges as
+attempt 2:
+
+- **A:** attempt 2's answer route as recorded, scored from its report
+  (`askeval -recorded`), with the questions the word rules route to a
+  fixed plan asked live;
+- **B:** the passages chosen by the question, the weighted budget and the
+  answer prompt that asks for the facts, `ask.rerank` on;
+- **C:** B with Ask's own rerank off;
+- **D:** C at `ask.sources` 6, run only if B or C misses the first token's
+  p50 bar by under 1 s.
+
+**(c) The pick rule.** Among the variants that pass every bar as written,
+the highest fact coverage, the mean of the two judges'; then the cheaper
+first token p50. If none passes every bar, the same order among those that
+pass the most bars, each miss stated.
+
+**(d)** Fact coverage is not a bar and doesn't become one: it is the
+tie-breaker, added after attempt 2 showed it low.
+
+**(e)** The bars are unchanged.
+
+**(f)** Nothing changes for one question.
+
+**(g) What the pick sets:** `ask.rerank`'s default (on for A and B, off
+for C and D), `ask.sources` 6 if D is picked, and, if A is picked, the
+passages, budget and prompt changes are reverted, which the owner decides.
+
+#### Amended before attempt 4 (2026-11-18)
+
+This subsection is committed alone, before any report of attempt 4
+exists: its commit precedes every attempt-4 report's `generated_at`.
+
+Its commit is `8f72507` on the PR's branch, at 2026-11-18 13:03:12 UTC;
+the first attempt-4 report was generated at 13:04:29 UTC. A squash merge
+keeps only the branch's last state, so the commit and its time are
+recorded here; this paragraph came after the reports, the text is
+otherwise as committed.
+
+**(a) Why a fourth run.** Attempt 3 picked D, which met every bar. Two
+review loops and an SRE review then changed the ask path, and attempt 4
+confirms D's numbers on the code that ships. It is a confirmation, not an
+attempt that may change anything: whatever it finds, nothing is tuned
+after it.
+
+**(b) What changed since attempt 3,** each for the whole question file
+and none for one question:
+
+- routing: the English word rules generalized from a blind synthetic dev
+  set (made-up questions written by an agent that saw neither the rules
+  nor any library; never the question file), raising its evidence,
+  interests and list recall while every answer question stays on the
+  answer route;
+- the interests prompt asks for the main shifts in a few sentences
+  rather than every row, and its instructions are counted at their new
+  measure (480 tokens); the table's and the groups' rendering rules are
+  hashed into `PromptVersion`;
+- a passage that fits is neutralized whole, its brackets included;
+- a prompt Ollama refuses as past the context is asked once more without
+  its last source, and the evidence judgment refuses a prompt past the
+  context rather than cut it;
+- a plan's, a rerank's or a check's timeout behind another role's long
+  call counts toward no hold (S1), and an evidence ask with nothing to
+  judge waits for no slot;
+- `ask.enabled` left out is on only for a measured model; gemma4:26b is
+  that model, so the run is on as before. The evaluation measures the
+  writer whatever the key says.
+
+**(c) Unchanged:** the bars; the data (a fresh copy of the same database,
+the same question file, `TODAY=` 2026-11-03); D's config, `ask.rerank`
+false and `ask.sources` 6, with config.yaml as before and the summaries
+written; the writer, planner and reranker gemma4:26b; the judges, gemma4:12b
+asked with the writer, then qwen3:4b-instruct over the replayed books, so
+no three models are resident at once.
+
+**(d) The run:** once, all 40 questions, the `ask` variant (D's
+behaviour, now the default). Every bar is reported beside attempt 3's D,
+per kind too. A bar that passed in attempt 3 and fails now is reported
+plainly here and in the PR, and the owner decides before it merges.
+
+### The role, and what a provider receives
+
+`answers` is a fifth `config.Role` (`generation.roles.answers`,
+`generation.model` without it), in use while Ask is on (`AskOn`), whose
+key `ask.enabled` sits in a top-level `ask:` section beside `sources`,
+`max_tokens` and `timeout_seconds` rather than among `search.`'s: an ask
+isn't a search. `curio up` writes no `ask` key: config.yaml is written
+once and never edited, so a key written for a small tier would follow the
+home to a bigger Mac.
+
+**On by default only where measured** (amended 2026-11-18, after review).
+As first written, Ask was on by default with any model, its fitness check
+the only guard, on the grounds that an answer is asked for and shown with
+its sources, unlike a rerank. Two things turned that. The check is three
+made-up probes, a floor, not the bars a measured model met on 40 real
+questions; and on the default tier an unfit verdict would put a warning
+in every `curio status` and `curio doctor` for a feature the owner never
+turned on. So `ask.enabled` follows the reranker's pattern: true or false
+as set, and left out, on only for a model in `config.AskMeasured`'s table,
+which holds gemma4:26b alone, the one model measured on the questions.
+Any other model answers nothing until `ask.enabled: true` asks for it, the
+check still guarding it; its asks end `off` with that fix in their reason,
+healthz's `asking` says so (`on_by_default` for the table's model), and
+`curio status` and `curio doctor` stay quiet (doctor's line is ✓, with the
+fix as its hint). The tiers `curio up` picks below gemma4:26b were run
+through the shipped check on Ollama 0.40.16, one at a time and unloaded
+after: qwen3:4b-instruct, gemma4:12b and gemma4:26b-a4b-it-qat each passed
+all three probes (2.8, 4.5 and 9.2 s, the load included), each citing the
+one source that answers, abstaining when none does, and citing the
+answering source, not the one that instructs. Passing the check is what
+`ask.enabled: true` relies on; being listed needs the bars.
+
+What a provider receives is the person's own: the question, passages and
+summaries of their pages, the pages' titles and saved dates. So the
+withheld rule holds as for the planner and the reranker: off this machine,
+or to a provider other than Ollama, only when `generation.roles.answers`
+names that base URL or provider itself; otherwise every ask is `withheld`,
+saying which key, and nothing is sent. The role never pulls its model
+alone (`curio up` offers it, with consent, when no other role writes with
+it), and sends search's keep-alive, so an answer between searches never
+cuts their warm window; a summaries pass on its model sends it too.
+
+### Retrieval: the search path, shared
+
+An answer is only as good as the pages it is written from, so an ask
+retrieves exactly as `POST /v1/search` does: the planner's plan (or one
+supplied), the request's filters over the plan's, the search, and the
+reranker's order of the head. Those steps moved out of `internal/api` into
+`internal/retrieve`, unchanged, so the API, Ask and the evaluation run one
+copy; a search's rankings are unchanged (the regression below). An ask
+reads 30 deep, the reranker's whole head. Whether an ask reranks is
+`ask.rerank`, apart from `search.rerank`, which governs searches: the
+writer reads its sources itself, so the measurement decides whether it
+needs the reranker's order too; a request may say otherwise, and one that
+leaves it out gets the key's.
+
+### Sources
+
+The first readable hits of the applied ranking are the sources, up to
+`ask.sources` (6, by attempt 3's pick; 8 before): each its title (its
+own, else what it was saved as, else its host), the other titles it was
+saved as, its site, the day it was first saved (exact or approximate,
+never an import's stamp), its summary's about line, and the parts of its
+text nearest the question. A hit with neither a passage candidate nor a
+summary is passed over.
+
+**Passages chosen by the question.** The search's own best chunks were a
+source's passages, cut from their start to its share: about 750 bytes of
+a 2,244-byte median chunk at K 8, often mostly the tail the chunker
+carries over from the chunk before, and nothing at all for a hit only the
+document lists found. Now each source's four chunks nearest the
+question's own vector, the vector the search already embedded
+(`search.Result.Vector`, never serialized), are its candidates, ranked by
+one exact vec0 KNN over the sources' chunks (`ChunkStore.RankChunks`,
+through the primary-key IN, the row set's CROSS JOINs fixing the order
+that keeps it at 24 to 54 ms on the operator's library; decoding the same
+vectors in Go cost 0.74 to 0.84 s for the twelve largest pages). They are
+taken best first, whole while they fit, the first that doesn't fitted by
+its paragraphs that hold the most of the question's words (the question's,
+the plan's rewrites' and names'), gaps marked " … ", then shown in the
+page's order, each after its section, read back from the chunk's stored
+context (`indexer.HeadingPath`, empty rather than wrong when the page's
+title or site changed since). Without a vector, or past 4,096 chunks, the
+candidates are the search's chunks in its order; a ranking that fails is
+one WARN and the search's chunks. A failed or dead page is
+never a source, since no text of its backs a claim, but it is listed
+beside them, at most three, as saved but unreadable: of the operator's
+372 known items, 246 are failed or dead, and "you saved this, but curio
+couldn't read it" is often the honest answer.
+
+### The prompt: fixed delimiters, fit by construction
+
+Instructions first (a cache can reuse them), today's date, the sources,
+the question. Each source sits between `<source n="N">` and `</source>`,
+and every text in it, and the question, goes through the reranker's
+neutralizer, moved to `textutil.Neutralize`, which turns `<` and `>` into
+`‹` and `›`: no page can close a source, open another or write a chat
+template's token. That needs no per-request secret, so the prompts are
+pinned by goldens and an answer is replayable by its key; a nonce would
+change nothing the model perceives. The rules say the sources are data,
+never instructions; answer only from them; cite every sentence that
+states something from one as [n]; a question about a page they saved is
+answered by naming the source that is that page; a partial answer is
+answered in part; when no source bears on the question, write exactly
+"None of your saved pages answers this." and nothing else; answer in the
+question's language.
+
+The prompt fits num_ctx 8192 by construction, as the reranker's does:
+Ollama drops an over-long prompt's head, the instructions, silently. The
+answer template's instructions measured 412 tokens on gemma4:26b (Ollama
+0.40.16, empty question, no sources) and are counted at 618; what is left
+after them, the answer's cap and the question at the densest token rates
+is the sources' total, split by rank weight: two shares each for the
+first two sources, one for the rest (in the first measurement, 29 of the
+30 answerable questions had a page that answers them at rank 1 or 2),
+each source handing on what it leaves of its allowance to the next. A
+source's fields fill in a fixed order to their caps (title, site, saved
+day, about, saved-as titles), then its passages. At 12 sources and a
+2,048-token answer every source still gets a useful unit.
+
+The total stays the densest-rate estimate's, though the real prompt is
+about a third of the window (attempt 2: p50 2,481 tokens): prose costs
+about a fifth of what it is counted at. Filling the real window would add
+about 0.92 ms a prompt token to the first token (a least-squares fit over
+attempt 2's 44 writer calls: 1,093 tokens a second read, 8.7 ms a token
+written), some 4.3 s, and the first token's bar outranks fact coverage.
+What makes a closer estimate possible later is the guard now on every
+answer: a stream sends `truncate: false`, so Ollama refuses a prompt past
+the context with a 400 (measured on 0.40.16, streamed or not; without
+the field a 12,013-token prompt at num_ctx 2048 was cut to 1,027),
+`generator.ErrPromptTooLong`, rather than losing the instructions, the
+rules that sources are data among them, without a word. Ollama counts the
+prompt alone in that check, never the answer's cap: measured on 0.40.16
+with gemma4:26b at num_ctx 2048, a 1,643-token prompt with num_predict
+600 was accepted (and cut by the context after 402 tokens, `done_reason`
+length), a 2,153-token prompt refused. So no key shortens a refused
+prompt, which fills its context by construction: lowering `ask.max_tokens`
+would hand the sources more, and fewer `ask.sources` would hand each
+source more. The answer route asks once more without its last source,
+every other block as it was (rendering one source fewer would spread the
+last one's share over the rest); the retrieval event, sent before, still
+lists it, and the answer can't cite it. Refused again, or with one
+source, the ask ends `unavailable`, its reason saying the pages' text
+took more tokens than curio counts any text at, which no setting
+changes.
+The evidence judgment, a structured call carrying page text, sends it
+too (`generator.Options.RefuseLongPrompt`): a judgment refused so answers
+from the answer route's sources, as any failed judgment does, its
+evidence event saying the passages ran past the context. No other call
+sends the field, so the planner's, the reranker's, the summaries' and the
+labels' requests are as measured.
+
+The answer template asks for the specific facts the question asks
+(numbers, names, dates, places, causes) as the sources give them, each
+cited, and keeps to what was asked without leaving out any of them, in
+place of "Be concise.": attempt 2's answers were p50 51 tokens of a
+768-token cap, and fact coverage 0.188.
+
+### Citations and abstention
+
+Citations are read once the answer is written: `[n]`, `[n][m]`,
+`[n, m]`, ranges `[n-m]`; a number in range cites that source, one out of
+range is an invalid citation, reported and never linked; `[^1]`, a link's
+text and a reference definition are not citations. The abstention is one
+fixed English sentence, so code can tell it from an answer; a non-English
+question gets it in English, a known limit. An answer that cites nothing
+and doesn't abstain is marked uncited. The answer's text is never
+rewritten: a client that printed the stream stays consistent, and every
+marking is in the done event.
+
+### Statuses, time, the stream
+
+Every ask ends with a status: `answered`, `truncated`, `no_sources`,
+`off`, `withheld`, `unfit`, `timeout`, `unavailable`; only the caller's
+context, a refused request and a store failure are errors. A library with
+nothing fetched, a search that finds nothing, and one whose every page is
+unreadable answer `no_sources` without asking a model.
+
+An ask is a deliberate wait, unlike a search: the writer's gate gained
+`Await`, which waits out a cold load (10.7 s measured for gemma4:26b) and
+the fitness check, telling the client as progress events, by channels the
+gate's work closes, never by polling. The writer is awaited before
+retrieval, so with the default of one model for every role the load also
+warms the planner and the reranker. One answer is written at a time, as
+the reranker's one rerank; a second waits, saying so, and a deadline met
+after a wait counts toward no timeout hold.
+
+An answer, an evidence judgment and the writer's fitness check hold the
+model for seconds, and Ollama runs a model's requests one at a time: a
+search's plan (5 s timeout) or rerank (7 s) asked meanwhile waits behind
+them, and three such timeouts in a row would hold the planner for 2
+minutes, doubling to 15, sending every search and ask to their words.
+Concurrent asks did it alone, each planning before it takes the writer's
+slot. So the daemon's gates share one record of every role's calls of
+each model, by base URL and model (`modelgate.Traffic`): the writer marks
+its slot (judgment and answer) and its check as long calls, and a plan or
+rerank that ran past its timeout while one held the model still answers
+`timeout`, so the search isn't held up longer, but counts toward no hold;
+a check whose probe ran out of time meanwhile is tried again a minute
+later rather than holding its feature. An answer cut by the ask's
+deadline while another role called the model counts toward no hold
+either.
+
+At most four asks are in flight or waiting at once (`maxAsks`): one
+answer is written at a time, and each waiting ask has planned its
+question already and holds a connection, so a fifth would only wait
+behind the others toward its own timeout, its plan adding to the model's
+queue. It is refused before anything is streamed, 503 with a
+`Retry-After` of 5 s, about one answer's time.
+
+`ask.timeout_seconds` (90) bounds the whole ask. `POST /v1/ask` streams
+NDJSON, one event a line, flushed: the dashboard can POST it with fetch,
+which EventSource can't, and the CLI and curl read it line by line. A
+refused request is a problem before a byte is streamed. The route extends
+its own write deadline to the ask's timeout and 10 s more through
+`http.ResponseController`, rather than raising the server-wide 2 minutes
+that protect every other route from a stuck client; the server's 30 s
+read timeout doesn't cancel a long handler's context on go1.27.4. After
+10 s without a line the last progress event is written again, so a client
+bounding its silence (the CLI at 30 s) outlasts a load or a check. A
+client that leaves cancels the ask, and closing the stream stops Ollama's
+generation: measured on 0.40.16, a request right after a cancelled
+900-token stream answered in 0.10 s. The first write or flush that fails
+(a client gone, or one reading too slowly for the write deadline) breaks
+the stream: no heartbeat writes to it again, the ask's next event fails
+with it, and the ask ends with a DEBUG line, not an ERROR, since nothing
+of the daemon's failed. The heartbeat's stop is deferred as well as
+called, so an ask that panics after the stream began stops it before
+net/http closes the connection: a beat after that would write to the
+closed connection from a goroutine no recover reaches. The stream's last line carries the
+prompt's token `context` array (11.8 KB at 2.2K prompt tokens, about 60 KB
+at a full context), so the generator reads lines of up to 1 MiB.
+
+### Routing, and the fixed plans
+
+A question is routed by its `mode`, else by rules over its words
+(`ask.RouteFor`), never by the plan's kind: the planner defines evidence
+as any page that answers a factual question and list as any topical one,
+so most ordinary questions would land in the wrong plan. Rules cost no
+model call, are the same every time, and leave the planner's prompt as
+measured. A word is a run of ASCII letters and digits, lowercased; the
+rules are English, and any other language takes the answer route. In
+order: **interests** when every word but the stopwords is about the
+person, saving, interests, change, time or quantity (number words and
+counts among them), one at least about saving or interests ("how many
+pages did I save in the last 3 months", "what was I into two years ago"),
+or when the person's saving of the library, or interest in a topic,
+changes over time whatever the topic: saving or bookmarking followed
+within three words by "about" and a topic or by the library's things
+("stuff", "pages", "links"), or an interest in a topic ("my interest in",
+"what was I into"), with a word of change ("how has my saving about
+cooking changed", "used to", "gone up") or an amount compared over a span
+("in which year did I save the most about…"); saving or bookmarking
+started or stopped ("when did I stop bookmarking…"); or the person's
+library named with a word of change right after it ("my bookmarking
+changed", "what I've saved shifted"); never a question about one page
+("the article I saved") nor one asking advice ("how much should I save",
+"how do I keep my focus"), which neither half takes; **evidence** on a
+claim cue ("is it true", "evidence", "debunked", "for and against", "the
+case that"), or a yes-or-no question that checks a claim ("does it
+actually…", "is the rule real", "is X faster than Y", but not "more than
+three", a count; "does what I saved show that…"); **list** on a cue for
+everything on a topic ("everything", "all my", "what have I saved about",
+"what have I got on", "anything on", "every article I have", "which pages
+have I saved", "show me the pages I saved about"); else **answer**. The
+lexicons are closed lists in `route.go`, written from plain English,
+made-up questions and a blind synthetic set, never from the question file
+the measurement reads.
+
+**The blind set.** Attempt 3 routed 1 of the 5 library questions to the
+interests. An agent that saw neither the rules nor any library wrote 160
+made-up questions labelled by route; its dev split (107: answer 34,
+evidence 20, interests 30, list 23, some marked as deliberate near misses)
+is in `internal/ask/testdata/routing-dev.yaml`, and `TestRouteFor_Dev`
+holds `RouteFor` to it; the held-out 53 were scored by another hand, the
+rules never seeing them. On the dev split the rules as attempt 3 ran them
+routed answer 34/34, evidence 11/20, interests 11/30 and list 12/23; the
+generalized rules route 34/34, 20/20, 29/30 and 23/23, every answer
+question still answered from its pages (a factual question sent to the
+interests would be answered from no page at all). The one miss is a
+misspelling ("intrests"): the lexicons read words as spelled. Two of the
+set's labels are judgement calls ("list everything I bookmarked about…
+last year", "show me the pages I saved about… in 2019", both list), which
+the general rules take as labelled; "what did I save about rust last
+month", the answer route's example before, now takes the list route, the
+same shape.
+
+**Everyday words.** The rules' second half first read any word of saving
+or interest (keep, read, post, area, focus, habit, mind, interest) beside
+a word of change, or an amount over time, so an independent check found 16
+of 46 made-up everyday questions sent to the interests, which answer from
+no page: "how do I keep my sourdough starter alive for more than a year",
+"how much should I save each month for a house", "did my interest rate go
+up last year", "how often should I post on my blog". It now takes the
+library's saving alone: "save on" is money's idiom ("save on taxes"),
+"about" before an amount is money's ("about 20 percent"), and "interest"
+counts only before "in". `TestRouteFor_Everyday` holds 87 made-up everyday
+questions about money, health, children, the home and work, every
+ambiguous word among them, to the answer route: the rules before the fix
+sent 39 of them to the interests, the fixed rules none. The dev split
+still routes 34/34, 20/20, 29/30 and 23/23.
+
+A question the rules send to the interests, asked with a filter other
+than the saved window, takes the answer route; mode interests with one is
+refused, naming it.
+
+**Evidence for a claim.** The question is retrieved as an answer's is,
+and the best passage (by the question's vector, fitted by its paragraphs
+to an even share of the judgment's prompt) of each of the first 20
+readable pages is judged against the claim in one structured call under
+the writer's slot, held through the answer, within half of what is left
+of the ask's time, its prompt refused rather than cut past the context,
+at most 768 tokens (about 65 a judgment with a
+200-character quote): each passage that supports or contradicts it, its
+side, and its own words that show it. The judgment decodes strictly (an
+unknown, case-variant or repeated key, a number out of range, a passage
+judged twice, a reply cut at its cap are each invalid), and a judgment
+whose quote, typography folded (whitespace, case, curly quotes, dashes),
+isn't in its passage is dropped: a model can invent a quote, not a match.
+The sides are the sources, supporting first, each with its quote, and the
+evidence answer cites both, saying plainly when a side has none. Nothing
+on either side ends `no_sources`; a judgment that fails (invalid, past its
+bound, unreachable, a provider without structured output) answers as the
+answer route does, the evidence event saying why. A judgment past its own
+bound counts toward no timeout hold: the bound is the route's.
+
+**How the interests changed** has no topic to search. The latest
+rebuild's documents are counted once each, on the day each was first
+saved (its earliest bookmark of a known date, in the person's zone), under
+its interest and that interest's area or under Unsorted, in the
+question's saved window (the plan's, the request's winning; every other
+dimension the plan set is dropped, saying why): `insight.Timeline`,
+pure, over one read (`InsightStore.RunSaves`), by quarter while the saves
+span at most 12 quarters, else by year, at most 25 periods, the 12 largest
+areas and 3 largest interests of each apart. Undated saves (2,228 of 5,329
+on the operator's library) are counted apart, never dropped. A rebuild
+that commits between the run read and the rows read prunes the run read,
+so the run is read again after them and the table read once more from the
+newer one, as the map does. The counts never depend on a model: the table
+is an event, each row the prompt shows marked T1… in its order, the
+undated count's mark last, so every figure the writer must state can be
+cited (marks for areas and interests alone left Unsorted and the undated
+count uncitable), and the model only describes it: in a few sentences,
+the main shifts alone, since asked to describe the shifts, attempt 3's one
+interests answer ran to the 768-token cap going through every row. The
+table fills its prompt by priority (the areas, the other areas and
+Unsorted before any interest), the undated count always shown, and an
+all-undated table names no period. How the table and the list's groups
+are laid into their prompts (`tableRules`, `groupRules`) is hashed into
+`PromptVersion` beside the sources' `renderRules`, each pinned by a
+golden: a change to them changes what every such answer reads. A library not grouped yet is
+said so before the writer is awaited. `GET /v1/interests/timeline` serves
+the same table, and so curio-mcp's `saves_over_time`, which asks no model.
+
+**Everything on a topic** groups the ranking's first 50 hits (10 when the
+ranking is by meaning alone, since past the first few a wordless ranking
+is the library, not the topic), failed and dead ones included, by the
+interest the latest rebuild put each in (`InsightStore.RunInterestsOf`,
+the run re-read as above), the most first, Unsorted and hits outside the
+rebuild last, one group "not grouped yet" before any rebuild. The model
+writes an overview from the groups' names, sizes and first titles, citing
+them as [G1], and the groups follow the answer.
+
+### MCP: retrieval without curio's models
+
+`search_bookmarks` still never asks curio's models: the caller's own
+`rewrites` and `names` go as the plan the caller wrote (kind `list`,
+which routes only a rerank the tool never asks for, and no filters), and
+search hits carry their summary's `about` line, a response field rather
+than a request flag so a newer sidecar works with a daemon not yet
+restarted, fenced and marked `derived_untrusted`.
+
+### Measured: four bars missed or met at the edge, stated plainly
+
+On the data the bars name, `make ask-eval`, the judge gemma4:12b (every
+answer judged), gemma4:26b as writer, planner and reranker, all three
+passing their checks, 40 questions:
+
+| | attempt 1 | attempt 2 | bar |
+|---|---|---|---|
+| citation validity | 1.000 | 1.000 | 1.000 |
+| citation support | 0.994 | 0.990 | ≥ 0.85 |
+| claims cited | 0.967 | 0.961 | ≥ 0.90 |
+| source recall | 0.733 | 0.800 | ≥ 0.80 |
+| fact coverage | 0.156 | 0.188 | (none) |
+| abstention | 1.000 | 1.000 | ≥ 0.75 |
+| false abstention | 0.314 | 0.257 | ≤ 0.15 |
+| routing | 0.625 | 0.625 | ≥ 0.90 |
+| first token p50 / p95 | 6.5 / 8.1 s | 6.9 / 8.6 s | p50 ≤ 6 s |
+| total p50 / p95 | 6.9 / 9.3 s | 7.6 / 9.9 s | ≤ 20 / 40 s |
+
+Retrieval put the page every answerable question lists among its sources,
+at rank 1 or 2 almost always; the first attempt's misses were the
+writer's: 6 of the 30 answerable questions outside the library kind
+abstained with their page in front of it, 5 of them a page the person
+remembers, which the rules gave no answer but the abstention. The one
+change spent (attempt 2) told the writer that such a question is answered
+by naming the source that is that page, and that a partial answer is
+answered in part: source recall reached its bar and false abstention fell
+to 4 of those 30 (0.133). The rest of it is the five library questions,
+which only the interests plan (deferred at the time) answers, as
+routing's 0.625 is the 15 questions that name a fixed plan. The first
+token misses by 0.9 s: it waits for the plan (about 1 s), the rerank (up
+to about 2.5 s) and the model's reading of the sources. The second change
+allowed wasn't spent: fewer sources would save the reading of a few
+hundred tokens, about half a second at the 1,250 tokens a second
+measured, not the second needed, and cost the answers drawn from several
+pages. Fact coverage, without a bar, is low because the answers are short
+and the judge strict.
+
+The judge is of the writer's own family, so a second judge of another,
+qwen3:4b-instruct, was asked the same prompt over attempt 2's answers
+(`JUDGE2`; the answers and the first judge's verdicts replayed from their
+books, so nothing else was asked again). By its verdicts, citation
+support is 0.907, claims cited 0.951 and fact coverage 0.258: the support
+bar holds under either judge. Against the first judge, raw agreement and
+Cohen's kappa are 0.831 and 0.650 on each sentence's claim and support
+label (130 sentences), 0.898 and 0.709 on the facts (128), and 0.827 and
+0.160 on the support of the 98 cited sentences both call a claim. That
+last kappa is low because the first judge called 96 of those 98
+supported, so chance alone agrees most of the time: every disagreement is
+the second judge's "partly" (16) or "uncited" (1) where the first said
+supported, and neither judge called any cited claim unsupported by its
+sources. The first judge is the lenient one; 0.990 and 0.907 bracket
+citation support as measured.
+
+A live smoke on a scratch daemon over the same copy: five made-up
+questions answered through `curio ask`, the first token 2.6 to 7.4 s from
+the client (7.4 s for the first ask after the start, its planner still
+being checked) and the whole 2.7 to 9.0 s; a Ctrl-C mid-answer exited 130,
+and the next ask's first token came 1.0 s later, the generation stopped;
+no WARN or ERROR in the daemon's log; Ollama held the writer and the
+embedder after, nothing evicted. gemma4:26b passed the writer's three
+probes. Search is unchanged: on fresh copies, all 50 graded queries rank
+the same under hybrid and planned (the 2.7 plans replayed), and all 372
+known items under hybrid, against origin/main's tool.
+
+#### Attempt 3: every bar met, by D
+
+Under the amendment above (committed before any report of it), on fresh
+copies of the same database, config.yaml as before, `TODAY=` 2026-11-03,
+each variant its own run asking the writer and the first judge (gemma4:12b),
+then a replay of its books asking the second (qwen3:4b-instruct). A first
+run that asked all three models at once was discarded: Ollama evicted the
+writer twice for the judges, and the eviction hold left the rest of the
+run unanswered. Every model's fitness check passed, the writer's three
+probes on the new answer prompt among them. D ran because B missed the
+first token's bar by 0.13 s.
+
+| | A | B | C | D | bar |
+|---|---|---|---|---|---|
+| citation validity | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
+| citation support (second judge) | 0.989 (0.928) | 0.988 (0.946) | 0.987 (0.918) | 0.989 (0.915) | ≥ 0.85 |
+| claims cited (second judge) | 0.913 (0.924) | 0.924 (0.918) | 0.937 (0.902) | 0.957 (0.940) | ≥ 0.90 |
+| source recall | 0.733 | 0.800 | 0.833 | 0.867 | ≥ 0.80 |
+| abstention | 1.000 | 1.000 | 1.000 | 1.000 | ≥ 0.75 |
+| false abstention | 0.200 | 0.171 | 0.143 | 0.143 | ≤ 0.15 |
+| routing | 0.900 | 0.900 | 0.900 | 0.900 | ≥ 0.90 |
+| first token p50 / p95 | 6.9 / 8.6 s | 6.1 / 8.5 s | 4.1 / 6.1 s | 3.9 / 6.1 s | p50 ≤ 6 s |
+| total p50 / p95 | 7.3 / 10.0 s | 6.5 / 9.8 s | 4.7 / 7.6 s | 4.8 / 7.7 s | ≤ 20 / 40 s |
+| fact coverage, first / second / mean | 0.172 / 0.250 / 0.211 | 0.297 / 0.258 / 0.278 | 0.273 / 0.274 / 0.274 | 0.320 / 0.290 / 0.305 | (tie-break) |
+| bars missed | 3 | 2 | 0 | 0 | |
+
+Per stage, p50 / p95 in ms over the asks each ran in (A's are attempt 2's
+recorded timings for its 29 answer-route questions, its stages measured on
+the 11 asked live alone):
+
+| stage | B | C | D |
+|---|---|---|---|
+| plan | 909 / 1159 | 1062 / 1617 | 1032 / 1721 |
+| search | 275 / 533 | 282 / 490 | 290 / 484 |
+| rerank | 2858 / 3781 | (off) | (off) |
+| sources | 44 / 60 | 41 / 53 | 41 / 52 |
+| judge (6 evidence asks) | 3089 / 3981 | 3067 / 4410 | 3103 / 4623 |
+| prompt evaluation | 1817 / 2176 | 1919 / 3224 | 1768 / 2920 |
+| answer prompt, tokens | 2403 / 2849 | 2455 / 2773 | 2421 / 2838 |
+| answer, tokens | 90 / 275 | 83 / 266 | 90 / 325 |
+
+**The pick is D**: C and D pass every bar as written, and D's facts are
+the higher (0.305 against 0.274), so `ask.rerank` defaults to false and
+`ask.sources` to 6. The rerank was the first token's largest stage (2.9 s
+at p50) and bought nothing the writer needed: without it recall, claims
+cited and false abstention all improved. The passages chosen by the
+question and the prompt that asks for the facts raised fact coverage from
+A's 0.211 to B's 0.278 at the same rerank, and six sources to 0.305; the
+real prompt stayed where it was (p50 about 2,400 tokens). The judges agree
+as before: on D, raw agreement and kappa 0.839 and 0.581 on each
+sentence's label (155), 0.927 and 0.828 on the facts (124), 0.864 and
+0.161 on the support of the cited claims both call one (125), the first
+judge again the lenient one.
+
+Stated plainly: routing reaches its bar at 0.900, but the word rules send
+only 1 of the 5 library questions to the interests route, and the other 4,
+answered from a search, abstain, which is 4 of D's 5 false abstentions;
+the lexicons were written from plain English and made-up questions, and
+weren't fitted to the question file afterwards. The one question the
+interests route answered ran to the 768-token cap describing its table
+(marked truncated). Search is unchanged: on fresh copies, all 50 graded
+queries rank the same under hybrid and planned (the 2.7 plans replayed),
+and all 372 known items under hybrid, against origin/main's tool.
+
+#### Attempt 4: the confirmation, every bar met
+
+Under the amendment above (committed before any report of it), one run of
+the `ask` variant on a fresh copy, D's config, `TODAY=` 2026-11-03, the
+writer and the first judge asked, then the books replayed for the second
+judge. Every model passed its check, and Ollama evicted none.
+
+| | attempt 3, D | attempt 4 | bar |
+|---|---|---|---|
+| citation validity | 1.000 | 1.000 | 1.000 |
+| citation support (second judge) | 0.989 (0.915) | 0.985 (0.869) | ≥ 0.85 |
+| claims cited (second judge) | 0.957 (0.940) | 0.957 (0.940) | ≥ 0.90 |
+| source recall | 0.867 | 0.867 | ≥ 0.80 |
+| abstention | 1.000 | 1.000 | ≥ 0.75 |
+| false abstention | 0.143 | 0.057 | ≤ 0.15 |
+| routing | 0.900 | 0.975 | ≥ 0.90 |
+| first token p50 / p95 | 3.9 / 6.1 s | 4.1 / 6.9 s | p50 ≤ 6 s |
+| total p50 / p95 | 4.8 / 7.7 s | 5.1 / 8.1 s | ≤ 20 / 40 s |
+| fact coverage, first / second / mean | 0.320 / 0.290 / 0.305 | 0.344 / 0.298 / 0.321 | (none) |
+
+By kind, by the first judge (attempt 3's D, then attempt 4):
+
+| kind | n | support | cited | recall | false abstention | routing | facts |
+|---|---|---|---|---|---|---|---|
+| one | 12 | 0.986, 0.986 | 1.000, 1.000 | 0.833, 0.833 | 0.083, 0.083 | 1.000, 1.000 | 0.370, 0.370 |
+| multi | 8 | 0.991, 0.991 | 0.982, 0.982 | 1.000, 1.000 | 0.000, 0.000 | 1.000, 1.000 | 0.438, 0.438 |
+| evidence | 6 | 0.962, 0.962 | 0.867, 0.867 | 0.667, 0.667 | 0.000, 0.000 | 1.000, 1.000 | 0.182, 0.182 |
+| library | 5 | 1.000, 0.974 | 0.941, 0.950 | (none) | 0.800, 0.200 | 0.200, 0.800 | 0.133, 0.333 |
+| list | 4 | 1.000, 1.000 | 0.875, 0.875 | 1.000, 1.000 | 0.000, 0.000 | 1.000, 1.000 | 0.500, 0.500 |
+| unanswerable | 5 | (none) | (none) | (none) | (none) | 1.000, 1.000 | (abstention 1.000, 1.000) |
+
+Per stage, p50 / p95 in ms: plan 1078 / 1720, search 283 / 797, sources
+42 / 64, judgment (6 evidence asks) 2964 / 4137, prompt evaluation 1868 /
+3240; the answer prompt 2421 / 2995 tokens, the answer 109 / 319.
+
+What moved is the library questions: the generalized rules route 4 of the
+5 to the interests (1 in attempt 3), so false abstention falls from 5 of
+35 answerable questions to 2 and routing rises to 0.975; the interests'
+four answers ran 120 to 240 tokens, none cut (attempt 3's one ran to its
+768-token cap), and the library kind's facts rose from 0.133 to 0.333.
+The other 36 answers are word for word attempt 3's. The first token's
+p50 is 0.2 s slower, within the bar by 1.9 s. Stated plainly, the second
+judge's citation support fell from 0.915 to 0.869, still over its bar of
+0.85, all of it on the interests' answers: of their 19 cited sentences it
+called 7 supported, 8 partly and 2 unsupported by the rows they cite
+(the first judge 0.974 on that kind), while its labels on every other
+kind are attempt 3's. The two judges agree less on each sentence's label
+(raw 0.781 and kappa 0.480 over 155, against 0.839 and 0.581), as before
+on the facts (0.911 and 0.796 over 124) and on the cited claims' support
+(0.802 and 0.152 over 126; the first judge again the lenient one).
+Nothing was tuned after the run. Search is unchanged after the last code
+change of the round: on fresh copies, all 50 graded queries rank the same
+under hybrid and planned (the 2.7 plans replayed), and all 372 known items
+under hybrid, against origin/main's tool.
+
+#### After the routing fix: one question asked again, the rest replayed
+
+After attempt 4, an independent check found the routing rules' second half
+sending made-up everyday questions to the interests (see "Routing, and the
+fixed plans", everyday words), and the fix holds it to the library's
+saving, for that reason alone, never for a question of the file. Routed by
+the fixed rules, 1 of the 40 questions takes another route than in attempt
+4: a library question the interests answered takes the answer route; the
+other 39 route as before. Routing is no part of the prompts, so
+`PromptVersion` is attempt 4's. Attempt 4 was replayed from its books, the
+answers and both judges' verdicts, with recording on and the changed
+question's ask left out of the answer book, so that it alone was asked
+live: gemma4:26b planning and writing and gemma4:12b judging, then
+qwen3:4b-instruct in a second pass that replayed the rest, every model
+passing its check and unloaded after. The other 39 answers, verdicts and
+timings are attempt 4's, replayed.
+
+| | attempt 4 | after the routing fix | bar |
+|---|---|---|---|
+| citation validity | 1.000 | 1.000 | 1.000 |
+| citation support (second judge) | 0.985 (0.869) | 0.985 (0.888) | ≥ 0.85 |
+| claims cited (second judge) | 0.957 (0.940) | 0.963 (0.945) | ≥ 0.90 |
+| source recall | 0.867 | 0.867 | ≥ 0.80 |
+| abstention | 1.000 | 1.000 | ≥ 0.75 |
+| false abstention | 0.057 | 0.086 | ≤ 0.15 |
+| routing | 0.975 | 0.950 | ≥ 0.90 |
+| first token p50 / p95 | 4.1 / 6.9 s | 4.1 / 6.9 s | p50 ≤ 6 s |
+| total p50 / p95 | 5.1 / 8.1 s | 5.0 / 8.1 s | ≤ 20 / 40 s |
+| fact coverage, first / second / mean | 0.344 / 0.298 / 0.321 | 0.336 / 0.298 / 0.317 | (none) |
+
+Every bar is still met. Stated plainly, the fix costs one library
+question: answered from its search, it abstained, as the library questions
+did before the interests route took them, so false abstention rises from 2
+of 35 answerable questions to 3 and routing falls to 0.950; the library
+kind's routing falls from 0.800 to 0.600, its false abstention rises from
+0.200 to 0.400 and its facts fall from 0.333 to 0.267. The second judge's
+citation support rises to 0.888 with one interests answer fewer for it to
+read. The judges agree on each sentence's label at raw 0.800 and kappa
+0.512 (150 sentences), on the facts at 0.919 and 0.813 (124), and on the
+cited claims' support at 0.826 and 0.180 (121).
+
+### Known limits
+
+- Routing reads English: a question in another language is answered from
+  its search whatever it asks, and the rules miss phrasings outside their
+  lexicons (a claim without a cue word takes the answer route), and a
+  misspelled word reads as a topic. With a topic, the interests take a
+  change in the saving of the library only in words of saving and
+  bookmarking, so "how has my reading about pottery changed" is answered
+  from its search, the price of "how often should I read to my toddler"
+  staying there too.
+- The interests route could write past `ask.max_tokens` describing a long
+  table: the one library question it answered in attempt 3 was cut at
+  768 tokens, marked truncated. Its prompt now asks for the main shifts
+  in a few sentences, and attempt 4's four interests answers ran 120 to
+  240 tokens.
+- The first ask after a daemon start can search its question's words
+  alone: it waits for its own writer, but the planner's and the reranker's
+  once-a-process checks run in the background meanwhile, and a search
+  never waits.
+- The abstention is one English sentence, whatever the question's
+  language.
+- A client that stops reading stalls its answer's writes, and the answer's
+  pieces are written from inside the loop that reads Ollama's stream. Two
+  bounds hold it, so no buffer between them was added: the stream's idle
+  bound (30 s) counts while a write blocks, and running past it closes
+  Ollama's request, freeing its runner (`TestGenerateStream_EmitBlocksPastIdle`);
+  the handler's write ends at its deadline, `ask.timeout_seconds` and 10 s
+  more. On loopback the sockets' buffers usually hold a whole answer at
+  the default cap before any write blocks at all.
+- An answer holds the model's one slot in Ollama for its whole length, so
+  a search planned meanwhile waits behind it, and may run past its
+  planner's timeout and search its words; such timeouts don't count
+  toward holding the planner or the reranker.
+- No tier's model below gemma4:26b was measured on the questions as the
+  answer writer, so Ask is off by default on those tiers; each passes the
+  fitness check, which `ask.enabled: true` relies on.
+- The prompt's sources are cut at the densest token rates, as the
+  reranker's: prose costs about a fifth of what it is counted at, so a
+  source is shown far less of its page than the context would hold. It is
+  what makes the prompt fit by construction, and what keeps the first
+  token within its bar.
+
+### Going back
+
+Remove the `ask` section and `generation.roles.answers` from config.yaml
+before running 2.9: an older curio refuses keys and roles it doesn't know.
+Nothing is stored for Ask: no migration, no new table.
+
+### Open items
+
+- "Old ideas worth revisiting", and conversation (a follow-up keeping the
+  last answer's sources).
+- The tiers below gemma4:26b as answer writers, and a token estimate
+  closer to prose, measured, so a source is shown more of its page: the
+  truncate guard, on the answer's stream and the evidence judgment alike,
+  is its prerequisite, and the first token's cost of a fuller prompt its
+  measure.
+- The dashboard's Ask mode, on `/v1/ask` (PR 7).
+
 ## Open questions
 
 Choices still open. Those settled since this list was started are at its

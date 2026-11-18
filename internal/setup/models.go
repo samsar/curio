@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/samsar/curio/internal/ask"
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/ollama"
 	"github.com/samsar/curio/internal/rerank"
@@ -40,13 +41,15 @@ type wanted struct {
 // withholders say, for each role whose requests carry the user's own
 // content, why none may go where its model runs ("" when they may): the
 // questions a search sends the planner, the pages the summaries send
-// theirs; and for the reranker, also why no search would be reranked
-// (rerank.Options.Held: it reranks only understood searches). A withheld
-// role's model would write nothing, so it is neither pulled nor offered.
+// theirs, the questions and pages an ask sends the answers'; and for the
+// reranker, also why no search would be reranked (rerank.Options.Held: it
+// reranks only understood searches). A withheld role's model would write
+// nothing, so it is neither pulled nor offered.
 var withholders = map[config.Role]func(config.Config) string{
 	config.RolePlanner:   func(c config.Config) string { return understand.OptionsFrom(c).Withheld },
 	config.RoleSummaries: func(c config.Config) string { return summarize.OptionsFrom(c).Withheld },
 	config.RoleReranker:  func(c config.Config) string { return rerank.OptionsFrom(c).Held() },
+	config.RoleAnswers:   func(c config.Config) string { return ask.OptionsFrom(c).Withheld },
 }
 
 // picks are the models the home needs: the embedding model always, and
@@ -121,7 +124,9 @@ func (w *world) pick(ctx context.Context, hs homeState) (picks, error) {
 		p.notes = append(p.notes, "no writing model is pulled: no role writes with one "+
 			"(interest labels are off with insight.enabled false or insight.labeling not llm, "+
 			"search understanding with search.understand false, document summaries unless summaries.enabled is true, "+
-			"search reranking unless search.rerank is true, or left out for a model measured as the reranker)")
+			"search reranking unless search.rerank is true, or left out for a model measured as the reranker, "+
+			"and answers to questions unless ask.enabled is true, or left out for a model measured as the "+
+			"answer writer)")
 		return p, nil
 	}
 	roles = slices.DeleteFunc(roles, func(r config.Role) bool {
@@ -365,6 +370,7 @@ var withoutModel = map[config.Role]struct{ uses, without, off string }{
 	config.RoleSummaries: {"document summaries", "pages get no summary", "summaries.enabled: false to write none"},
 	config.RoleReranker: {"search reranking", "searches keep their first ranking",
 		"search.rerank: false to stop reranking"},
+	config.RoleAnswers: {"answers to questions", "curio ask answers nothing", "ask.enabled: false to answer none"},
 }
 
 // possessive is name's possessive: "search understanding's", "document

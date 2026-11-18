@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"encoding/binary"
@@ -882,7 +883,7 @@ func (s *Chunks) GetByIDs(ctx context.Context, ids []string) ([]*store.Chunk, er
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	q := `SELECT id, document_id, extraction_id, ord, text, token_count
+	q := `SELECT id, document_id, extraction_id, ord, text, token_count, context
 	      FROM chunks WHERE id IN (` + placeholders(len(ids)) + `)`
 	rows, err := s.db.QueryContext(ctx, q, appendArgs(nil, ids)...)
 	if err != nil {
@@ -896,7 +897,8 @@ func (s *Chunks) GetByIDs(ctx context.Context, ids []string) ([]*store.Chunk, er
 			c          store.Chunk
 			tokenCount sql.NullInt64
 		)
-		if err := rows.Scan(&c.ID, &c.DocumentID, &c.ExtractionID, &c.Ord, &c.Text, &tokenCount); err != nil {
+		if err := rows.Scan(&c.ID, &c.DocumentID, &c.ExtractionID, &c.Ord, &c.Text, &tokenCount,
+			&c.Context); err != nil {
 			return nil, fmt.Errorf("scan chunk: %w", err)
 		}
 		if tokenCount.Valid {
@@ -907,5 +909,89 @@ func (s *Chunks) GetByIDs(ctx context.Context, ids []string) ([]*store.Chunk, er
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("get chunks: %w", err)
 	}
+	return out, nil
+}
+
+// rankedChunkSet lists the chunks of the tenant's documents in a JSON
+// array, for RankChunks: driven from the array, each document by its
+// primary key, then its chunks by their document. The CROSS JOINs fix
+// that order; left to itself, the planner drives from the tenant's
+// documents (idx_documents_tenant_state_updated), measured two to three
+// times slower on the operator's library. Its args are the array and the
+// tenant.
+const rankedChunkSet = `SELECT c.id FROM json_each(?) j
+	CROSS JOIN documents d ON d.id = j.value AND d.tenant_id = ?
+	CROSS JOIN chunks c ON c.document_id = d.id`
+
+// rankChunksQuery is RankChunks' KNN: vec0 ranks the set's chunks alone,
+// k their count, and each is joined back to its chunk for its document
+// and position. Measured on the operator's library: 24 ms for 8 median
+// documents' chunks, 26 ms for 20 documents (412 chunks), 44 to 54 ms for
+// the 12 largest (3,725), against 0.74 to 0.84 s to decode those vectors
+// in Go.
+func rankChunksQuery(embedding []byte, k int, set rowSet) (string, []any) {
+	q := `
+	SELECT c.document_id, c.id, c.ord, k.distance
+	FROM (SELECT chunk_id, distance FROM chunks_vec
+	      WHERE embedding MATCH ? AND k = ? AND chunk_id IN (` + set.sql + `)) k
+	JOIN chunks c ON c.id = k.chunk_id`
+	return q, slices.Concat([]any{embedding, k}, set.args)
+}
+
+// RankChunks implements store.ChunkStore.
+func (s *Chunks) RankChunks(ctx context.Context, tenantID string, vector []float32, documentIDs []string) (
+	[]store.RankedChunk, error) {
+	if len(vector) != s.dim {
+		return nil, fmt.Errorf("rank chunks: embedding length %d != configured dim %d", len(vector), s.dim)
+	}
+	if len(documentIDs) == 0 {
+		return nil, nil
+	}
+	list, err := json.Marshal(documentIDs)
+	if err != nil {
+		return nil, fmt.Errorf("rank chunks: encode the documents: %w", err)
+	}
+	set := rowSet{sql: rankedChunkSet, args: []any{string(list), tenantID}}
+	q, args := set.countSQL()
+	var n int
+	if err := s.db.QueryRowContext(ctx, q, args...).Scan(&n); err != nil {
+		return nil, fmt.Errorf("rank chunks: count them: %w", err)
+	}
+	if n == 0 || n > vec0MaxK {
+		return nil, nil
+	}
+	serialized, err := sqlitevec.SerializeFloat32(vector)
+	if err != nil {
+		return nil, fmt.Errorf("rank chunks: serialize the vector: %w", err)
+	}
+	q, args = rankChunksQuery(serialized, n, set)
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("rank chunks: %w", err)
+	}
+	defer rows.Close()
+	var out []store.RankedChunk
+	for rows.Next() {
+		var c store.RankedChunk
+		if err := rows.Scan(&c.DocumentID, &c.ChunkID, &c.Ord, &c.Distance); err != nil {
+			return nil, fmt.Errorf("rank chunks: scan: %w", err)
+		}
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rank chunks: %w", err)
+	}
+	if len(out) == 0 {
+		if err := s.db.checkExactKNN(ctx, set, "chunk"); err != nil {
+			s.db.warnInconsistent("chunks_vec", err)
+			return nil, fmt.Errorf("rank chunks: %w", err)
+		}
+		return nil, nil
+	}
+	// The join keeps vec0's order in practice, which SQL doesn't promise;
+	// ties go to the chunk ID.
+	slices.SortStableFunc(out, func(a, b store.RankedChunk) int {
+		return cmp.Or(cmp.Compare(a.Distance, b.Distance), cmp.Compare(a.ChunkID, b.ChunkID))
+	})
 	return out, nil
 }

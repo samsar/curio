@@ -715,6 +715,23 @@ func searchFilterPlanCases(t *testing.T) []planCase {
 		want:  []string{"LIST SUBQUERY", tenantWalk, savedSeek, chunkSeek, "SEARCH c USING INDEX sqlite_autoindex_chunks_1 (id=?)"},
 		sorts: true, avoid: []string{"SCAN chunks", "SCAN d", "SCAN fc"}},
 		func() (string, []any) { return exactVectorQuery(queryVector(t), 800, chunkSet("local", saved)) })
+	// An ask's sources' chunks, ranked by the question's vector: driven
+	// from the array, each document by its key and its chunks by their
+	// document, never a walk of the tenant's documents.
+	ranked := rowSet{sql: rankedChunkSet, args: []any{`["a","b"]`, "local"}}
+	rankedWalk := []string{"SCAN j VIRTUAL TABLE INDEX", document}
+	add(planCase{name: "RankChunks count", first: "SCAN j VIRTUAL TABLE INDEX",
+		want:  append(rankedWalk, "SEARCH c USING COVERING INDEX idx_chunks_document (document_id=?)"),
+		avoid: []string{anyTenant, "SCAN d"}},
+		ranked.countSQL)
+	add(planCase{name: "RankChunks", first: "SCAN chunks_vec VIRTUAL TABLE INDEX 0:3{___}___[___",
+		want: append(rankedWalk, "LIST SUBQUERY", "SEARCH c USING INDEX idx_chunks_document (document_id=?)",
+			"SEARCH c USING INDEX sqlite_autoindex_chunks_1 (id=?)"),
+		avoid: []string{anyTenant, "SCAN d"}},
+		func() (string, []any) { return rankChunksQuery(queryVector(t), 10, ranked) })
+	add(planCase{name: "RankChunks, its check", want: append(rankedWalk, "SEARCH c USING INDEX idx_chunks_document"),
+		avoid: []string{anyTenant, "SCAN d"}},
+		ranked.existsSQL)
 	add(planCase{name: "VectorSearch exact, its check", want: []string{tenantWalk, savedSeek, chunkSeek},
 		avoid: []string{"SCAN d", "SCAN fc"}},
 		func() (string, []any) { return chunkSet("local", saved).existsSQL() })
@@ -1367,6 +1384,31 @@ func insightPlanCases() []planCase {
 			first: "SEARCH p USING INDEX sqlite_autoindex_interest_placements_1 (run_id=?)",
 			want:  []string{"SEARCH d USING INDEX sqlite_autoindex_documents_1 (id=?)", untitledBookmarkTitle},
 			avoid: []string{"SCAN d", "idx_documents_tenant_", "idx_bookmarks_tenant_"},
+		},
+		{
+			// A run's documents, from its assignments and placements by
+			// run, each one's group and earliest dated bookmark by their
+			// keys.
+			name: "RunSaves", query: runSavesSQL, args: []any{"run", "local", store.SavedDateUnknown},
+			want: []string{
+				"SEARCH a USING COVERING INDEX idx_interest_assignments_list (run_id=?)",
+				"SEARCH p USING INDEX idx_interest_placements_list (run_id=?)",
+				"SEARCH g USING INDEX sqlite_autoindex_interest_groups_1 (run_id=? AND interest_id=?) LEFT-JOIN",
+				"CORRELATED SCALAR SUBQUERY",
+				"SEARCH b USING INDEX idx_bookmarks_document (document_id=?)",
+			},
+			avoid: []string{"SCAN a", "SCAN p", "SCAN b", "idx_bookmarks_tenant_"},
+		},
+		{
+			// Each document of the array in the run's assignments and
+			// placements, and its interest's group, by their primary keys.
+			name: "RunInterestsOf", query: runInterestsOfSQL, args: []any{"run", `["a","b"]`},
+			first: "SCAN j VIRTUAL TABLE INDEX",
+			want: []string{
+				"SEARCH a USING INDEX sqlite_autoindex_interest_assignments_1 (run_id=? AND document_id=?) LEFT-JOIN",
+				"SEARCH p USING INDEX sqlite_autoindex_interest_placements_1 (run_id=? AND document_id=?) LEFT-JOIN",
+				"SEARCH g USING INDEX sqlite_autoindex_interest_groups_1 (run_id=? AND interest_id=?) LEFT-JOIN",
+			},
 		},
 		{
 			// Each document of the array in the run's assignments and

@@ -1,8 +1,10 @@
 package sqlite
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"maps"
 	"math"
 	"slices"
@@ -1154,4 +1156,100 @@ func TestSampleChunks_Refusals(t *testing.T) {
 	require.Error(t, err, "a tenant is required")
 	_, err = l.chunks.SampleChunks(context.Background(), "local", store.ChunkSample{Random: -1})
 	require.Error(t, err, "SQLite would read a negative LIMIT as none")
+}
+
+// TestChunks_RankChunks: the listed documents' chunks, and theirs alone,
+// ranked by their vectors' distance, nearest first, whatever the order
+// the documents are listed in; another tenant's document lists nothing,
+// and a listed chunk without a vector is the index's inconsistency,
+// warned of once.
+func TestChunks_RankChunks(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	var logged bytes.Buffer
+	db.SetLog(slog.New(slog.NewTextHandler(&logged, nil)))
+	ch := NewChunks(db, vecDim)
+	ids := seedDocs(t, db, "local", "https://example.com/a", "https://example.com/b", "https://example.com/c")
+	other := seedDocs(t, db, "elsewhere", "https://example.org/x")[0]
+	write := func(id string, values ...float32) {
+		inputs := make([]store.ChunkInput, len(values))
+		for i, v := range values {
+			inputs[i] = store.ChunkInput{Text: fmt.Sprintf("chunk %d", i), Embedding: fillVec(v)}
+		}
+		require.NoError(t, ch.ReplaceForDocument(ctx, id, latestExtractionID(t, db, id), "", nil, inputs))
+	}
+	write(ids[0], 0.9, 0.2)
+	write(ids[1], 0.5)
+	write(ids[2], 0.1)
+	write(other, 0.2)
+
+	got, err := ch.RankChunks(ctx, "local", fillVec(0.2), []string{ids[1], other, ids[0]})
+	require.NoError(t, err)
+	type ranked struct {
+		doc string
+		ord int
+	}
+	order := make([]ranked, 0, len(got))
+	for i, c := range got {
+		order = append(order, ranked{c.DocumentID, c.Ord})
+		if i > 0 {
+			assert.GreaterOrEqual(t, c.Distance, got[i-1].Distance)
+		}
+	}
+	assert.Equal(t, []ranked{{ids[0], 1}, {ids[1], 0}, {ids[0], 0}}, order,
+		"nearest first, another tenant's and an unlisted document's left out")
+
+	none, err := ch.RankChunks(ctx, "local", fillVec(0.2), []string{other})
+	require.NoError(t, err)
+	assert.Nil(t, none, "another tenant's document lists no chunk")
+
+	_, err = db.Exec(`DELETE FROM chunks_vec WHERE chunk_id IN (SELECT id FROM chunks WHERE document_id = ?)`, ids[1])
+	require.NoError(t, err)
+	for range 2 {
+		_, err = ch.RankChunks(ctx, "local", fillVec(0.2), []string{ids[0], ids[1]})
+		require.ErrorIs(t, err, store.ErrVectorIndexInconsistent)
+	}
+	assert.Equal(t, 1, strings.Count(logged.String(), "level=WARN"), "warned once")
+
+	_, err = ch.RankChunks(ctx, "local", fillVec(0.2)[:3], ids)
+	require.Error(t, err, "a vector of another width")
+}
+
+// TestChunks_RankChunks_Bound: documents holding more chunks than one KNN
+// ranks are ranked by nobody: nil, and no error.
+func TestChunks_RankChunks_Bound(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	ch := NewChunks(db, vecDim)
+	id := seedDocs(t, db, "local", "https://example.com/long")[0]
+	inputs := make([]store.ChunkInput, store.MaxRankedChunks+1)
+	for i := range inputs {
+		inputs[i] = store.ChunkInput{Text: fmt.Sprintf("chunk %d", i), Embedding: fillVec(float32(i%7) / 7)}
+	}
+	require.NoError(t, ch.ReplaceForDocument(ctx, id, latestExtractionID(t, db, id), "", nil, inputs))
+	got, err := ch.RankChunks(ctx, "local", fillVec(0.1), []string{id})
+	require.NoError(t, err)
+	assert.Nil(t, got)
+}
+
+// TestChunks_GetByIDs_Context: a chunk reads back the context it was
+// embedded with.
+func TestChunks_GetByIDs_Context(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+	ch := NewChunks(db, vecDim)
+	id := seedDocs(t, db, "local", "https://example.com/ctx")[0]
+	require.NoError(t, ch.ReplaceForDocument(ctx, id, latestExtractionID(t, db, id), "", nil, []store.ChunkInput{
+		{Text: "a", Context: "Title — example.com — Setup", ContextVersion: 1, Embedding: fillVec(0.1)},
+		{Text: "b", Embedding: fillVec(0.2)}}))
+	got, err := ch.RankChunks(ctx, "local", fillVec(0.1), []string{id})
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	chunks, err := ch.GetByIDs(ctx, []string{got[0].ChunkID, got[1].ChunkID})
+	require.NoError(t, err)
+	contexts := map[string]string{}
+	for _, c := range chunks {
+		contexts[c.Text] = c.Context
+	}
+	assert.Equal(t, map[string]string{"a": "Title — example.com — Setup", "b": ""}, contexts)
 }

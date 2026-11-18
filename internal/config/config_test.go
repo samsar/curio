@@ -531,8 +531,10 @@ func TestValidate_OneZeroWeightIsAllowed(t *testing.T) {
 }
 
 // TestDefault_Roles: without generation.roles, every role writes with
-// generation's own settings; the labels and the planner are in use, and
-// the summaries only once summaries.enabled is true, whatever the model.
+// generation's own settings; the labels and the planner are in use, the
+// summaries only once summaries.enabled is true, whatever the model, and
+// the answers and the reranker by default only for a model measured in
+// them.
 func TestDefault_Roles(t *testing.T) {
 	d := Default()
 	assert.Nil(t, d.Generation.Roles)
@@ -541,19 +543,26 @@ func TestDefault_Roles(t *testing.T) {
 	assert.Equal(t, want, d.Generation.Role(RoleLabels))
 	assert.Equal(t, want, d.Generation.Role(RolePlanner))
 	assert.Equal(t, want, d.Generation.Role(RoleSummaries))
-	assert.Equal(t, []Role{RoleLabels, RolePlanner}, d.RolesInUse())
+	assert.Equal(t, want, d.Generation.Role(RoleAnswers))
+	assert.Equal(t, []Role{RoleLabels, RolePlanner}, d.RolesInUse(), "the answers off by default, unmeasured")
 	d.Generation.Model = "gemma4:26b"
-	assert.Equal(t, []Role{RoleLabels, RolePlanner}, d.RolesInUse(), "off by default for every model")
+	assert.Equal(t, []Role{RoleLabels, RolePlanner, RoleAnswers}, d.RolesInUse(),
+		"the answers on by default for gemma4:26b, the summaries off by default for every model")
 	d.Summaries.Enabled = new(true)
-	assert.Equal(t, []Role{RoleLabels, RolePlanner, RoleSummaries, RoleReranker}, d.RolesInUse(),
+	assert.Equal(t, []Role{RoleLabels, RolePlanner, RoleSummaries, RoleReranker, RoleAnswers}, d.RolesInUse(),
 		"the reranker on by default for gemma4:26b with the summaries")
 	d.Generation.Model = "qwen3:4b-instruct"
 	assert.Equal(t, []Role{RoleLabels, RolePlanner, RoleSummaries}, d.RolesInUse())
-	assert.Equal(t, []Role{RoleLabels, RolePlanner, RoleSummaries, RoleReranker}, Roles())
+	d.Ask.Enabled = new(true)
+	assert.Equal(t, []Role{RoleLabels, RolePlanner, RoleSummaries, RoleAnswers}, d.RolesInUse(), "ask.enabled: true")
+	d.Ask.Enabled = new(false)
+	assert.Equal(t, []Role{RoleLabels, RolePlanner, RoleSummaries}, d.RolesInUse(), "ask.enabled: false")
+	assert.Equal(t, []Role{RoleLabels, RolePlanner, RoleSummaries, RoleReranker, RoleAnswers}, Roles())
 	assert.Equal(t, "interest labels", RoleLabels.UsedFor())
 	assert.Equal(t, "search understanding", RolePlanner.UsedFor())
 	assert.Equal(t, "document summaries", RoleSummaries.UsedFor())
 	assert.Equal(t, "search reranking", RoleReranker.UsedFor())
+	assert.Equal(t, "answers to questions", RoleAnswers.UsedFor())
 	assert.Empty(t, Role("lables").UsedFor())
 }
 
@@ -603,6 +612,7 @@ func TestPullsAlone(t *testing.T) {
 	assert.False(t, RolePlanner.PullsAlone())
 	assert.False(t, RoleSummaries.PullsAlone())
 	assert.False(t, RoleReranker.PullsAlone())
+	assert.False(t, RoleAnswers.PullsAlone())
 	assert.False(t, Role("lables").PullsAlone())
 }
 
@@ -625,10 +635,14 @@ func TestSharesModel(t *testing.T) {
 
 	cfg = Default()
 	cfg.Insight.Labeling = "terms"
+	cfg.Ask.Enabled = new(false)
 	cfg.Summaries.Enabled = new(true)
 	assert.True(t, cfg.SharesModel(RolePlanner), "labels not in use, the summaries are")
 	cfg.Summaries.Enabled = new(false)
-	assert.False(t, cfg.SharesModel(RolePlanner), "neither labels nor summaries in use")
+	assert.False(t, cfg.SharesModel(RolePlanner), "neither labels, summaries nor answers in use")
+	cfg.Ask.Enabled = new(true)
+	assert.True(t, cfg.SharesModel(RolePlanner), "the answers are")
+	assert.True(t, cfg.SharesModel(RoleAnswers))
 }
 
 // TestKeepAliveOf_SharesModelShorter: the labels send no keep-alive, the
@@ -658,10 +672,14 @@ func TestKeepAliveOf_SharesModelShorter(t *testing.T) {
 	cfg = Default()
 	cfg.Insight.Labeling = "terms"
 	cfg.Search.Understand = false
+	cfg.Ask.Enabled = new(false)
 	cfg.Summaries.Enabled = new(true)
 	cfg.Search.Rerank = new(true)
 	cfg.Generation.Roles = map[Role]ModelSpec{RoleReranker: {Model: "gemma4:26b"}}
-	assert.Zero(t, cfg.KeepAliveOf(RoleSummaries), "no planner or reranker on its model")
+	assert.Zero(t, cfg.KeepAliveOf(RoleSummaries), "no planner, reranker or answers on its model")
+	cfg.Ask.Enabled = new(true)
+	assert.Equal(t, 30*time.Minute, cfg.KeepAliveOf(RoleSummaries), "the answers on its model")
+	cfg.Ask.Enabled = new(false)
 	cfg.Search.Understand = true
 	assert.False(t, cfg.SharesModelShorter(RolePlanner), "the summaries send the planner's keep-alive")
 	assert.False(t, cfg.SharesModelShorter(RoleReranker), "a model of its own")
@@ -820,11 +838,11 @@ func TestRolesInUse(t *testing.T) {
 		understand bool
 		want       []Role
 	}{
-		{"llm", true, "llm", true, []Role{RoleLabels, RolePlanner, RoleSummaries, RoleReranker}},
-		{"llm, no understanding", true, "llm", false, []Role{RoleLabels, RoleSummaries}},
-		{"insight off", false, "llm", true, []Role{RolePlanner, RoleSummaries, RoleReranker}},
-		{"term labels", true, "terms", true, []Role{RolePlanner, RoleSummaries, RoleReranker}},
-		{"no labels, no understanding", true, "off", false, []Role{RoleSummaries}},
+		{"llm", true, "llm", true, []Role{RoleLabels, RolePlanner, RoleSummaries, RoleReranker, RoleAnswers}},
+		{"llm, no understanding", true, "llm", false, []Role{RoleLabels, RoleSummaries, RoleAnswers}},
+		{"insight off", false, "llm", true, []Role{RolePlanner, RoleSummaries, RoleReranker, RoleAnswers}},
+		{"term labels", true, "terms", true, []Role{RolePlanner, RoleSummaries, RoleReranker, RoleAnswers}},
+		{"no labels, no understanding", true, "off", false, []Role{RoleSummaries, RoleAnswers}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := Default()
@@ -845,7 +863,7 @@ func TestLoad_RoleErrors(t *testing.T) {
 		name, yaml, want string
 	}{
 		{"an unknown role", "generation:\n  roles:\n    lables:\n      model: m:1\n",
-			`generation.roles: unknown role "lables"; the roles are: labels, planner, summaries, reranker`},
+			`generation.roles: unknown role "lables"; the roles are: labels, planner, summaries, reranker, answers`},
 		{"unknown roles, the first in order", "generation:\n  roles:\n    zeta: {}\n    alpha: {}\n",
 			`unknown role "alpha"`},
 		{"another provider", "generation:\n  roles:\n    labels:\n      provider: openai\n",

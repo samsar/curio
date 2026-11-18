@@ -816,6 +816,19 @@ type Chunk struct {
 	Ord          int
 	Text         string
 	TokenCount   int
+	// Context is what the chunk was embedded with besides its text
+	// (ChunkInput.Context), "" for a chunk embedded from its text alone.
+	Context string
+}
+
+// RankedChunk is a chunk ranked by its vector's distance to a query's
+// (RankChunks): its document, its position there, and the distance,
+// nearer first.
+type RankedChunk struct {
+	DocumentID string
+	ChunkID    string
+	Ord        int
+	Distance   float64
 }
 
 // ChunkInput is the writer-side struct for ReplaceForDocument. The store
@@ -1154,7 +1167,22 @@ type ChunkStore interface {
 	// chunk's ID at its position, so an ID retrieved before it reads the
 	// chunk now at that position.
 	GetByIDs(ctx context.Context, ids []string) ([]*Chunk, error)
+
+	// RankChunks ranks every chunk of the tenant's documents documentIDs
+	// by its vector's distance to vector, nearest first, exactly: one
+	// count, and one KNN of the listed chunks alone (vec0's primary-key
+	// IN), whatever the documents' states. It returns nil, and no error,
+	// when they hold more chunks than one KNN ranks (MaxRankedChunks) or
+	// none; ErrVectorIndexInconsistent when a listed chunk has no vector,
+	// which ranks none of them.
+	RankChunks(ctx context.Context, tenantID string, vector []float32, documentIDs []string) ([]RankedChunk, error)
 }
+
+// MaxRankedChunks is the most chunks RankChunks ranks at once: sqlite-vec's
+// largest k (v0.1.6: "k value in knn query too large"). Past it a
+// question's sources are a few very long pages, ranked as the search
+// found them.
+const MaxRankedChunks = 4096
 
 // DocumentHit is a document a document list found, with its score in
 // that list: higher is better, whatever the list, as for ChunkHit.
@@ -2157,6 +2185,26 @@ type InterestAssignment struct {
 	Map *MapPosition
 }
 
+// RunSave is a document of a run as its saves are counted: the interest
+// it is in ("" for Unsorted), that interest's area in the run ("" for
+// none), and when it was first saved, by its bookmarks of a known saved
+// date; zero when none has one.
+type RunSave struct {
+	DocumentID string
+	InterestID string
+	AreaID     string
+	SavedAt    time.Time
+}
+
+// DocumentInterest is where a run put a document: its interest ("" for
+// Unsorted, and for a document the run neither assigned nor placed), and
+// that interest's area in the run ("" for none).
+type DocumentInterest struct {
+	DocumentID string
+	InterestID string
+	AreaID     string
+}
+
 // LineageRow is what a run did to an old identity toward a new one: Shared
 // is how many of the old identity's members the new one holds.
 type LineageRow struct {
@@ -2396,6 +2444,18 @@ type InsightStore interface {
 	// or placed with a place on its map, each with the interest it is in
 	// ("" for Unsorted), in no particular order, in one read.
 	MapPositions(ctx context.Context, runID string, ids []string) ([]MapPlace, error)
+	// RunSaves returns every document of a run, those it assigned then
+	// those placed into it since, each once, with its interest ("" for
+	// Unsorted), that interest's area in the run ("" for none or a flat
+	// run) and when it was first saved: the earliest of the tenant's
+	// bookmarks of it whose saved date is known (exact or approx), zero
+	// for none. One read: the interests' timeline counts saves from it.
+	RunSaves(ctx context.Context, tenantID, runID string) ([]RunSave, error)
+	// RunInterestsOf returns, for each of ids in their order, the interest
+	// the run put the document in, assigned or placed since ("" for
+	// Unsorted and for a document outside the run), and that interest's
+	// area in the run ("" for none), in one read.
+	RunInterestsOf(ctx context.Context, runID string, ids []string) ([]DocumentInterest, error)
 	// RunLineage returns a run's lineage rows, by old identity, then new.
 	RunLineage(ctx context.Context, runID string) ([]LineageRow, error)
 	// Successors returns the run's lineage rows of the old identity oldID,

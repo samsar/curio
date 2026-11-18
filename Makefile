@@ -72,9 +72,9 @@ help:
 ## build: build curio, curio-daemon and curio-mcp into ./bin
 # Always runs go build: its cache decides what is stale, including the
 # migrations embedded from outside internal/. The three commands are named:
-# cmd/clusterreport, cmd/searcheval and cmd/plannercheck are developer's
-# tools (make cluster-report, search-eval, planner-check), never built
-# into ./bin or shipped.
+# cmd/clusterreport, cmd/searcheval, cmd/askeval and cmd/plannercheck are
+# developer's tools (make cluster-report, search-eval, ask-eval,
+# planner-check), never built into ./bin or shipped.
 .PHONY: build
 build:
 	@mkdir -p $(BIN_DIR)
@@ -136,6 +136,25 @@ cluster-report:
 search-eval:
 	@test -n "$(DB)" && test -n "$(QUERIES)" || { echo 'usage: make search-eval DB=<copy of curio.db> QUERIES=<file> [CONFIG=<config.yaml>] [JSON=<file>] [BASELINE=<previous JSON>] [VARIANTS=hybrid,bm25,vector,fields,cards,titles,summaries,planned,planned-filters,planned-rewrites,planned-names,hybrid-reranked,planned-reranked] [TODAY=YYYY-MM-DD] [PLANS=<previous JSON>] [REINDEX=1] [CONTENT=<dir>] [SUMMARIZE=1 [DOCUMENTS=<ids>] [SUMMARIES_OUT=<file>] | SUMMARIES=<file>] [RERANK_WITH=key=value,...] [RERANKS=<file>] [RERANKS_OUT=<file>]' >&2; exit 2; }
 	$(GO) run -tags=$(GOTAGS) -ldflags "$(LDFLAGS)" ./cmd/searcheval -db "$(DB)" -queries "$(QUERIES)" $(if $(CONFIG),-config "$(CONFIG)") $(if $(JSON),-json "$(JSON)") $(if $(BASELINE),-baseline "$(BASELINE)") $(if $(VARIANTS),-variants "$(VARIANTS)") $(if $(TODAY),-today "$(TODAY)") $(if $(PLANS),-plans "$(PLANS)") $(if $(REINDEX),-reindex) $(if $(CONTENT),-content "$(CONTENT)") $(if $(SUMMARIZE),-summarize) $(if $(DOCUMENTS),-documents "$(DOCUMENTS)") $(if $(SUMMARIES_OUT),-summaries-out "$(SUMMARIES_OUT)") $(if $(SUMMARIES),-summaries "$(SUMMARIES)") $(if $(RERANK_WITH),-rerank-with "$(RERANK_WITH)") $(if $(RERANKS),-reranks "$(RERANKS)") $(if $(RERANKS_OUT),-reranks-out "$(RERANKS_OUT)")
+
+## ask-eval: score curio ask on a copy of a home's database against a question file (DB=<copy> QUESTIONS=<file> [CONFIG=<config.yaml>] [JSON=<file>] [ANSWERS=<book>] [ANSWERS_OUT=<book>] [JUDGE=<model>|none] [JUDGMENTS=<book>] [JUDGMENTS_OUT=<book>] [JUDGE2=<model>] [JUDGMENTS2=<book>] [JUDGMENTS2_OUT=<book>] [RECORDED=<report.json>] [TODAY=YYYY-MM-DD] [VARIANTS=ask,literal,norerank,recorded])
+# A developer's tool: go run, so nothing lands in ./bin. It asks each
+# question through the daemon's own ask path (internal/ask over
+# internal/retrieve) with config.yaml's models, never pulled; ANSWERS_OUT
+# records every ask and writer call, which ANSWERS replays, asking no
+# model; JUDGE (gemma4:12b by default) judges each answer's sentences and
+# facts, JUDGMENTS_OUT recording and JUDGMENTS replaying its verdicts;
+# JUDGE2, a second judge of another family, is asked the same prompt
+# (JUDGMENTS2, JUDGMENTS2_OUT), and the report says how the two agree.
+# RECORDED, an earlier JSON report of the same questions and judges, is the
+# recorded variant's: it takes the answers the answer route gave from it,
+# asking nothing, and asks the questions routed elsewhere live. It unloads
+# the models it loaded. Keep the question file, the JSON reports and the
+# books out of the repository. See cmd/askeval.
+.PHONY: ask-eval
+ask-eval:
+	@test -n "$(DB)" && test -n "$(QUESTIONS)" || { echo 'usage: make ask-eval DB=<copy of curio.db> QUESTIONS=<file> [CONFIG=<config.yaml>] [JSON=<file>] [ANSWERS=<book>] [ANSWERS_OUT=<book>] [JUDGE=<model>|none] [JUDGMENTS=<book>] [JUDGMENTS_OUT=<book>] [JUDGE2=<model>] [JUDGMENTS2=<book>] [JUDGMENTS2_OUT=<book>] [RECORDED=<report.json>] [TODAY=YYYY-MM-DD] [VARIANTS=ask,literal,norerank,recorded]' >&2; exit 2; }
+	$(GO) run -tags=$(GOTAGS) ./cmd/askeval -db "$(DB)" -questions "$(QUESTIONS)" $(if $(CONFIG),-config "$(CONFIG)") $(if $(JSON),-json "$(JSON)") $(if $(ANSWERS),-answers "$(ANSWERS)") $(if $(ANSWERS_OUT),-answers-out "$(ANSWERS_OUT)") $(if $(JUDGE),-judge "$(JUDGE)") $(if $(JUDGMENTS),-judgments "$(JUDGMENTS)") $(if $(JUDGMENTS_OUT),-judgments-out "$(JUDGMENTS_OUT)") $(if $(JUDGE2),-judge2 "$(JUDGE2)") $(if $(JUDGMENTS2),-judgments2 "$(JUDGMENTS2)") $(if $(JUDGMENTS2_OUT),-judgments2-out "$(JUDGMENTS2_OUT)") $(if $(RECORDED),-recorded "$(RECORDED)") $(if $(TODAY),-today "$(TODAY)") $(if $(VARIANTS),-variants "$(VARIANTS)")
 
 ## planner-check: measure a writing model as search understanding's planner on this machine (MODEL=<name> [CONFIG=<config.yaml>])
 # A developer's tool: go run, so nothing lands in ./bin. It runs the

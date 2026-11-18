@@ -1,0 +1,16 @@
+{
+  "type": "object",
+  "properties": {
+    "sentences": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "object", "properties": {
+      "n": {"type": "integer", "minimum": 1, "maximum": 3},
+      "claim": {"type": "boolean"},
+      "support": {"type": "string", "enum": ["supported", "partly", "not", "uncited", "none"]}
+    }, "required": ["n", "claim", "support"], "additionalProperties": false}},
+    "facts": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "object", "properties": {
+      "n": {"type": "integer", "minimum": 1, "maximum": 2},
+      "stated": {"type": "boolean"}
+    }, "required": ["n", "stated"], "additionalProperties": false}}
+  },
+  "required": ["sentences", "facts"],
+  "additionalProperties": false
+}

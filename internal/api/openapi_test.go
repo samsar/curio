@@ -21,6 +21,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/samsar/curio/internal/ask"
 	"github.com/samsar/curio/internal/fetcher"
 	"github.com/samsar/curio/internal/insight"
 	"github.com/samsar/curio/internal/jobs"
@@ -176,13 +177,41 @@ func TestOpenAPI_FailureCauseEnum(t *testing.T) {
 	assert.Equal(t, want, loadSpec(t).Components.Schemas["FailureCause"].Value.Enum)
 }
 
-// TestOpenAPI_StatusEnums: the spec names every understanding and
-// reranking status, in their order, so a new one can't reach the wire
-// unnoticed.
+// TestOpenAPI_StatusEnums: the spec names every understanding, reranking
+// and ask status, and every ask stage, in their order, so a new one can't
+// reach the wire unnoticed.
 func TestOpenAPI_StatusEnums(t *testing.T) {
 	enum := func(schema string) []any {
 		return loadSpec(t).Components.Schemas[schema].Value.Properties["status"].Value.Enum
 	}
+	asked := make([]any, 0, len(ask.Statuses()))
+	for _, s := range ask.Statuses() {
+		asked = append(asked, string(s))
+	}
+	assert.Equal(t, asked, enum("AskDoneEvent"))
+	stages := make([]any, 0, len(ask.Stages()))
+	for _, s := range ask.Stages() {
+		stages = append(stages, string(s))
+	}
+	assert.Equal(t, stages, loadSpec(t).Components.Schemas["AskProgressEvent"].Value.Properties["stage"].Value.Enum)
+	routes := make([]any, 0, len(ask.Routes()))
+	for _, r := range ask.Routes() {
+		routes = append(routes, string(r))
+	}
+	for _, schema := range []string{"AskRequest:mode", "AskRetrievalEvent:route", "AskDoneEvent:route"} {
+		name, field, _ := strings.Cut(schema, ":")
+		assert.Equal(t, routes, loadSpec(t).Components.Schemas[name].Value.Properties[field].Value.Enum, schema)
+	}
+	evidence := make([]any, 0, len(ask.EvidenceStatuses()))
+	for _, s := range ask.EvidenceStatuses() {
+		evidence = append(evidence, string(s))
+	}
+	assert.Equal(t, evidence, enum("AskEvidenceEvent"))
+	kinds := make([]any, 0, len(insight.RowKinds()))
+	for _, k := range insight.RowKinds() {
+		kinds = append(kinds, string(k))
+	}
+	assert.Equal(t, kinds, loadSpec(t).Components.Schemas["TimelineRow"].Value.Properties["kind"].Value.Enum)
 	reranking := make([]any, 0, len(rerank.Statuses()))
 	for _, s := range rerank.Statuses() {
 		reranking = append(reranking, string(s))
@@ -260,6 +289,7 @@ func TestOpenAPI_RequestTypesMatchSchemas(t *testing.T) {
 		{"POST /v1/bookmarks", reflect.TypeFor[CreateBookmarkRequest]()},
 		{"POST /v1/bookmarks/import", reflect.TypeFor[ImportRequest]()},
 		{"POST /v1/search", reflect.TypeFor[SearchRequest]()},
+		{"POST /v1/ask", reflect.TypeFor[AskRequest]()},
 		{"PUT /v1/queue", reflect.TypeFor[QueueUpdateRequest]()},
 	} {
 		t.Run(tc.op, func(t *testing.T) {
@@ -369,6 +399,9 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 			Last:  rerank.StatusTimeout, LastAt: now, TimeoutHoldUntil: now.Add(2 * time.Minute),
 			EvictionHoldUntil: now.Add(15 * time.Minute),
 			Failure:           rerank.Failure{Cause: "timeout:held", At: now, Err: "3 reranks in a row took longer than 7s"}}}
+		// Each question streams some of an ask's events and fields; its
+		// state with every field set.
+		d.Asker = contractAsker()
 		d.Drift = monitor
 		d.Bookmarks = unsavableBookmark{BookmarkStore: d.Bookmarks, url: "https://example.com/unsavable"}
 		d.YouTubeFetcher = "/opt/homebrew/bin/yt-dlp"
@@ -455,6 +488,7 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 		{"GET /v1/interests/unsorted", get("/v1/interests/unsorted"), http.StatusOK},
 		{"GET /v1/interests/changes", get("/v1/interests/changes"), http.StatusOK},
 		{"GET /v1/interests/map", get("/v1/interests/map"), http.StatusNotFound},
+		{"GET /v1/interests/timeline", get("/v1/interests/timeline"), http.StatusNotFound},
 	})
 	in := seedInterestFixtures(t, s, f)
 
@@ -540,6 +574,22 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 			http.StatusOK},
 		{"POST /v1/search", jsonBody(http.MethodPost, "/v1/search", `{"query":"kafka","rerank_order":[]}`),
 			http.StatusBadRequest},
+		{"POST /v1/ask", jsonBody(http.MethodPost, "/v1/ask", `{"question":"kafka"}`), http.StatusOK},
+		{"POST /v1/ask", jsonBody(http.MethodPost, "/v1/ask", `{"question":"timeout","rerank":false}`),
+			http.StatusOK},
+		{"POST /v1/ask", jsonBody(http.MethodPost, "/v1/ask", `{"question":"nothing","sources":2}`), http.StatusOK},
+		{"POST /v1/ask", jsonBody(http.MethodPost, "/v1/ask", `{"question":"broken"}`), http.StatusOK},
+		{"POST /v1/ask", jsonBody(http.MethodPost, "/v1/ask", `{"question":"none at all"}`), http.StatusOK},
+		{"POST /v1/ask", jsonBody(http.MethodPost, "/v1/ask", `{"question":""}`), http.StatusBadRequest},
+		{"POST /v1/ask", jsonBody(http.MethodPost, "/v1/ask",
+			`{"question":"is it true that kafka never loses data","mode":"evidence"}`), http.StatusOK},
+		{"POST /v1/ask", jsonBody(http.MethodPost, "/v1/ask", `{"question":"evidence that fell back"}`), http.StatusOK},
+		{"POST /v1/ask", jsonBody(http.MethodPost, "/v1/ask", `{"question":"how have my interests changed"}`),
+			http.StatusOK},
+		{"POST /v1/ask", jsonBody(http.MethodPost, "/v1/ask", `{"question":"everything about kafka","mode":"list"}`),
+			http.StatusOK},
+		{"POST /v1/ask", jsonBody(http.MethodPost, "/v1/ask",
+			`{"question":"q","mode":"interests","filters":{"site":["example.com"]}}`), http.StatusBadRequest},
 		{"GET /v1/failures", get("/v1/failures"), http.StatusOK},
 
 		{"GET /v1/interests", get("/v1/interests"), http.StatusOK},
@@ -558,6 +608,10 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 		{"GET /v1/interests/unsorted", get("/v1/interests/unsorted?offset=-1"), http.StatusBadRequest},
 		{"GET /v1/interests/changes", get("/v1/interests/changes"), http.StatusOK},
 		{"GET /v1/interests/map", get("/v1/interests/map"), http.StatusNotFound}, // drawn before maps
+		{"GET /v1/interests/timeline", get("/v1/interests/timeline"), http.StatusOK},
+		{"GET /v1/interests/timeline", get("/v1/interests/timeline?saved_after=2000-01-01&saved_before=2100-01-01" +
+			"&period=quarter"), http.StatusOK},
+		{"GET /v1/interests/timeline", get("/v1/interests/timeline?period=week"), http.StatusBadRequest},
 		{"POST /v1/interests/rebuild", post("/v1/interests/rebuild"), http.StatusAccepted},
 
 		{"GET /v1/jobs", get("/v1/jobs?status=failed"), http.StatusOK},
@@ -643,11 +697,21 @@ func checkResponse(t *testing.T, op *openapi3.Operation, resp response, what str
 	require.NoError(t, err, what)
 	content := ref.Value.Content.Get(mediaType)
 	require.NotNil(t, content, "%s: %d %s is not documented", what, resp.status, mediaType)
-	if mediaType == "application/json" || mediaType == "application/problem+json" {
+	switch mediaType {
+	case "application/json", "application/problem+json":
 		validateJSON(t, content.Schema.Value, resp.body, what)
 		var v any
 		require.NoError(t, json.Unmarshal([]byte(resp.body), &v))
 		seen.record(content.Schema.Value, v)
+	case "application/x-ndjson":
+		// A stream: each line is one value of the schema.
+		require.NotEmpty(t, resp.body, "%s: an empty stream", what)
+		for line := range strings.Lines(resp.body) {
+			validateJSON(t, content.Schema.Value, line, what)
+			var v any
+			require.NoError(t, json.Unmarshal([]byte(line), &v))
+			seen.record(content.Schema.Value, v)
+		}
 	}
 }
 
@@ -656,10 +720,16 @@ func checkResponse(t *testing.T, op *openapi3.Operation, resp response, what str
 // of a component schema is the same *openapi3.Schema and shares one entry.
 type propertiesSeen map[*openapi3.Schema]map[string]bool
 
-// record walks v, a decoded response, alongside schema.
+// record walks v, a decoded response, alongside schema; an object of a
+// schema that is one of several is recorded against the branch its type
+// names.
 func (seen propertiesSeen) record(schema *openapi3.Schema, v any) {
 	switch v := v.(type) {
 	case map[string]any:
+		if branch := branchOf(schema, v); branch != nil {
+			seen.record(branch, v)
+			return
+		}
 		for name, value := range v {
 			prop := schema.Properties[name]
 			if prop == nil {
@@ -681,6 +751,19 @@ func (seen propertiesSeen) record(schema *openapi3.Schema, v any) {
 			}
 		}
 	}
+}
+
+// branchOf is the branch of schema's oneOf or anyOf whose type property is
+// the constant v's type is, nil for none.
+func branchOf(schema *openapi3.Schema, v map[string]any) *openapi3.Schema {
+	for _, refs := range []openapi3.SchemaRefs{schema.OneOf, schema.AnyOf} {
+		for _, r := range refs {
+			if typ := r.Value.Properties["type"]; typ != nil && typ.Value.Const != nil && typ.Value.Const == v["type"] {
+				return r.Value
+			}
+		}
+	}
+	return nil
 }
 
 // missing lists, as "Schema.property", every property declared by the
@@ -714,6 +797,9 @@ func (seen propertiesSeen) missing(doc *openapi3.T, ops []*openapi3.Operation) [
 		}
 		if extra := s.AdditionalProperties.Schema; extra != nil {
 			walk(extra.Value, name+"{}")
+		}
+		for i, r := range slices.Concat(s.OneOf, s.AnyOf) {
+			walk(r.Value, fmt.Sprintf("%s|%d", name, i))
 		}
 	}
 	for _, op := range ops {

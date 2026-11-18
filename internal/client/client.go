@@ -24,6 +24,8 @@ import (
 type Client struct {
 	base string
 	http *http.Client
+	// askIdle bounds an ask's stream's silence (Ask); 0 is askIdle.
+	askIdle time.Duration
 }
 
 func New(baseURL string) *Client {
@@ -86,6 +88,27 @@ type Health struct {
 	// Summaries is what the daemon's summaries writer knows of its model;
 	// nil from a daemon that predates summaries.
 	Summaries *SummariesHealth `json:"summaries,omitempty"`
+	// Asking is what the daemon's asker knows of its model; nil from a
+	// daemon that predates curio ask.
+	Asking *AskingHealth `json:"asking,omitempty"`
+}
+
+// AskingHealth mirrors api.AskingHealth: whether Ask is on, its model, why
+// no question is answered at all, the fitness check's verdict, the last
+// ask's status, the holds in effect, and the last failure.
+type AskingHealth struct {
+	On                bool                  `json:"on"`
+	OnByDefault       bool                  `json:"on_by_default,omitempty"`
+	Model             string                `json:"model,omitempty"`
+	Reason            string                `json:"reason,omitempty"`
+	Check             string                `json:"check,omitempty"`
+	CheckedAt         time.Time             `json:"checked_at,omitzero"`
+	Unfit             string                `json:"unfit,omitempty"`
+	LastStatus        string                `json:"last_status,omitempty"`
+	LastAt            time.Time             `json:"last_at,omitzero"`
+	TimeoutHoldUntil  time.Time             `json:"timeout_hold_until,omitzero"`
+	EvictionHoldUntil time.Time             `json:"eviction_hold_until,omitzero"`
+	LastFailure       *UnderstandingFailure `json:"last_failure,omitempty"`
 }
 
 // SummariesHealth mirrors api.SummariesHealth: whether summaries are on,
@@ -697,11 +720,14 @@ func (f SearchFilters) IsEmpty() bool {
 
 // SearchHit is the part of api.SearchHitResponse the CLI and MCP read.
 type SearchHit struct {
-	Document      Document     `json:"document"`
-	Score         float64      `json:"score"`
-	MarkdownPath  string       `json:"markdown_path,omitempty"`
-	BookmarkTitle string       `json:"bookmark_title,omitempty"`
-	Matches       []ChunkMatch `json:"matches,omitempty"`
+	Document      Document `json:"document"`
+	Score         float64  `json:"score"`
+	MarkdownPath  string   `json:"markdown_path,omitempty"`
+	BookmarkTitle string   `json:"bookmark_title,omitempty"`
+	// About is what the page is about, its current summary's about line;
+	// empty without one, and from a daemon that predates it.
+	About   string       `json:"about,omitempty"`
+	Matches []ChunkMatch `json:"matches,omitempty"`
 	// Bookmarks are what a hit without Matches was saved as, newest saved
 	// first: it matched on them, not on a passage. A daemon older than
 	// metadata search sends none.
@@ -1220,6 +1246,70 @@ func (c *Client) ListInterests(ctx context.Context, opts ListInterestsOpts) (*In
 	return &out, nil
 }
 
+// InterestsTimelineOpts are GET /v1/interests/timeline's parameters:
+// the saved window counted, as POST /v1/search's filters read it, and the
+// period, auto, year or quarter ("" is auto).
+type InterestsTimelineOpts struct {
+	SavedAfter, SavedBefore string
+	Period                  string
+}
+
+// InterestsTimeline mirrors api.InterestsTimeline: the latest rebuild's
+// interests, their saves counted by period. An ask's table event carries
+// the same object, each row the prompt showed marked.
+type InterestsTimeline struct {
+	Run     TimelineRun     `json:"run"`
+	Period  string          `json:"period"`
+	Periods []string        `json:"periods"`
+	Rows    []TimelineRow   `json:"rows"`
+	Dated   int             `json:"dated"`
+	Undated int             `json:"undated"`
+	Window  *TimelineWindow `json:"window,omitempty"`
+}
+
+// TimelineRun mirrors api.TimelineRun.
+type TimelineRun struct {
+	ID         string    `json:"id"`
+	FinishedAt time.Time `json:"finished_at"`
+	Shape      string    `json:"shape"`
+}
+
+// TimelineRow mirrors api.TimelineRow.
+type TimelineRow struct {
+	Kind   string `json:"kind"`
+	ID     string `json:"id,omitempty"`
+	AreaID string `json:"area_id,omitempty"`
+	Label  string `json:"label"`
+	Counts []int  `json:"counts"`
+	Total  int    `json:"total"`
+	Merged int    `json:"merged,omitempty"`
+	Marker string `json:"marker,omitempty"`
+}
+
+// TimelineWindow mirrors api.TimelineWindow.
+type TimelineWindow struct {
+	SavedAfter  *time.Time `json:"saved_after,omitempty"`
+	SavedBefore *time.Time `json:"saved_before,omitempty"`
+}
+
+// InterestsTimeline returns the latest rebuild's interests by when their
+// pages were first saved. Before any rebuild it is an *APIError matching
+// ErrNotGrouped.
+func (c *Client) InterestsTimeline(ctx context.Context, opts InterestsTimelineOpts) (*InterestsTimeline, error) {
+	q := url.Values{}
+	for key, v := range map[string]string{"saved_after": opts.SavedAfter, "saved_before": opts.SavedBefore,
+		"period": opts.Period} {
+		if v != "" {
+			q.Set(key, v)
+		}
+	}
+	var out InterestsTimeline
+	if err := c.do(ctx, http.MethodGet, withQuery("/v1/interests/timeline", q), nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // GetInterestOpts page GET /v1/interests/{id}. A zero Members is the
 // daemon's default.
 type GetInterestOpts struct {
@@ -1451,6 +1541,14 @@ var ErrDaemonUnreachable = errors.New("daemon unreachable")
 // ran nothing, so the request can be sent again once the daemon is ready.
 var ErrStarting = errors.New("daemon starting")
 
+// ErrNotGrouped is the daemon answering that no rebuild of the interests
+// is done yet, so there is nothing to read them from: an *APIError
+// matches it with errors.Is.
+var ErrNotGrouped = errors.New("the interests aren't grouped yet")
+
+// interestsProblemType mirrors api.InterestsProblemType.
+const interestsProblemType = "urn:curio:problem:interests-unavailable"
+
 // startingProblemType mirrors api.StartingProblemType.
 const startingProblemType = "urn:curio:problem:daemon-starting"
 
@@ -1536,9 +1634,16 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("%s (request %s; see `curio daemon logs`)", msg, e.Problem.RequestID)
 }
 
-// Is reports whether e is a starting daemon's answer, for ErrStarting.
+// Is reports whether e is a starting daemon's answer, for ErrStarting, or
+// the interests not grouped yet, for ErrNotGrouped.
 func (e *APIError) Is(target error) bool {
-	return target == ErrStarting && e.starting()
+	switch target {
+	case ErrStarting:
+		return e.starting()
+	case ErrNotGrouped:
+		return e.Status == http.StatusNotFound && e.Problem.Type == interestsProblemType
+	}
+	return false
 }
 
 func (e *APIError) starting() bool {
@@ -1577,6 +1682,12 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 // closes. A non-2xx answer is an *APIError and a failure to connect wraps
 // ErrDaemonUnreachable.
 func (c *Client) send(ctx context.Context, method, path string, body any) (*http.Response, error) {
+	return c.sendWith(ctx, c.http, method, path, body)
+}
+
+// sendWith is send over hc.
+func (c *Client) sendWith(ctx context.Context, hc *http.Client, method, path string, body any) (*http.Response,
+	error) {
 	var buf io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -1593,7 +1704,7 @@ func (c *Client) send(ctx context.Context, method, path string, body any) (*http
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, err := c.http.Do(req)
+	resp, err := hc.Do(req)
 	if err != nil {
 		// The *url.Error already names the method and URL.
 		var opErr *net.OpError

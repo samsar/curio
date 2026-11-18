@@ -11,8 +11,9 @@ import (
 	"github.com/samsar/curio/internal/search"
 )
 
-// TestDecodeAnswer: an answer is one JSON object of the schema's shape;
-// anything else, or more names or rewrites than it allows, or one over its
+// TestDecodeAnswer: an answer is one JSON object of the schema's shape,
+// its keys spelled as the schema spells them and none repeated; anything
+// else, or more names or rewrites than it allows, or one over its
 // cap once trimmed or holding a control or format character, is invalid,
 // by the rule it broke.
 func TestDecodeAnswer(t *testing.T) {
@@ -28,6 +29,11 @@ func TestDecodeAnswer(t *testing.T) {
 		{"a wrong type", `{"kind":"one","names":"Okapi"}`, "shape"},
 		{"not JSON", `kind: one`, "shape"},
 		{"two values", `{"kind":"one"} {"kind":"list"}`, "shape"},
+		{"a case-variant key beside its key", `{"kind":"one","KIND":"list"}`, "shape"},
+		{"a case-variant key alone", `{"Kind":"one"}`, "shape"},
+		{"a repeated key", `{"kind":"one","rewrites":["a"],"rewrites":["b"]}`, "shape"},
+		{"a repeated filter key", `{"kind":"one","filters":{"source":["chrome"],"source":["safari"]}}`, "shape"},
+		{"a case-variant filter key", `{"kind":"one","filters":{"Source":["chrome"]}}`, "shape"},
 		{"a kind outside the set", `{"kind":"summary"}`, "kind"},
 		{"no kind", `{"names":[]}`, "kind"},
 		{"five names", `{"kind":"one","names":["a","b","c","d","e"]}`, "names"},

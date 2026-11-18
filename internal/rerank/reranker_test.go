@@ -21,6 +21,7 @@ import (
 
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/generator"
+	"github.com/samsar/curio/internal/modelgate"
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/understand"
@@ -618,6 +619,42 @@ func TestRerank_TimeoutHold(t *testing.T) {
 	assert.Contains(t, out.Reason, "3 reranks in a row took longer than 20ms; reranking resumes at")
 	assert.Equal(t, calls, m.callCount(), "a held rerank asks no model")
 	assert.False(t, g.r.State().TimeoutHoldUntil.IsZero())
+}
+
+// TestRerank_TimeoutWhileHeld: reranks that run past their timeout while
+// another feature's long call (an answer) holds the model waited for it:
+// each keeps its first ranking as a timeout, but none counts toward
+// holding reranking; once the answer has ended, three in a row hold it.
+func TestRerank_TimeoutWhileHeld(t *testing.T) {
+	traffic := &modelgate.Traffic{}
+	server := "http://localhost:11434"
+	m := &fakeModel{}
+	g := newRig(t, m, func(o *Options) {
+		o.Timeout, o.Traffic, o.Model.BaseURL = 20*time.Millisecond, traffic, server
+	})
+	g.fit(t)
+	m.mu.Lock()
+	m.delay = time.Second
+	m.mu.Unlock()
+	writer := modelgate.New(context.Background(), nil, modelgate.Options{Model: "m:1", Server: server,
+		Traffic: traffic})
+	req := Request{Question: "q", Planned: true, Kind: understand.KindOne, Candidates: pages("a", "b")}
+
+	end := writer.Hold()
+	for range 4 {
+		out, err := g.r.Rerank(context.Background(), req)
+		require.NoError(t, err)
+		assert.Equal(t, StatusTimeout, out.Status)
+		assert.Equal(t, "reranking took longer than 20ms", out.Reason)
+	}
+	assert.Zero(t, g.r.State().TimeoutHoldUntil, "no hold while an answer held the model")
+	end()
+	for range 3 {
+		out, err := g.r.Rerank(context.Background(), req)
+		require.NoError(t, err)
+		assert.Equal(t, StatusTimeout, out.Status)
+	}
+	assert.False(t, g.r.State().TimeoutHoldUntil.IsZero(), "held once it ended")
 }
 
 // TestRerank_OneAtATime: reranks at once take turns at the model, never

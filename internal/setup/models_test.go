@@ -57,21 +57,24 @@ func TestUp_ConfigWithoutAWritingModel(t *testing.T) {
 	assert.Equal(t, cfg, mustRead(t, home.ConfigPath()))
 }
 
-// TestUp_NoWritingModel: with interest labels, search understanding and
-// summaries off, no writing model is pulled, and the plan says so once,
+// TestUp_NoWritingModel: with interest labels, search understanding,
+// summaries and Ask off, no writing model is pulled, and the plan says so once,
 // naming the keys that turn each role off.
 func TestUp_NoWritingModel(t *testing.T) {
 	h := newHarness(t)
 	home := h.writeHome(genModel)
 	require.NoError(t, os.WriteFile(home.ConfigPath(), []byte(mustRead(t, home.ConfigPath())+
-		"insight:\n  labeling: terms\nsearch:\n  understand: false\nsummaries:\n  enabled: false\n"), 0o600))
+		"insight:\n  labeling: terms\nsearch:\n  understand: false\nsummaries:\n  enabled: false\n"+
+		"ask:\n  enabled: false\n"), 0o600))
 	res := checkStep(t, h.runner(setuptest.NewUI(t), setup.Options{}), "models")
 	assert.Equal(t, "pull qwen3-embedding:0.6b (639 MB)", res.Fix.Summary)
 	require.Len(t, res.Notes, 1)
 	assert.Equal(t, "no writing model is pulled: no role writes with one (interest labels are off with "+
 		"insight.enabled false or insight.labeling not llm, search understanding with search.understand false, "+
 		"document summaries unless summaries.enabled is true, search reranking unless search.rerank is true, or "+
-		"left out for a model measured as the reranker)", res.Notes[0])
+		"left out for a model measured as the reranker, and answers to questions unless ask.enabled is true, or "+
+		"left out for a model measured as the answer writer)",
+		res.Notes[0])
 	assert.Empty(t, res.Hint, "no writing model to pick another of")
 
 	ui := setuptest.NewUI(t, setuptest.Yes().About("Pull qwen3-embedding:0.6b"), setuptest.Yes().About("launchd"))
@@ -83,10 +86,10 @@ func TestUp_NoWritingModel(t *testing.T) {
 // TestUp_PlannerModelWithConsent: with interest labels off, search
 // understanding on, as a 2.7 home with term labels is after the upgrade,
 // and summaries turned on, so reranking on by default for gemma4:26b, the
-// daemon pulls no writing model (the planner's, the summaries' and the
-// reranker's ride only on another role's pull), so curio up offers
-// generation.model for the three: a warning, never a failure, which
-// doctor shares. A no leaves it out, says what that leaves and how
+// daemon pulls no writing model (the planner's, the summaries', the
+// reranker's and the answers' ride only on another role's pull), so curio
+// up offers generation.model once for the four: a warning, never a
+// failure, which doctor shares. A no leaves it out, says what that leaves and how
 // to get it, and the run goes on; a yes pulls it. config.yaml is never
 // edited.
 func TestUp_PlannerModelWithConsent(t *testing.T) {
@@ -98,12 +101,12 @@ func TestUp_PlannerModelWithConsent(t *testing.T) {
 	res := checkStep(t, h.runner(setuptest.NewUI(t), setup.Options{}), "models")
 	assert.Equal(t, setup.Warn, res.Status, "doctor warns, never fails, for a model only optional roles write with")
 	assert.Equal(t, genModel+" isn't pulled, and only search understanding and document summaries and search "+
-		"reranking would write with it: searches use their words and pages get no summary and searches keep their "+
-		"first ranking until it is", res.Detail)
+		"reranking and answers to questions would write with it: searches use their words and pages get no summary "+
+		"and searches keep their first ranking and curio ask answers nothing until it is", res.Detail)
 	require.NotNil(t, res.Fix)
 	assert.Equal(t, setup.Offer, res.Fix.Consent)
-	assert.Equal(t, "pull "+genModel+" (19 GB) for search understanding and document summaries and search reranking",
-		res.Fix.Summary)
+	assert.Equal(t, "pull "+genModel+" (19 GB) for search understanding and document summaries and search reranking "+
+		"and answers to questions", res.Fix.Summary)
 	assert.Contains(t, res.Notes, "search reranking is on by default for "+genModel+" with the summaries, as it "+
 		"was measured; search.rerank: false turns it off")
 
@@ -112,9 +115,9 @@ func TestUp_PlannerModelWithConsent(t *testing.T) {
 	require.NoError(t, err, "a no to the optional model doesn't fail curio up: %v", declined.Events())
 	assert.Empty(t, h.ollama.Pulls(), "nothing is pulled without a yes")
 	assert.Contains(t, declined.Lines("info"), "models: not pulling "+genModel+": searches use their words and "+
-		"pages get no summary and searches keep their first ranking; run curio up again to pull it, or set "+
-		"search.understand: false to stop understanding questions and summaries.enabled: false to write none and "+
-		"search.rerank: false to stop reranking")
+		"pages get no summary and searches keep their first ranking and curio ask answers nothing; run curio up "+
+		"again to pull it, or set search.understand: false to stop understanding questions and summaries.enabled: "+
+		"false to write none and search.rerank: false to stop reranking and ask.enabled: false to answer none")
 	var warned bool
 	for _, w := range out.Status.Warnings {
 		warned = warned || strings.HasPrefix(w.Text, "models: "+genModel+" isn't pulled")
@@ -276,7 +279,7 @@ func TestUp_RerankerWithheld(t *testing.T) {
 	before, _, _ := strings.CutLast(cfg, "  base_url: ")
 	remote := before + "  base_url: http://gpu-box.lan:11434\n"
 	require.NoError(t, os.WriteFile(home.ConfigPath(), []byte(remote+"insight:\n  labeling: terms\nsearch:\n"+
-		"  understand: false\n  rerank: true\n"), 0o600))
+		"  understand: false\n  rerank: true\nask:\n  enabled: false\n"), 0o600))
 	res := checkStep(t, h.runner(setuptest.NewUI(t), setup.Options{}), "models")
 	assert.Equal(t, setup.OK, res.Status, res.Detail)
 	assert.Nil(t, res.Fix, "no offer for a withheld reranker")
@@ -302,7 +305,8 @@ func TestUp_SharedPlannerModelIsRequired(t *testing.T) {
 // on, whose pages may not go where their model runs (generation.base_url
 // off this machine, the roles naming no server) write nothing, so their
 // model is neither pulled nor offered, and the plan says why for each; the
-// labels' model on that server still is.
+// labels' model on that server still is. The reranker, on by default for
+// gemma4:26b only while questions are understood, isn't in use.
 func TestUp_PlannerWithheld(t *testing.T) {
 	h := newHarness(t)
 	h.ollama = setuptest.NewOllama(t, "0.34.4", embedModel)
@@ -315,13 +319,14 @@ func TestUp_PlannerWithheld(t *testing.T) {
 	res := checkStep(t, h.runner(setuptest.NewUI(t), setup.Options{}), "models")
 	assert.Equal(t, setup.OK, res.Status, res.Detail)
 	assert.Nil(t, res.Fix)
-	require.Len(t, res.Notes, 3)
+	require.Len(t, res.Notes, 3, "gemma4:26b reranks by default only understood searches, and none is")
 	assert.Contains(t, res.Notes[0], "search understanding's model isn't pulled: questions would leave this machine "+
 		"for http://gpu-box.lan:11434")
 	assert.Contains(t, res.Notes[1], "document summaries' model isn't pulled: pages would leave this machine "+
 		"for http://gpu-box.lan:11434")
-	assert.Contains(t, res.Notes[2], "search reranking's model isn't pulled: questions and pages would leave "+
-		"this machine for http://gpu-box.lan:11434", "on by default for gemma4:26b with the summaries")
+	assert.Contains(t, res.Notes[2], "answers to questions' model isn't pulled: questions and pages would leave "+
+		"this machine for http://gpu-box.lan:11434, generation.base_url, which the answers role doesn't name; set "+
+		"generation.roles.answers.base_url to send them there, or ask.enabled: false")
 }
 
 // TestUp_RerankerByDefault: with search.rerank left out, gemma4:26b
@@ -374,14 +379,16 @@ func TestUp_RoleModel(t *testing.T) {
 		"keeping generation.model: qwen3:4b-instruct from config.yaml"}, res.Notes)
 
 	require.NoError(t, os.WriteFile(home.ConfigPath(), []byte(strings.Replace(labelsOwn, "  roles:\n",
-		"  roles:\n    planner:\n      model: gemma4:12b\n    summaries:\n      model: gemma4:12b\n", 1)+
-		"summaries:\n  enabled: true\n"), 0o600))
+		"  roles:\n    planner:\n      model: gemma4:12b\n    summaries:\n      model: gemma4:12b\n"+
+			"    answers:\n      model: gemma4:12b\n", 1)+
+		"summaries:\n  enabled: true\nask:\n  enabled: true\n"), 0o600))
 	res = checkStep(t, h.runner(setuptest.NewUI(t), setup.Options{}), "models")
 	require.NotNil(t, res.Fix)
 	assert.Equal(t, "pull qwen3-embedding:0.6b (639 MB) and gemma4:12b (7.6 GB)", res.Fix.Summary)
 	assert.Equal(t, []string{"keeping generation.roles.labels.model: gemma4:12b from config.yaml",
 		"keeping generation.roles.planner.model: gemma4:12b from config.yaml",
-		"keeping generation.roles.summaries.model: gemma4:12b from config.yaml"}, res.Notes)
+		"keeping generation.roles.summaries.model: gemma4:12b from config.yaml",
+		"keeping generation.roles.answers.model: gemma4:12b from config.yaml"}, res.Notes)
 
 	res = checkStep(t, h.runner(setuptest.NewUI(t), setup.Options{GenerationModel: "gemma4:26b"}), "models")
 	assert.True(t, res.Blocked())
@@ -537,4 +544,37 @@ func mustRead(t *testing.T, path string) string {
 	b, err := os.ReadFile(path)
 	require.NoError(t, err)
 	return string(b)
+}
+
+// TestUp_AnswersModelWithConsent: a model only the answers role writes
+// with is optional: offered with consent, the offer naming what goes
+// without it, and a no leaves it out; generation.model, which the labels
+// need, stays required. A model not measured as the answer writer is
+// offered only once ask.enabled turns Ask on: left out, it answers
+// nothing, so nothing is pulled for it.
+func TestUp_AnswersModelWithConsent(t *testing.T) {
+	h := newHarness(t)
+	h.ollama = setuptest.NewOllama(t, "0.34.4", embedModel, genModel)
+	home := h.writeHome(genModel)
+	cfg := strings.Replace(mustRead(t, home.ConfigPath()), "generation:\n",
+		"generation:\n  roles:\n    answers:\n      model: gemma4:12b\n", 1)
+	require.NoError(t, os.WriteFile(home.ConfigPath(), []byte(cfg), 0o600))
+	res := checkStep(t, h.runner(setuptest.NewUI(t), setup.Options{}), "models")
+	assert.Equal(t, setup.OK, res.Status, "off by default, unmeasured: %s", res.Detail)
+	assert.Nil(t, res.Fix, "nothing to pull for it")
+
+	require.NoError(t, os.WriteFile(home.ConfigPath(), []byte(cfg+"ask:\n  enabled: true\n"), 0o600))
+	res = checkStep(t, h.runner(setuptest.NewUI(t), setup.Options{}), "models")
+	assert.Equal(t, setup.Warn, res.Status, res.Detail)
+	assert.Equal(t, "gemma4:12b isn't pulled, and only answers to questions would write with it: curio ask answers "+
+		"nothing until it is", res.Detail)
+	require.NotNil(t, res.Fix)
+	assert.Equal(t, setup.Offer, res.Fix.Consent)
+	assert.Equal(t, "pull gemma4:12b (7.6 GB) for answers to questions", res.Fix.Summary)
+	assert.Contains(t, res.Fix.Declined, "ask.enabled: false to answer none")
+
+	declined := setuptest.NewUI(t, setuptest.No().About("Pull gemma4:12b"), setuptest.Yes().About("launchd"))
+	_, _, err := h.up(declined, setup.Options{})
+	require.NoError(t, err, "%v", declined.Events())
+	assert.Empty(t, h.ollama.Pulls(), "nothing is pulled without a yes")
 }

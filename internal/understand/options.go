@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/samsar/curio/internal/config"
+	"github.com/samsar/curio/internal/modelgate"
 )
 
 // Options configure a Planner.
@@ -49,6 +50,11 @@ type Options struct {
 	// the func that marks the call ended. The daemon's summary pass yields
 	// to these calls; nil tells nobody.
 	Using func() (end func())
+	// Traffic, when set, is the process's record of every feature's calls
+	// of each model (modelgate.Traffic): a plan that runs past its timeout
+	// while an answer holds the model waited for it, and doesn't count
+	// toward holding planning.
+	Traffic *modelgate.Traffic
 }
 
 // OptionsFrom is the planner's Options as config.yaml sets them: the one
@@ -64,39 +70,27 @@ func OptionsFrom(c config.Config) Options {
 		ShortSharer: c.SharesModelShorter(config.RolePlanner),
 		Withheld:    withheld(c.Generation),
 	}
-	o.fitBudget(c.Search.UnderstandTimeoutSeconds, c.Search.EmbedTimeoutSeconds)
+	o.fitBudget(c)
 	return o
 }
 
-// budgetSeconds is what an understood search may spend before its reads:
-// asking whether the model is loaded (1 s), the plan and the query's
-// embed stay under it, so `curio search`, which gives up after 30 s,
-// keeps 5 s for the reads and gets the words' results rather than a
-// client timeout when Ollama is slow.
-const budgetSeconds = 25
-
-// fitBudget holds a plan to the budget: past it, the plan's timeout is
-// shortened to what the embed timeout leaves, or, when that is under a
-// second, understanding is withheld. config.Validate leaves the sum to
-// the planner, since search.embed_timeout_seconds alone, valid before
-// understanding existed, can reach it: a refused config would stop the
-// daemon on an upgrade.
-func (o *Options) fitBudget(understandSeconds, embedSeconds int) {
-	if understandSeconds+embedSeconds+1 < budgetSeconds {
-		return
-	}
-	left := budgetSeconds - 1 - embedSeconds - 1
-	if left >= 1 {
-		o.Timeout = time.Duration(left) * time.Second
+// fitBudget holds a plan to search's budget (config.Config.PlanTimeout):
+// past it, the plan's timeout is shortened to what the embed timeout
+// leaves, or, when that is under a second, understanding is withheld.
+func (o *Options) fitBudget(c config.Config) {
+	asked, embed := c.Search.UnderstandTimeoutSeconds, c.Search.EmbedTimeoutSeconds
+	switch left := c.PlanTimeout(); {
+	case left == o.Timeout:
+	case left > 0:
+		o.Timeout = left
 		o.Shortened = fmt.Sprintf("search.understand_timeout_seconds (%d) plus search.embed_timeout_seconds (%d) "+
 			"plus 1 s reaches %d s, past which curio search could give up before its results: plans get %d s",
-			understandSeconds, embedSeconds, budgetSeconds, left)
-		return
-	}
-	if o.Withheld == "" {
+			asked, embed, config.SearchBudgetSeconds, int(left/time.Second))
+	case o.Withheld == "":
 		o.Withheld = fmt.Sprintf("search.embed_timeout_seconds (%d) leaves no time for a plan: with "+
 			"search.understand_timeout_seconds and 1 s it must stay under %d s, so curio search answers within "+
-			"30 s; lower search.embed_timeout_seconds, or set search.understand: false", embedSeconds, budgetSeconds)
+			"30 s; lower search.embed_timeout_seconds, or set search.understand: false", embed,
+			config.SearchBudgetSeconds)
 	}
 }
 

@@ -594,6 +594,21 @@ func TestPlanner_Failures(t *testing.T) {
 	})
 }
 
+// TestPlanner_InvalidQuotesNothing: an answer with a key of its own, which
+// can hold the question's words, is invalid without the key reaching the
+// outcome's reason or any record.
+func TestPlanner_InvalidQuotesNothing(t *testing.T) {
+	r := fitRig(t, answerWith(`{"kind":"one","zebrafinch":["a"]}`))
+	out := r.plan(t, "q")
+	assert.Equal(t, StatusInvalid, out.Status)
+	assert.Equal(t, "it isn't a plan's JSON", out.Reason)
+	for _, rec := range r.records(t) {
+		line, err := json.Marshal(rec)
+		require.NoError(t, err)
+		assert.NotContains(t, string(line), "zebrafinch")
+	}
+}
+
 // TestPlanner_CallerCancelledMidPlan: the caller's context ending while
 // the model writes is the caller's error, not a timeout, and isn't logged.
 func TestPlanner_CallerCancelledMidPlan(t *testing.T) {
@@ -948,6 +963,36 @@ func TestPlanner_TimeoutHold(t *testing.T) {
 	}
 	assert.Equal(t, []string{"WARN", "DEBUG", "DEBUG", "DEBUG", "DEBUG", "WARN"}, levels["timeout:held"],
 		"once a run, and again after a plan")
+}
+
+// TestPlanner_TimeoutWhileHeld: plans that run past their timeout while
+// another feature's long call (an answer) holds the model waited for it:
+// each still answers timeout, but none counts toward holding planning;
+// once the answer has ended, three in a row hold it as before.
+func TestPlanner_TimeoutWhileHeld(t *testing.T) {
+	traffic := &modelgate.Traffic{}
+	server := "http://localhost:11434"
+	r := newRigWith(t, &fakeModel{loaded: true, plan: timesOut}, func(o *Options) {
+		o.Traffic, o.Model.BaseURL = traffic, server
+	})
+	require.Equal(t, StatusChecking, r.plan(t, "warm-up question").Status)
+	r.p.Wait()
+	r.p.timeout = 20 * time.Millisecond
+	writer := modelgate.New(context.Background(), nil, modelgate.Options{Model: "gemma4:26b", Server: server,
+		Traffic: traffic})
+
+	end := writer.Hold()
+	for range 4 {
+		out := r.plan(t, "q")
+		assert.Equal(t, StatusTimeout, out.Status)
+		assert.Equal(t, "understanding took longer than 20ms", out.Reason)
+	}
+	assert.Zero(t, r.p.State().TimeoutHoldUntil, "no hold while an answer held the model")
+	end()
+	for range 3 {
+		assert.Equal(t, StatusTimeout, r.plan(t, "q").Status)
+	}
+	assert.Equal(t, r.clock.Now().Add(2*time.Minute), r.p.State().TimeoutHoldUntil, "held once it ended")
 }
 
 // TestPlanner_ConcurrentTimeouts: plans in flight together that all time

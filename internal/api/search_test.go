@@ -586,3 +586,67 @@ func TestSearch_ExtractionLookupFailure(t *testing.T) {
 	p := assertProblem(t, s.search(t, `{"query":"kafka"}`), http.StatusInternalServerError)
 	assert.Contains(t, p.Detail, errInjected.Error())
 }
+
+// TestSearch_AboutLines: a hit whose current extraction has a summary
+// carries its about line, on search and on related alike; one without a
+// summary, or whose summary says it isn't the page, carries none.
+func TestSearch_AboutLines(t *testing.T) {
+	s := newSearchServer(t, okEmbedder(), search.Config{BM25Weight: 1, VectorWeight: 1})
+	ctx := context.Background()
+	var docs struct{ Items []*store.Document }
+	for i := range 3 {
+		doc, err := s.deps.Documents.GetByURL(ctx, "local", fmt.Sprintf("https://example.com/kafka/%03d", i))
+		require.NoError(t, err)
+		docs.Items = append(docs.Items, doc)
+	}
+	summarize := func(doc *store.Document, kind store.SummaryKind, about string) {
+		require.NoError(t, s.deps.Summaries.PutSummary(ctx, "local", store.Summary{DocumentID: doc.ID,
+			ExtractionID: *doc.CurrentExtractionID, Kind: kind, About: about, Model: "gemma4:26b",
+			PromptVersion: "p1", InputHash: doc.ID}))
+	}
+	summarize(docs.Items[0], store.SummaryKindArticle, "How partitions spread a topic.")
+	summarize(docs.Items[1], store.SummaryKindNotThePage, "A sign-in wall.")
+
+	about := map[string]string{}
+	for _, hit := range decodeSearch(t, s.search(t, `{"query":"kafka"}`)).Items {
+		about[hit.Document.ID] = hit.About
+	}
+	assert.Equal(t, map[string]string{docs.Items[0].ID: "How partitions spread a topic.", docs.Items[1].ID: "",
+		docs.Items[2].ID: ""}, about)
+
+	resp := s.do(t, request{method: http.MethodGet, path: "/v1/documents/" + docs.Items[2].ID + "/related"})
+	require.Equal(t, http.StatusOK, resp.status, resp.body)
+	var related RelatedResponse
+	require.NoError(t, json.Unmarshal([]byte(resp.body), &related))
+	var found bool
+	for _, hit := range related.Items {
+		if hit.Document.ID == docs.Items[0].ID {
+			found = true
+			assert.Equal(t, "How partitions spread a topic.", hit.About)
+		}
+	}
+	assert.True(t, found, "the summarized document is related")
+}
+
+// failingSummaries fails every read of current summaries.
+type failingSummaries struct{ store.SummaryStore }
+
+func (failingSummaries) CurrentSummaries(context.Context, string, []string) (map[string]*store.Summary, error) {
+	return nil, errInjected
+}
+
+// TestSearch_AboutLinesFailure: hits whose summaries can't be read are a
+// server error, on search and on related alike, as any other read of the
+// hits is: not hits without an about line.
+func TestSearch_AboutLinesFailure(t *testing.T) {
+	s := newSearchServer(t, okEmbedder(), search.Config{BM25Weight: 1, VectorWeight: 1},
+		func(d *Deps) { d.Summaries = failingSummaries{d.Summaries} })
+	p := assertProblem(t, s.search(t, `{"query":"kafka"}`), http.StatusInternalServerError)
+	assert.Contains(t, p.Detail, errInjected.Error())
+
+	doc, err := s.deps.Documents.GetByURL(context.Background(), "local", "https://example.com/kafka/000")
+	require.NoError(t, err)
+	p = assertProblem(t, s.do(t, request{method: http.MethodGet, path: "/v1/documents/" + doc.ID + "/related"}),
+		http.StatusInternalServerError)
+	assert.Contains(t, p.Detail, errInjected.Error())
+}

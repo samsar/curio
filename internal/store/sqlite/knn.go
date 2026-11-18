@@ -25,7 +25,7 @@ import (
 
 // vec0MaxK is the largest k sqlite-vec's KNN takes (v0.1.6: "k value in
 // knn query too large").
-const vec0MaxK = 4096
+const vec0MaxK = store.MaxRankedChunks
 
 // maxVectorOverfetch caps how many neighbors a vector search reads before
 // its document predicates apply, for a filter that doesn't narrow.

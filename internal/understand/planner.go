@@ -96,7 +96,8 @@ func New(lifetime context.Context, gen generator.Generator, opts Options) *Plann
 		p.log = slog.Default()
 	}
 	p.gate = modelgate.New(lifetime, gen, modelgate.Options{Words: gateWords, Model: p.model, KeepAlive: opts.KeepAlive,
-		Shared: opts.Shared, ShortSharer: opts.ShortSharer, Using: opts.Using, Now: p.now, Location: p.loc, Log: p.log, Check: p.runCheck})
+		Shared: opts.Shared, ShortSharer: opts.ShortSharer, Using: opts.Using, Traffic: opts.Traffic,
+		Server: opts.Model.BaseURL, Now: p.now, Location: p.loc, Log: p.log, Check: p.runCheck})
 	if !opts.On {
 		p.offReason = OffReason
 		return p
@@ -144,9 +145,10 @@ func (p *Planner) Plan(ctx context.Context, question string) (Outcome, error) {
 			}
 			return refused(r), nil
 		}
+		asked := time.Now()
 		out, err := p.ask(ctx, question)
 		if err == nil {
-			p.settle(out)
+			p.settle(out, asked)
 		}
 		return out, err
 	})
@@ -262,11 +264,13 @@ func (p *Planner) planOptions() generator.Options {
 	return generator.Options{Temperature: new(0.0), MaxTokens: maxPlanTokens, KeepAlive: p.gate.KeepAlive()}
 }
 
-// settle records what a search's plan said of the model: one that
-// answered in time ends a run of timeouts, and holds the model loaded for
-// its keep-alive; a plan made clears the causes logged, so a later outage
-// warns again. A timeout counts toward holding planning.
-func (p *Planner) settle(out Outcome) {
+// settle records what a search's plan, asked at asked, said of the
+// model: one that answered in time ends a run of timeouts, and holds the
+// model loaded for its keep-alive; a plan made clears the causes logged,
+// so a later outage warns again. A timeout counts toward holding planning,
+// unless another feature's long call (an answer) held the model meanwhile:
+// the plan then waited for it, which says nothing of the model's speed.
+func (p *Planner) settle(out Outcome, asked time.Time) {
 	switch out.Status {
 	case StatusPlanned, StatusInvalid:
 		p.gate.Answered()
@@ -274,7 +278,9 @@ func (p *Planner) settle(out Outcome) {
 			p.gate.Succeeded()
 		}
 	case StatusTimeout:
-		p.gate.TimedOut(p.timeout)
+		if !p.gate.HeldSince(asked) {
+			p.gate.TimedOut(p.timeout)
+		}
 	case StatusUnavailable:
 		// No answer says nothing of the model's speed: the run stands.
 	case StatusSupplied, StatusOff, StatusCold, StatusChecking, StatusUnfit, StatusTooLong:

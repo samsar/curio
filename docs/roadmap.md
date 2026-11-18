@@ -430,6 +430,70 @@ before it:
   out reranks with it while summaries are written (decisions.md
   "Reranking: a reranker role over the ranking's head, routed by the
   plan's kind").
+- PR 6, done: Ask. A fifth writing role, `answers` (`ask.enabled`: left
+  out, on only for a model measured as the answer writer, gemma4:26b; true
+  with any model, its fitness check guarding it), answers a
+  question from the pages its search finds: retrieved exactly as a search
+  is (`internal/retrieve`, now shared by `POST /v1/search`), the first
+  readable pages read as numbered sources (failed and dead ones listed
+  apart, never sources), and an answer streamed citing them as [n], its
+  citations checked once written; every ending is a status. Surfaces:
+  `POST /v1/ask` (NDJSON events), `curio ask` (terminal-safe, `--json`),
+  healthz `asking`, `curio status`/`doctor`. The generator streams
+  (`StreamGenerator`), the gate waits out a load and a check
+  (`Gate.Await`), model answers decode strictly (`internal/jsonstrict`).
+  MCP search takes the caller's own rewrites and names as a plan, asking
+  no model, and hits carry their summary's about line. `cmd/askeval`
+  records and replays every ask and judges each answer with a model
+  other than the writer, and a second judge of another family. On the
+  operator's library, by bars written first: citation validity 1.000,
+  support 0.990 (0.907 by the second judge), claims cited 0.961, source
+  recall 0.800 and abstention 1.000 pass, totals 7.6 s p50 and 9.9 s p95;
+  false abstention 0.257 (0.133 outside the library questions), routing
+  0.625 and the first token's 6.9 s p50 miss (attempt 2). A second loop
+  landed the fixed plans the first had cut: evidence for a claim (passages
+  judged, quotes grounded, both sides cited), how the interests changed (a
+  table of the saves over time, `GET /v1/interests/timeline`, the model
+  describing it), everything about a topic (the hits grouped by interest),
+  routed by English word rules and `mode`, and MCP's `saves_over_time`;
+  passages chosen by the question's own vector inside each source, the
+  budget weighted toward the first two sources, an answer prompt asking
+  for the facts, per-stage timings, `ask.rerank`, and a prompt past the
+  context refused rather than cut. Attempt 3, pre-registered: every bar
+  met by the variant picked (Ask's own rerank off, six sources): validity
+  1.000, support 0.989 (0.915 by the second judge), claims cited 0.957,
+  recall 0.867, abstention 1.000, false abstention 0.143, routing 0.900,
+  first token 3.9 s p50, total 4.8 / 7.7 s; fact coverage 0.305, the two
+  judges' mean, from variant A's 0.211 (attempt 2's answers, the fixed
+  plans asked live); so `ask.rerank` defaults off and `ask.sources` to 6.
+  A fix round after two review loops and an SRE review: an ask that
+  panics no longer takes the daemon down with its heartbeat; a plan or
+  rerank that timed out behind an answer is held against nothing
+  (`modelgate.Traffic`); Ask is on by default only for the measured model
+  (the smaller tiers pass the writer's check, unmeasured); at most 4 asks
+  in flight; the evidence judgment refuses a prompt past the context, and
+  a refused answer prompt is asked again without its last source;
+  routing generalized from a blind synthetic dev set (answer 34/34,
+  evidence 11 to 20/20, interests 11 to 29/30, list 12 to 23/23); the
+  interests answer gives the main shifts briefly, its table's and the
+  groups' rendering in `PromptVersion`. Attempt 4, pre-registered, one
+  confirmation run: every bar met, validity 1.000, support 0.985 (0.869
+  by the second judge), claims cited 0.957, recall 0.867, abstention
+  1.000, false abstention 0.057, routing 0.975, first token 4.1 s p50,
+  total 5.1 / 8.1 s, fact coverage 0.321. Search ranks as before (50 of
+  50, 372 of 372). After it, the routing rules' second half was held to
+  the library's saving (made-up everyday questions about money, health,
+  children, the home and work had gone to the interests, which answer from
+  no page): the fix changed 1 question's route, asked again live, and the
+  other 39 were replayed from attempt 4's books: every bar still met,
+  false abstention 0.086, routing 0.950, support 0.985 (0.888), claims
+  cited 0.963, first token 4.1 s p50, total 5.0 / 8.1 s, fact coverage
+  0.317. Still open: "old ideas worth revisiting",
+  conversation, and the tiers as answer writers on the questions
+  (decisions.md "Ask: a cited, streamed answer over the search path").
+- PR 7, next: the dashboard's Ask mode, built on `/v1/ask`, reranking on
+  the dashboard after its instant results, and the dashboard's wording of
+  a rebuild of the interests that is due.
 
 ## M7 — Hosted mode
 

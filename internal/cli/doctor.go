@@ -213,6 +213,12 @@ func runOwnChecks(ctx context.Context, flags *rootFlags, d deps, r *doctorReport
 				status, detail, hint := rerankingCheck(*rr, health.Understanding)
 				r.add("reranking", status, detail, hint)
 			}
+			// Whether curio ask answers questions, as the asker knows its
+			// model.
+			if a := health.Asking; a != nil {
+				status, detail, hint := askingCheck(*a)
+				r.add("ask", status, detail, hint)
+			}
 			// Whether the daemon holds its index and cards jobs for an
 			// embedding model that doesn't answer: only while it does.
 			if h := health.EmbedderHold; h != nil {

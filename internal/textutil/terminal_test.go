@@ -2,10 +2,12 @@ package textutil
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestTerminalSafe(t *testing.T) {
@@ -63,4 +65,24 @@ func TestTerminalWriter(t *testing.T) {
 	assert.Equal(t, `ok\x1b[2J\x0d
 fine\x07`, b.String())
 	assert.False(t, strings.Contains(b.String(), "\x1b"))
+}
+
+// TestTerminalJSON: a JSON line holding every kind of rune a terminal
+// acts on comes out valid JSON with none of them raw, decoding to the
+// same values.
+func TestTerminalJSON(t *testing.T) {
+	in := map[string]string{"title": "a\x1bb\x07c\x7fd\u009be\u202ef\u200bg\U000E0001h", "text": "\x1b[31mred",
+		"joined": "کتاب\u200cها 👩\u200d💻", "lines": "one\ntwo\tthree"}
+	raw, err := json.Marshal(in)
+	require.NoError(t, err)
+	out := TerminalJSON(raw)
+	require.True(t, json.Valid(out), "%s", out)
+	var got map[string]string
+	require.NoError(t, json.Unmarshal(out, &got))
+	assert.Equal(t, in, got)
+	for _, r := range string(out) {
+		assert.False(t, terminalUnsafe(r) || r == '\n' || r == '\t', "a raw %U", r)
+	}
+	assert.Equal(t, string(out), TerminalSafe(string(out)), "the terminal writer leaves it as it is")
+	assert.Equal(t, []byte(`{"a":1}`), TerminalJSON([]byte(`{"a":1}`)))
 }
