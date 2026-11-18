@@ -270,10 +270,8 @@ func protectCodeSpans(s string) (string, []string) {
 				for j+m < len(s) && s[j+m] == '`' {
 					m++
 				}
-				if escapedAt(s, j) {
-					j += m
-					continue
-				}
+				// Backslashes do not escape a closing delimiter inside a
+				// code span; the next run of the same length closes it.
 				if m == n {
 					closeAt = j
 					break
@@ -467,6 +465,9 @@ func linkDestination(s string, open int) bool {
 	}
 	depth := 0
 	for k := j - 2; k >= 0; k-- {
+		if escapedAt(s, k) {
+			continue
+		}
 		switch s[k] {
 		case ']':
 			depth++
@@ -494,12 +495,14 @@ func unsafeUnclosedTag(rest string) bool {
 		"img", "image", "video", "audio", "source", "iframe", "embed", "object",
 		"link", "input", "track", "script", "style", "meta", "base", "use", "feimage",
 		// Block containers that make later tags live in a raw-HTML renderer.
-		"address", "article", "aside", "blockquote", "body", "canvas", "caption",
-		"col", "colgroup", "dd", "details", "dialog", "div", "dl", "dt", "fieldset",
-		"figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6",
-		"head", "header", "hgroup", "hr", "html", "li", "main", "math", "menu", "nav",
-		"noscript", "ol", "p", "pre", "section", "summary", "svg", "table", "tbody",
-		"td", "template", "tfoot", "th", "thead", "title", "tr", "ul",
+		"address", "article", "aside", "basefont", "blockquote", "body", "canvas",
+		"caption", "center", "col", "colgroup", "dd", "details", "dialog", "dir",
+		"div", "dl", "dt", "fieldset", "figcaption", "figure", "footer", "form",
+		"frame", "frameset", "h1", "h2", "h3", "h4", "h5", "h6", "head", "header",
+		"hgroup", "hr", "html", "legend", "li", "main", "math", "menu", "menuitem",
+		"nav", "noframes", "noscript", "ol", "optgroup", "option", "p", "param",
+		"pre", "section", "summary", "svg", "table", "tbody", "td", "template",
+		"textarea", "tfoot", "th", "thead", "title", "tr", "ul",
 	} {
 		if strings.HasPrefix(lower, name) {
 			return true

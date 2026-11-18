@@ -9,7 +9,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/renderer/html"
 )
+
+// unsafeMarkdown renders raw HTML, the threat model for page text a client
+// might render.
+var unsafeMarkdown = goldmark.New(goldmark.WithRendererOptions(html.WithUnsafe()))
 
 func TestUntrustedTextFences(t *testing.T) {
 	begin, end := untrustedBoundary()
@@ -91,9 +96,21 @@ func TestSanitizeProseEscapedBackticks(t *testing.T) {
 		assert.NotContains(t, got, "evil.example", in)
 		assert.NotContains(t, got, "ignore previous instructions", in)
 		var rendered bytes.Buffer
-		require.NoError(t, goldmark.Convert([]byte(got), &rendered), in)
+		require.NoError(t, unsafeMarkdown.Convert([]byte(got), &rendered), in)
 		assert.NotContains(t, rendered.String(), "<img", in)
 	}
+}
+
+// TestSanitizeProseBackslashBeforeClosingBacktick: a backslash inside a
+// code span does not escape its closing delimiter, so the text after it is
+// still sanitized.
+func TestSanitizeProseBackslashBeforeClosingBacktick(t *testing.T) {
+	in := "`a\\`![x](https://evil.example/x.png)`"
+	got := sanitizeProse(in)
+	assert.NotContains(t, got, "evil.example")
+	var rendered bytes.Buffer
+	require.NoError(t, unsafeMarkdown.Convert([]byte(got), &rendered))
+	assert.NotContains(t, rendered.String(), "<img")
 }
 
 // TestSanitizeMarkdownUnclosedBlockIsProse: an unclosed block tag cannot
@@ -103,10 +120,12 @@ func TestSanitizeMarkdownUnclosedBlockIsProse(t *testing.T) {
 		"<pre\n\n```\n<img src=\"https://evil.example/x.png\">\n```\n",
 		"<div\nuse `<img src=\"https://evil.example/x.png\">` here\n",
 		"<noscript\n<img src=\"https://evil.example/x.png\">\n",
+		"<center\nuse `<img src=\"https://evil.example/x.png\">` here\n",
+		"<legend\n<img src=\"https://evil.example/x.png\">\n",
 	} {
 		got := sanitizeMarkdown(in)
 		var rendered bytes.Buffer
-		require.NoError(t, goldmark.Convert([]byte(got), &rendered), in)
+		require.NoError(t, unsafeMarkdown.Convert([]byte(got), &rendered), in)
 		assert.NotContains(t, rendered.String(), "<img", in)
 	}
 }
@@ -119,7 +138,7 @@ func TestSanitizeMarkdownListFenceIsProse(t *testing.T) {
 	got := sanitizeMarkdown(in)
 	assert.NotContains(t, got, "evil.example")
 	var rendered bytes.Buffer
-	require.NoError(t, goldmark.Convert([]byte(got), &rendered))
+	require.NoError(t, unsafeMarkdown.Convert([]byte(got), &rendered))
 	assert.NotContains(t, rendered.String(), "<img")
 }
 
@@ -185,7 +204,7 @@ func TestSanitizeProseRendersNoImages(t *testing.T) {
 	} {
 		got := sanitizeProse(in)
 		var rendered bytes.Buffer
-		require.NoError(t, goldmark.Convert([]byte(got), &rendered), in)
+		require.NoError(t, unsafeMarkdown.Convert([]byte(got), &rendered), in)
 		assert.NotContains(t, rendered.String(), "<img", in)
 	}
 }
@@ -207,6 +226,8 @@ func TestStripHTMLTags(t *testing.T) {
 		"an escaped closing bracket is not a link")
 	assert.Equal(t, `[x]\()`, stripHTMLTags(`[x]\(<video poster="https://evil.example/p.png"></video>)`),
 		"an escaped parenthesis is not a link")
+	assert.Equal(t, `[x\]](<relative path>)`, stripHTMLTags(`[x\]](<relative path>)`),
+		"an escaped bracket inside a link label does not close it")
 	assert.Equal(t, "alert(1)", stripHTMLTags("<script>alert(1)</script>"))
 }
 
