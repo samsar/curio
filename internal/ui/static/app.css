@@ -1007,6 +1007,7 @@ body:has(#show-scores:checked) .score { display: inline; }
 .more-results .result:first-child { border-top: 1px solid var(--border); }
 /* The last page of a search that matched more than it ranks says so. */
 .results-note { margin-top: var(--s5); color: var(--text-3); font-size: var(--fs-sm); text-align: center; }
+.star-ask { margin-top: var(--s5); color: var(--text-3); font-size: var(--fs-sm); text-align: center; text-wrap: pretty; }
 
 /* Search home -------------------------------------------------------------
    One frame for home and results. On the landing (#results holds

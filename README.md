@@ -86,6 +86,7 @@ Then ask Claude Code about anything you've saved. Claude can search your library
   - [PRIVACY.md](./PRIVACY.md) describes what curio stores, which services it contacts, and how to delete the library.
 - **Changing the writing model.** Curio uses a local model to name your interests. To use a different one, set `generation.model` in `~/.curio/config.yaml` and run `curio up`. To give interest labels a model of their own, set `generation.roles.labels.model` instead (see [docs/setup.md](docs/setup.md#change-the-writing-model)).
 - **GitHub pages.** Without a GitHub token, GitHub allows only 60 requests an hour, about 30 repositories, so github.com bookmarks wait for its hourly limit and a library with many of them takes hours. Any token works, even one with no permissions at all: set `fetcher.github.token` in the same file. `curio doctor` warns when there isn't one.
+- **A star, asked once.** After your fifth search that finds something, Curio asks once for a star on GitHub. It's a link; nothing is sent, and it never asks again. To skip it, set `CURIO_NO_STAR_PROMPT=1` (see [docs/ui.md](./docs/ui.md#the-star-ask)).
 - **Upgrading.** Run `brew upgrade curio`, then `curio up`.
 - **Starting over.** `curio up --fresh` moves your current library aside to `~/.curio.bak-<date>` and starts a new one. Nothing is deleted.
 - **Uninstalling.** Run `curio daemon uninstall`, then `brew uninstall curio`. Your library stays in `~/.curio` until you delete it.

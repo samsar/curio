@@ -626,6 +626,10 @@ type SearchRequest struct {
 	Plan        *Plan          `json:"plan,omitempty"`
 	Rerank      bool           `json:"rerank,omitempty"`
 	RerankOrder []string       `json:"rerank_order,omitempty"`
+	// Interactive says a person ran the search and reads its answer:
+	// curio search on a terminal, never curio-mcp. The daemon counts it
+	// toward its one ask for a star (SearchResponse.StarPrompt).
+	Interactive bool `json:"interactive,omitempty"`
 }
 
 // Reranking mirrors api.Reranking: how the ranking's head was ordered.
@@ -988,7 +992,10 @@ type SearchResponse struct {
 	// Reranking when it sent Rerank or RerankOrder.
 	Understanding *Understanding `json:"understanding,omitempty"`
 	Reranking     *Reranking     `json:"reranking,omitempty"`
-	Items         []SearchHit    `json:"items"`
+	// StarPrompt is true on the one answer, per home, with which the
+	// client asks for a star on GitHub.
+	StarPrompt bool        `json:"star_prompt,omitempty"`
+	Items      []SearchHit `json:"items"`
 }
 
 func (c *Client) Search(ctx context.Context, req SearchRequest) (*SearchResponse, error) {

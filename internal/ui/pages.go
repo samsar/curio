@@ -11,6 +11,7 @@ import (
 
 	"github.com/samsar/curio/internal/docmeta"
 	"github.com/samsar/curio/internal/planlabel"
+	"github.com/samsar/curio/internal/starprompt"
 	"github.com/samsar/curio/internal/store"
 )
 
@@ -457,6 +458,22 @@ type Search struct {
 	// Understood is how the query was understood, for a search that asked
 	// (Enter, or a plan's link); nil for search as you type.
 	Understood *Understood
+	// Star is the one ask for a star on GitHub, under the results of the
+	// search that made it (NewStarAsk); nil on every other page.
+	Star *StarAsk
+}
+
+// StarAsk is the ask for a star on GitHub: a quiet line under a search's
+// results, its words internal/starprompt's, as curio search's are, and its
+// link to the repository built in Go.
+type StarAsk struct {
+	Message, Label, Href, Once string
+}
+
+// NewStarAsk is the ask, shown once per home.
+func NewStarAsk() *StarAsk {
+	return &StarAsk{Message: starprompt.Message, Label: "Star curio on GitHub", Href: starHref(),
+		Once: starprompt.Once}
 }
 
 // SearchPageSize is how many results a page of search shows. It is fixed,

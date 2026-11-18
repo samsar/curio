@@ -36,6 +36,10 @@ const (
 	PIDFileName = "daemon.pid"
 	// StartLockFileName serializes clients that auto-start the daemon.
 	StartLockFileName = "daemon.start.lock"
+	// StarPromptFile is where the daemon counts a person's searches until
+	// it asks, once, for a star on GitHub, and then records that it asked
+	// (internal/starprompt).
+	StarPromptFile = "star.json"
 
 	// CurrentSchemaVersion is the placeholder schema version Init writes
 	// into a new marker. The daemon's first start replaces it with the
@@ -254,6 +258,7 @@ func (h *Home) DaemonLogPath() string    { return filepath.Join(h.LogsDir(), Dae
 func (h *Home) LaunchdErrPath() string   { return filepath.Join(h.LogsDir(), LaunchdErrFile) }
 func (h *Home) PIDFile() string          { return filepath.Join(h.Path, PIDFileName) }
 func (h *Home) StartLockFile() string    { return filepath.Join(h.Path, StartLockFileName) }
+func (h *Home) StarPromptPath() string   { return filepath.Join(h.Path, StarPromptFile) }
 
 // Meta re-reads the marker file each call. Returns the parsed struct.
 func (h *Home) Meta() (Meta, error) {

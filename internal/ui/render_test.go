@@ -275,6 +275,8 @@ func sampleVariants(t testing.TB) map[string][]any {
 				Results: &SearchResults{TookMS: 80, Total: 100, Capped: true, Hits: sampleHits()}},
 			Search{Layout: layout(NavSearch), Query: evilAttr, Page: 5, Results: &SearchResults{Total: 37}},
 			Search{Layout: layout(NavSearch), Query: evilURL, Page: 1, Results: &SearchResults{WordHits: 1, Total: 4, Hits: sampleHits()}},
+			Search{Layout: layout(NavSearch), Query: evilURL, Page: 1, Results: &SearchResults{WordHits: 1, Total: 4, Hits: sampleHits()},
+				Star: NewStarAsk()},
 			Search{Layout: layout(NavSearch), Query: evilScript, Page: 1, Results: &SearchResults{}},
 			Search{Layout: layout(NavSearch), Query: evilScript, Type: evilAttr, Page: 3, Plan: evilQuotes,
 				Results:    &SearchResults{WordHits: 1, TookMS: 2400, Total: 37, Hits: sampleHits()},

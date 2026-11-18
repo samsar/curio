@@ -448,6 +448,25 @@ ui:
 
 Only https images are ever shown.
 
+## The star ask
+
+Once per library, the fifth search you submit (Enter, or the Search
+button) whose first page finds something by its words ends with one
+quiet line under its results asking for a star on GitHub, with a link
+to the repository. `curio search` counts too when you read it on a
+terminal, and asks on stderr after its results; the two share one
+count and one ask. Search as you type, later pages, a search that found
+nothing (or only pages nearest in meaning), piped output and
+`curio-mcp`'s searches never count. The ask is shown once and never
+again; curio sends nothing and doesn't learn whether you starred it.
+The daemon keeps the count in `~/.curio/star.json`.
+
+To never be asked, set `CURIO_NO_STAR_PROMPT=1`: in your shell, it stops
+`curio search` from counting; in the daemon's environment, it stops the
+daemon counting at all (a daemon run by its launchd agent doesn't see
+your shell's: run `launchctl setenv CURIO_NO_STAR_PROMPT 1`, then
+`curio daemon stop`). `CI` set in the shell does the same as the first.
+
 ## Turning it off
 
 ```yaml
