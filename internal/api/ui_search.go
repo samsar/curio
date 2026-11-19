@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/samsar/curio/internal/starprompt"
 	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/ui"
 	"github.com/samsar/curio/internal/understand"
@@ -35,6 +36,8 @@ import (
 // without asking (planParams). Asked from htmx, an understood page's
 // answer says which address to push: its plan's, or its words' when it
 // went without one, so that reload, back and forward never plan again.
+// A submitted search's first page counts toward the one ask for a star on
+// GitHub, and shows it under its results when it is the one (ui.StarAsk).
 func (h pageHandlers) search(w http.ResponseWriter, r *http.Request) {
 	contentType, err := contentTypeParam(r)
 	if err != nil {
@@ -61,10 +64,17 @@ func (h pageHandlers) search(w http.ResponseWriter, r *http.Request) {
 		h.writePageError(w, r, err, ui.NavSearch)
 		return
 	}
+	// A submitted search is the person's (Enter, the Search button, or the
+	// same address typed or reloaded): its first page counts toward the one
+	// ask for a star. A keystroke's, a later page's and a plan's don't.
+	req.Interactive, req.surface = req.Understand && vm.Page == 1, starprompt.SurfaceDashboard
 	resp, err := h.d.search(r.Context(), req)
 	if err == nil {
 		vm.Results = searchResults(resp)
 		vm.Plan, vm.Understood, err = understoodView(resp)
+		if resp.StarPrompt {
+			vm.Star = ui.NewStarAsk()
+		}
 	}
 	if vm.Understood != nil && h.d.Planner != nil {
 		vm.Understood.Timeout = h.d.Planner.Timeout()

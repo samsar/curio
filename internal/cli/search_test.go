@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -16,9 +18,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/samsar/curio/internal/api"
 	"github.com/samsar/curio/internal/api/apitest"
 	"github.com/samsar/curio/internal/client"
 	"github.com/samsar/curio/internal/search"
+	"github.com/samsar/curio/internal/starprompt"
 	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/understand"
 )
@@ -301,4 +305,91 @@ func TestRenderSearchResultsEscapesControls(t *testing.T) {
 	assert.NotContains(t, b.String(), "\x1b")
 	assert.NotContains(t, b.String(), "\x07")
 	assert.Contains(t, b.String(), `\x1b`)
+}
+
+// starCLI runs curio search against srv, whose daemon counts toward the
+// star prompt, with a person reading its output or not.
+func starCLI(t *testing.T, srv *apitest.Server, interactive bool) (stdout, stderr string) {
+	t.Helper()
+	d := testDeps(t)
+	d.interactive = func(io.Writer, io.Writer) bool { return interactive }
+	var out, errOut bytes.Buffer
+	require.NoError(t, runCLIStreams(newRootCmdWith(d), srv.Home.Path, srv.URL, &out, &errOut, "search", "sourdough"))
+	return out.String(), errOut.String()
+}
+
+// TestSearch_StarAsk: curio search read by a person counts toward the
+// star prompt, and the fifth asks, once, on stderr after the results, so
+// stdout holds the results alone; one whose output nobody reads (a pipe,
+// a script) counts nothing.
+func TestSearch_StarAsk(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "star.json")
+	srv := apitest.Start(t, apitest.DocumentLists, func(d *api.Deps) { d.Star = starprompt.Open(path, false, nil) })
+	srv.AddBookmark(t, "https://example.com/levain", store.SourceChrome, "Sourdough levain", "/Bookmarks Bar/Baking")
+	ask := "\n" + starprompt.Message + " " + starprompt.RepoURL + "\n" + starprompt.Once + "\n"
+
+	for range starprompt.Threshold * 2 {
+		_, stderr := starCLI(t, srv, false)
+		assert.Empty(t, stderr)
+	}
+	_, err := os.Stat(path)
+	require.ErrorIs(t, err, os.ErrNotExist, "nothing counted")
+
+	for i := 1; i < starprompt.Threshold; i++ {
+		_, stderr := starCLI(t, srv, true)
+		assert.Empty(t, stderr, "search %d", i)
+	}
+	stdout, stderr := starCLI(t, srv, true)
+	assert.Equal(t, ask, stderr)
+	assert.Contains(t, stdout, `1 results for "sourdough"`)
+	assert.NotContains(t, stdout, starprompt.RepoURL)
+	for range 3 {
+		_, stderr := starCLI(t, srv, true)
+		assert.Empty(t, stderr, "asked once")
+	}
+}
+
+// TestSearch_OlderDaemonStarPrompt: a daemon from before the star prompt
+// refuses interactive; curio search sends the search again without it,
+// and says nothing of it, since the results are the same.
+func TestSearch_OlderDaemonStarPrompt(t *testing.T) {
+	var bodies []string
+	old := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, err := io.ReadAll(r.Body)
+		assert.NoError(t, err)
+		bodies = append(bodies, string(raw))
+		if strings.Contains(string(raw), `"interactive"`) {
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"type":"about:blank","title":"bad request","status":400,"detail":`+
+				`"unknown field \"interactive\": this curio-daemon doesn't support it"}`)
+			return
+		}
+		fmt.Fprint(w, `{"query":"kafka","took_ms":3,"bm25_hits":0,"vector_hits":0,"total":0,"capped":false,"items":[]}`)
+	}))
+	t.Cleanup(old.Close)
+
+	var stderr bytes.Buffer
+	res, err := sendSearch(context.Background(), client.New(old.URL), client.SearchRequest{Query: "kafka",
+		Interactive: true}, &stderr)
+	require.NoError(t, err)
+	assert.False(t, res.StarPrompt)
+	assert.Equal(t, []string{`{"query":"kafka","interactive":true}`, `{"query":"kafka"}`}, bodies)
+	assert.Empty(t, stderr.String())
+}
+
+// TestSearchInteractive: the opt-out and CI turn the count off whatever
+// the output is, and output that isn't a terminal is never a person's.
+func TestSearchInteractive(t *testing.T) {
+	t.Setenv("CI", "")
+	t.Setenv(starprompt.OptOutEnv, "")
+	var buf bytes.Buffer
+	assert.False(t, searchInteractive(&buf, &buf), "a buffer is no terminal")
+	assert.False(t, searchInteractive(os.Stdout, &buf))
+
+	t.Setenv("CI", "true")
+	assert.False(t, searchInteractive(os.Stdout, os.Stderr))
+	t.Setenv("CI", "")
+	t.Setenv(starprompt.OptOutEnv, "1")
+	assert.False(t, searchInteractive(os.Stdout, os.Stderr))
 }

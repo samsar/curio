@@ -27,6 +27,7 @@ import (
 	"github.com/samsar/curio/internal/ollama"
 	"github.com/samsar/curio/internal/rerank"
 	"github.com/samsar/curio/internal/search"
+	"github.com/samsar/curio/internal/starprompt"
 	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/summarize"
 	"github.com/samsar/curio/internal/understand"
@@ -315,6 +316,11 @@ type exchange struct {
 // TestOpenAPI_ResponsesMatchSchemas drives every documented operation over
 // seeded fixtures and validates each real response against the spec: first
 // a few while the daemon is starting, then all of them once it is ready.
+// askingStar is a star prompt whose every count is the one that asks.
+type askingStar struct{}
+
+func (askingStar) Searched(starprompt.Surface) bool { return true }
+
 func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 	// Drifted, both parts of the build changed and a sample showed it.
 	monitor := &driftMonitor{report: drifted(time.Now())}
@@ -338,6 +344,8 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 		d.Search = search.New(d.Chunks, d.Documents, d.Index, emb, search.Config{BM25Weight: 1, VectorWeight: 1,
 			FieldsWeight: 1, Log: slog.New(slog.DiscardHandler)})
 		d.Embedder = pingingEmbedder{err: fmt.Errorf("%w: connection refused", ollama.ErrUnreachable)}
+		// Every interactive search is the one that asks for a star.
+		d.Star = askingStar{}
 		// "kafka" is planned, with a filter its guards dropped; anything
 		// else finds the model loading.
 		// Its state with every field set: unfit, held both ways, and failed.
@@ -532,6 +540,8 @@ func TestOpenAPI_ResponsesMatchSchemas(t *testing.T) {
 			`"rewrites":["kafka log"],"names":["Kafka Guide"]}}`), http.StatusOK},
 		{"POST /v1/search", jsonBody(http.MethodPost, "/v1/search", `{"query":"kafka","plan":{"kind":"summary"}}`),
 			http.StatusBadRequest},
+		{"POST /v1/search", jsonBody(http.MethodPost, "/v1/search", `{"query":"kafka","interactive":true}`),
+			http.StatusOK},
 		{"POST /v1/search", jsonBody(http.MethodPost, "/v1/search", `{"query":"kafka","rerank":true}`),
 			http.StatusOK},
 		{"POST /v1/search", jsonBody(http.MethodPost, "/v1/search", `{"query":"kafka log","k":3,"offset":2,`+

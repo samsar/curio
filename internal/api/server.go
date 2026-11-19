@@ -78,6 +78,7 @@ type Deps struct {
 	SummaryWriter   SummaryWriterState              // the summaries' writer, on healthz; nil reports summaries off
 	SummaryFeed     SummaryFeed                     // the summary pass, its rate in /v1/stats, its brake on healthz; nil reports none
 	Foreground      *jobs.Foreground                // the person's use of the models, marked around each search; nil marks none
+	Star            StarPrompt                      // counts a person's searches until the one ask for a star; nil never asks
 	TenantID        string                          // default store.LocalTenantID
 	Log             *slog.Logger
 }

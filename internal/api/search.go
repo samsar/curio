@@ -11,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/samsar/curio/internal/search"
+	"github.com/samsar/curio/internal/starprompt"
 	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/understand"
 )
@@ -25,6 +26,9 @@ import (
 // so an understood search's pages are windows of one ranking. A request
 // sends one or neither. Filters win over a plan's, dimension by dimension.
 //
+// Interactive marks a search a person ran and reads, which counts toward
+// the one ask for a star on GitHub (StarPrompt in the response).
+//
 // Rerank asks the reranker to reorder the ranking's head; RerankOrder
 // orders it by the head a response's reranking.order returned, asking no
 // model, so a reranked search's pages are windows of one ranking too. A
@@ -38,6 +42,12 @@ type SearchRequest struct {
 	Plan        *PlanJSON `json:"plan,omitempty"`
 	Rerank      bool      `json:"rerank,omitempty"`
 	RerankOrder []string  `json:"rerank_order,omitempty"`
+	// Interactive says a person ran the search and reads its answer, which
+	// the star prompt counts (countSearch).
+	Interactive bool `json:"interactive,omitempty"`
+	// surface is where an interactive search was run: the dashboard sets
+	// it, and a request over the wire is curio search's.
+	surface starprompt.Surface
 }
 
 // PlanJSON mirrors the openapi Plan schema: what a search does for a
@@ -169,7 +179,8 @@ type ChunkMatchJSON struct {
 // understood, and Reranking how one that sent rerank or rerank_order had
 // its head ordered; TookMS covers the planning and the reranking too.
 // Items are in the reranker's order when it reordered the head; each
-// Score stays the first ranking's.
+// Score stays the first ranking's. StarPrompt is true on the one answer,
+// per home, with which the client asks for a star on GitHub.
 type SearchResponse struct {
 	Query         string              `json:"query"`
 	TookMS        int64               `json:"took_ms"`
@@ -185,6 +196,7 @@ type SearchResponse struct {
 	Undated       *int                `json:"undated,omitempty"`
 	Understanding *Understanding      `json:"understanding,omitempty"`
 	Reranking     *Reranking          `json:"reranking,omitempty"`
+	StarPrompt    bool                `json:"star_prompt,omitempty"`
 	Items         []SearchHitResponse `json:"items"`
 }
 
@@ -282,8 +294,10 @@ func (d Deps) search(ctx context.Context, req SearchRequest) (SearchResponse, er
 	if err != nil {
 		return SearchResponse{}, err
 	}
+	wordHits := res.BM25Hits + res.FieldsHits + res.TitleHits + res.SummaryHits
 	return SearchResponse{
 		Query:         res.Query,
+		StarPrompt:    d.countSearch(req, len(items), wordHits),
 		TookMS:        time.Since(start).Milliseconds(),
 		BM25Hits:      res.BM25Hits,
 		VectorHits:    res.VectorHits,
@@ -299,6 +313,24 @@ func (d Deps) search(ctx context.Context, req SearchRequest) (SearchResponse, er
 		Reranking:     reranking,
 		Items:         items,
 	}, nil
+}
+
+// StarPrompt counts the searches a person runs and says when to ask, once
+// per home, for a star on GitHub: the daemon's *starprompt.Prompt.
+type StarPrompt interface {
+	Searched(surface starprompt.Surface) bool
+}
+
+// countSearch counts req toward the star prompt and reports whether its
+// answer asks. Only a search a person ran and reads counts (Interactive),
+// and only its first page, holding results its ranking matched by the
+// query's words: a later page is the same search, and a ranking of what is
+// nearest in meaning alone found nothing.
+func (d Deps) countSearch(req SearchRequest, items, wordHits int) bool {
+	if d.Star == nil || !req.Interactive || req.Offset != 0 || items == 0 || wordHits == 0 {
+		return false
+	}
+	return d.Star.Searched(cmp.Or(req.surface, starprompt.SurfaceCLI))
 }
 
 // understand is req's plan and how it came to be: the plan it supplied,

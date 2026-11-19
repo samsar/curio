@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -17,6 +19,7 @@ import (
 
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/search"
+	"github.com/samsar/curio/internal/starprompt"
 	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/ui"
 )
@@ -585,4 +588,43 @@ func TestSearch_ExtractionLookupFailure(t *testing.T) {
 		func(d *Deps) { d.Extractions = failingExtractionLookup{d.Extractions} })
 	p := assertProblem(t, s.search(t, `{"query":"kafka"}`), http.StatusInternalServerError)
 	assert.Contains(t, p.Detail, errInjected.Error())
+}
+
+// TestSearch_StarPrompt: a request that sends interactive counts toward
+// the star prompt when its first page has results its words matched, and
+// the fifth such answer alone carries star_prompt; one without
+// interactive, a later page, and a search that matched nothing by its
+// words count nothing.
+func TestSearch_StarPrompt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "star.json")
+	s := newSearchServer(t, okEmbedder(), search.Config{BM25Weight: 1, VectorWeight: 1}, func(d *Deps) {
+		d.Star = starprompt.Open(path, false, nil)
+	})
+	asks := func(body string) bool {
+		t.Helper()
+		resp := s.search(t, body)
+		require.Equal(t, http.StatusOK, resp.status, resp.body)
+		var out map[string]any
+		require.NoError(t, json.Unmarshal([]byte(resp.body), &out))
+		_, ok := out["star_prompt"]
+		return ok
+	}
+	for range starprompt.Threshold * 2 {
+		assert.False(t, asks(`{"query":"kafka"}`), "not a person's")
+		assert.False(t, asks(`{"query":"kafka","interactive":true,"k":1,"offset":1}`), "a later page")
+		assert.False(t, asks(`{"query":"zyzzyva","interactive":true}`), "nearest in meaning alone")
+	}
+	_, err := os.Stat(path)
+	require.ErrorIs(t, err, os.ErrNotExist, "nothing counted")
+
+	for i := 1; i < starprompt.Threshold; i++ {
+		assert.False(t, asks(`{"query":"kafka","interactive":true}`), "search %d", i)
+	}
+	assert.True(t, asks(`{"query":"kafka","interactive":true}`))
+	for range 3 {
+		assert.False(t, asks(`{"query":"kafka","interactive":true}`), "asked once")
+	}
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"shown_in": "cli"`, "a request over the wire is curio search's")
 }
