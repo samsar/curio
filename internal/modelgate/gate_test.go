@@ -794,3 +794,43 @@ func TestAwait_Ready(t *testing.T) {
 	ref, ok := r.g.Await(context.Background(), func(Refusal) { t.Error("waited") })
 	assert.True(t, ok, "%+v", ref)
 }
+
+// TestReady_StaleNotLoaded: a "not loaded" answer that a warm-up overtook
+// (Loaded answered before the load finished, Ready took the lock after)
+// starts no second load and counts no eviction: the model is loaded.
+func TestReady_StaleNotLoaded(t *testing.T) {
+	warmGate, asking, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	m := &fakeModel{warmGate: warmGate}
+	var calls atomic.Int32
+	m.asked = func(context.Context) (bool, error) {
+		if calls.Add(1) == 2 {
+			// The second caller reads "not loaded" now, and is answered
+			// only after the first caller's load has finished.
+			close(asking)
+			<-release
+			return false, nil
+		}
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return m.loaded, nil
+	}
+	r := newRig(t, m, nil)
+
+	first, ok := r.g.Ready(context.Background())
+	require.False(t, ok)
+	require.Equal(t, Cold, first.Kind, "the first caller starts the load")
+
+	second := make(chan bool, 1)
+	go func() {
+		_, ok := r.g.Ready(context.Background())
+		second <- ok
+	}()
+	<-asking
+	close(warmGate)
+	r.settle(t)
+	close(release)
+
+	assert.True(t, <-second, "the load the stale answer missed made the model ready")
+	assert.Equal(t, 1, r.model.count(&r.model.warms), "no second load")
+	assert.NotContains(t, r.logs.String(), "was unloaded within its keep-alive", "no eviction counted")
+}

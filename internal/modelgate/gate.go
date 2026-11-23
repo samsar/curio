@@ -215,6 +215,11 @@ type Gate struct {
 	unfitReason string
 	checkedAt   time.Time // when the verdict was reached
 	running     bool      // a warm-up or check is in flight
+	// loads counts the warm-ups that loaded the model. Ready asks whether
+	// the model is loaded without g.mu held, so a load can finish between
+	// the question and the answer's use: Ready compares it before and after
+	// and takes a "not loaded" a load overtook for loaded.
+	loads uint64
 	// workDone is closed when the warm-up or the check in flight ends, and
 	// is closed already while neither runs: what Await waits on.
 	workDone   chan struct{}
@@ -342,6 +347,7 @@ func (g *Gate) Ready(ctx context.Context) (Refusal, bool) {
 		g.mu.Unlock()
 		return r, false
 	}
+	loads := g.loads
 	g.mu.Unlock()
 
 	loaded := true
@@ -382,6 +388,12 @@ func (g *Gate) Ready(ctx context.Context) (Refusal, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	now := g.now()
+	if !loaded && g.loads != loads {
+		// A warm-up loaded the model after Loaded answered: the answer is
+		// stale. Taken as it stands, it would count the fresh load's
+		// keep-alive as an eviction and start a second load.
+		loaded, missing = true, nil
+	}
 	if !loaded {
 		if r, held := g.unloadedLocked(now); held {
 			return r, false
@@ -680,6 +692,7 @@ func (g *Gate) warm() bool {
 		return false
 	}
 	g.warmErr = nil
+	g.loads++
 	g.keptUntil = g.now().Add(g.keptFor())
 	return true
 }
