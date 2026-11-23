@@ -24,6 +24,7 @@ encryption at rest.
 | `config.yaml` | your settings, including fetcher options, model names and any GitHub or Jina credentials |
 | `fetcher_rules.yaml` | optional per-host fetcher rules you write |
 | `setup.json` | what `curio up` remembers between runs, such as a declined optional install |
+| `star.json` | how many of your searches found something, up to five, and when curio asked once for a GitHub star; no query text |
 | `logs/` | daemon logs, which can include URLs, page titles, error text and provider responses |
 | `.curio-meta.json`, daemon state files | the home's format and embedding marker, process lock and start lock |
 
@@ -59,6 +60,11 @@ make network requests to do its job:
   content to the client you connected (Claude Code, Claude Desktop, ...).
   That client decides what to send to its model provider; curio does not call
   it. See [the MCP trust model](./docs/mcp.md#trust-model).
+
+After your fifth search that finds something, `curio search` (on a
+terminal) and the dashboard ask once for a star on GitHub. The ask is a
+link: curio sends nothing, and never learns whether you followed it.
+`curio-mcp`'s searches never count.
 
 The dashboard does not load images from stored pages unless you ask it to:
 `ui.load_remote_images` is off by default, so a page's images are not

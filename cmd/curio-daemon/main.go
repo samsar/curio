@@ -33,6 +33,7 @@ import (
 	"github.com/samsar/curio/internal/rerank"
 	"github.com/samsar/curio/internal/retrieve"
 	"github.com/samsar/curio/internal/search"
+	"github.com/samsar/curio/internal/starprompt"
 	"github.com/samsar/curio/internal/store"
 	sqlitestore "github.com/samsar/curio/internal/store/sqlite"
 	"github.com/samsar/curio/internal/summarize"
@@ -694,6 +695,7 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 		SummaryFeed:     feed,
 		Foreground:      foreground,
 		Reranker:        reranker,
+		Star:            starprompt.Open(home.StarPromptPath(), os.Getenv(starprompt.OptOutEnv) != "", slog.Default()),
 		Log:             slog.Default(),
 	}
 	if scheduler != nil {

@@ -61,6 +61,11 @@ across both (hx-preserve); a full page load starts it unchecked. A page
 past the last is the numbered lists' out-of-range card, under the head
 that counts the matches.
 
+Once per home, the fifth search submitted (Enter, or the Search button)
+whose first page found something by its words asks for a star on GitHub:
+one quiet line under that page's results, never on another page or for
+a keystroke's search. It is a link, and nothing is sent.
+
 The page is its own search box, so the header has none. The define holds
 an HTML comment, which html/template leaves out of the page, because
 text/template keeps a block's default over an empty define.
@@ -123,6 +128,7 @@ text/template keeps a block's default over an empty define.
 {{else}}{{with $.OutOfRange}}{{template "out-of-range" .}}{{end}}{{end}}
 {{if $.CappedNote}}<p class="results-note">curio ranks the best {{num .Total}} matches; refine the query to see others.</p>{{end}}
 {{with $.Pager}}<div hx-boost="true" hx-target="#results" hx-select="#results > *" hx-swap="innerHTML show:#results:top" hx-sync="closest .search-page:drop">{{template "pager" .}}</div>{{end}}
+{{with $.Star}}<p class="star-ask">{{.Message}} <a href="{{.Href}}" rel="noopener noreferrer" target="_blank">{{.Label}}</a>. {{.Once}}</p>{{end}}
 {{else}}<div class="scores-kept"><input type="checkbox" id="show-scores" hx-preserve="true" tabindex="-1" aria-hidden="true"></div>
 <div class="card"><div class="empty">
 <div class="empty-icon">{{template "icon" "search-x"}}</div>

@@ -6,20 +6,26 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"golang.org/x/term"
 
 	"github.com/samsar/curio/internal/client"
 	"github.com/samsar/curio/internal/daemonctl"
 	"github.com/samsar/curio/internal/docmeta"
 	"github.com/samsar/curio/internal/planlabel"
+	"github.com/samsar/curio/internal/starprompt"
 	"github.com/samsar/curio/internal/textutil"
 )
 
-func newSearchCmd(env *daemonctl.Env) *cobra.Command {
+// newSearchCmd is curio search. interactive says whether a person reads
+// its output (searchInteractive): only then does it ask the daemon to
+// count the search toward its one ask for a star, and print the ask.
+func newSearchCmd(env *daemonctl.Env, interactive func(stdout, stderr io.Writer) bool) *cobra.Command {
 	var (
 		k        int
 		literal  bool
@@ -52,7 +58,8 @@ func newSearchCmd(env *daemonctl.Env) *cobra.Command {
 				return err
 			}
 			req := client.SearchRequest{Query: strings.Join(args, " "), K: k, Understand: !literal,
-				Rerank: !literal && !noRerank}
+				Rerank:      !literal && !noRerank,
+				Interactive: interactive != nil && interactive(cmd.OutOrStdout(), cmd.ErrOrStderr())}
 			if !filters.IsEmpty() {
 				req.Filters = &filters
 			}
@@ -66,6 +73,9 @@ func newSearchCmd(env *daemonctl.Env) *cobra.Command {
 			renderHeader(cmd.OutOrStdout(), res.Understanding, res.Reranking, time.Local)
 			renderSearchResults(cmd.OutOrStdout(), res)
 			renderUndated(cmd.OutOrStdout(), res.Undated, filters.IncludeUndated)
+			if res.StarPrompt && req.Interactive {
+				renderStarAsk(cmd.ErrOrStderr())
+			}
 			return nil
 		},
 	}
@@ -98,9 +108,32 @@ func addFilterFlags(f *pflag.FlagSet, filters *client.SearchFilters) {
 		"Keep the documents a date filter can't judge, which it leaves out by default")
 }
 
+// searchInteractive reports whether a person reads curio search's output:
+// stdout and stderr are both terminals, and neither CURIO_NO_STAR_PROMPT
+// nor CI is set. Piped output, a script's, or CI's never counts.
+func searchInteractive(stdout, stderr io.Writer) bool {
+	if os.Getenv(starprompt.OptOutEnv) != "" || os.Getenv("CI") != "" {
+		return false
+	}
+	return isTerminal(stdout) && isTerminal(stderr)
+}
+
+// isTerminal reports whether w is a terminal.
+func isTerminal(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	return ok && term.IsTerminal(int(f.Fd()))
+}
+
+// renderStarAsk asks, once per home, for a star on GitHub: after the
+// results, on stderr, so stdout holds the results alone.
+func renderStarAsk(w io.Writer) {
+	fmt.Fprintf(w, "\n%s %s\n%s\n", starprompt.Message, starprompt.RepoURL, starprompt.Once)
+}
+
 // refusable are the fields of a search request a daemon that predates
 // them refuses, in the order the request sends them, each with how to
-// drop it and the note that says so.
+// drop it and the note that says so, if any: a daemon that predates
+// interactive has no ask to make, which needs no note.
 var refusable = []struct {
 	field string
 	note  string
@@ -118,14 +151,20 @@ var refusable = []struct {
 		r.Rerank = false
 		return sent
 	}},
+	{"interactive", "", func(r *client.SearchRequest) bool {
+		sent := r.Interactive
+		r.Interactive = false
+		return sent
+	}},
 }
 
 // sendSearch sends req, and when the daemon predates a field it sends
-// (understand, rerank), sends it again without that field, saying so on
-// stderr, at most once a field: right after an upgrade the daemon running
-// is the old one until it restarts, and every search would otherwise fail.
+// (understand, rerank, interactive), sends it again without that field,
+// saying so on stderr when that changes the results, at most once a
+// field: right after an upgrade the daemon running is the old one until
+// it restarts, and every search would otherwise fail.
 // The decoder names the first field it doesn't know, so a daemon that
-// predates both is asked three times.
+// predates all three is asked four times.
 func sendSearch(ctx context.Context, s searcher, req client.SearchRequest, stderr io.Writer) (
 	*client.SearchResponse, error) {
 	dropped := map[string]bool{}
@@ -135,7 +174,9 @@ func sendSearch(ctx context.Context, s searcher, req client.SearchRequest, stder
 		for _, f := range refusable {
 			if !dropped[f.field] && predates(err, f.field) && f.drop(&req) {
 				dropped[f.field], retry = true, true
-				fmt.Fprintln(stderr, f.note)
+				if f.note != "" {
+					fmt.Fprintln(stderr, f.note)
+				}
 				break
 			}
 		}

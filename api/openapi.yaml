@@ -2759,6 +2759,16 @@ components:
             character. Not with rerank, nor with understand: a later page
             of an understood search sends the plan its first page
             returned, so it tiles the same ranking.
+        interactive:
+          type: boolean
+          description: >
+            A person ran this search and reads its answer (curio search on
+            a terminal; never an agent's search through curio-mcp). The
+            daemon counts such a search when it is a first page whose
+            ranking matched the query's words and has results, and once per
+            home, at the fifth, answers star_prompt so the client can ask
+            for a star on GitHub. Omitted means false. Nothing is sent
+            anywhere. A daemon from before the ask refuses the field.
       required: [query]
 
     SearchFilters:
@@ -3068,6 +3078,14 @@ components:
             and on every page of every query with these filters.
         understanding: { $ref: "#/components/schemas/Understanding" }
         reranking: { $ref: "#/components/schemas/Reranking" }
+        star_prompt:
+          type: boolean
+          description: >
+            Present and true on the one answer, per home, with which the
+            client asks the person for a star on GitHub: the fifth counted
+            search of a request that sent interactive. The daemon records
+            the ask before answering, so no other answer carries it.
+            Turned off by CURIO_NO_STAR_PROMPT in the daemon's environment.
         items:
           type: array
           description: >

@@ -806,10 +806,11 @@ func TestMCP_SearchFilters(t *testing.T) {
 
 // TestMCP_SearchIsLiteral: search_bookmarks never asks the daemon to
 // understand the question or rerank its results, nor sends a plan or an
-// order, and its input has none of those fields: the calling model writes
-// the filters and rewrites itself, and ranks what it reads, and a second,
-// local model would add seconds of the call's budget and guesses that
-// compete with its own (decisions.md "Understanding the question",
+// order, nor counts as a person's search toward the star prompt
+// (interactive), and its input has none of those fields: the calling
+// model writes the filters and rewrites itself, and ranks what it reads,
+// and a second, local model would add seconds of the call's budget and
+// guesses that compete with its own; and its caller isn't a person to ask (decisions.md "Understanding the question",
 // "Reranking: a reranker role over the ranking's head, routed by the
 // plan's kind").
 func TestMCP_SearchIsLiteral(t *testing.T) {
@@ -819,7 +820,7 @@ func TestMCP_SearchIsLiteral(t *testing.T) {
 			"saved_after": "2025-06-01"}})
 	require.NoError(t, err)
 	req := cs.lastSearch.Load().(map[string]any)
-	for _, field := range []string{"understand", "plan", "rerank", "rerank_order"} {
+	for _, field := range []string{"understand", "plan", "rerank", "rerank_order", "interactive"} {
 		assert.NotContains(t, req, field)
 	}
 
@@ -856,7 +857,7 @@ func TestMCP_SearchIsLiteral(t *testing.T) {
 		assert.Contains(t, input.Properties, "query")
 		assert.Contains(t, input.Properties, "rewrites")
 		assert.Contains(t, input.Properties, "names")
-		for _, field := range []string{"understand", "plan", "rerank", "rerank_order", "kind"} {
+		for _, field := range []string{"understand", "plan", "rerank", "rerank_order", "kind", "interactive"} {
 			assert.NotContains(t, input.Properties, field)
 		}
 	}

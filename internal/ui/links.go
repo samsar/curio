@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/samsar/curio/internal/starprompt"
 )
 
 // Every link a page makes is built here, whole, from the values it names:
@@ -463,6 +465,9 @@ func interestsHref(mapOff bool) string {
 	}
 	return mapHref(MapQuery{})
 }
+
+// starHref is the repository the ask for a star links to.
+func starHref() string { return starprompt.RepoURL }
 
 // outbound is u when it is an http or https URL, which a page may link
 // to, and "" otherwise: a stored URL is never trusted to be one.

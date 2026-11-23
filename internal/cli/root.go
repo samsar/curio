@@ -98,17 +98,21 @@ type deps struct {
 	// openURL opens a URL in the browser: openInBrowser, or a test's,
 	// which never runs open.
 	openURL func(ctx context.Context, url string) error
+	// interactive says whether a person reads curio search's output:
+	// searchInteractive, or a test's; nil means never.
+	interactive func(stdout, stderr io.Writer) bool
 }
 
 func newRootCmd() *cobra.Command {
 	return newRootCmdWith(deps{
-		connect:   daemonctl.Connect,
-		probe:     setup.SystemProbe{},
-		installer: setup.NewHomebrew(),
-		newUI:     setup.NewUI,
-		sources:   importer.Discover,
-		geteuid:   os.Geteuid,
-		openURL:   openInBrowser,
+		connect:     daemonctl.Connect,
+		probe:       setup.SystemProbe{},
+		installer:   setup.NewHomebrew(),
+		newUI:       setup.NewUI,
+		sources:     importer.Discover,
+		geteuid:     os.Geteuid,
+		openURL:     openInBrowser,
+		interactive: searchInteractive,
 	})
 }
 
@@ -174,7 +178,7 @@ over HTTP; auto-starts the daemon if it's not running. New here? Run
 		newSummarizeCmd(&env),
 		newJobsCmd(&env),
 		newDocsCmd(&env),
-		newSearchCmd(&env),
+		newSearchCmd(&env, d.interactive),
 		newAskCmd(&env),
 		newRelatedCmd(&env),
 		newInterestsCmd(&env),
