@@ -106,6 +106,9 @@ type listHits struct {
 	queries     []queryHits
 	undated     *int
 	semanticErr error
+	// vector is the question's own embedding, nil when it wasn't
+	// embedded.
+	vector      []float32
 	embed       time.Duration
 	undatedTook time.Duration
 }
@@ -200,7 +203,7 @@ func (e *Engine) readLists(ctx context.Context, req Request, qs []query) (listHi
 	// keyword lists.
 	if hasVectors(qs) {
 		g.Go(func() error {
-			out.semanticErr = e.semanticLists(gctx, req, qs, out.queries, slots, fanout, &out.embed)
+			out.vector, out.semanticErr = e.semanticLists(gctx, req, qs, out.queries, slots, fanout, &out.embed)
 			return nil
 		})
 	}
@@ -246,10 +249,11 @@ func hasVectors(qs []query) bool {
 // its own deadline, so a hung embedding model costs at most embedTimeout,
 // then reads each query's vector search over the chunks and over the
 // cards, each weighted, concurrently. A failure of any read fails them
-// all. It records how long the embed took in embedTook, and each read's
-// in its query's hits.
+// all. It returns the question's vector (the first query's), and records
+// how long the embed took in embedTook, and each read's in its query's
+// hits.
 func (e *Engine) semanticLists(ctx context.Context, req Request, qs []query, hits []queryHits, slots readSlots,
-	fanout int, embedTook *time.Duration) error {
+	fanout int, embedTook *time.Duration) ([]float32, error) {
 	var texts []string
 	for _, q := range qs {
 		if q.vector >= 0 {
@@ -258,7 +262,7 @@ func (e *Engine) semanticLists(ctx context.Context, req Request, qs []query, hit
 	}
 	vecs, err := e.embedQueries(ctx, texts, embedTook)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	g, gctx := errgroup.WithContext(ctx)
 	for i, q := range qs {
@@ -283,7 +287,13 @@ func (e *Engine) semanticLists(ctx context.Context, req Request, qs []query, hit
 			})
 		}
 	}
-	return g.Wait()
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+	if qs[0].vector < 0 {
+		return nil, nil
+	}
+	return vecs[qs[0].vector], nil
 }
 
 // embedQueries embeds texts, each behind the query prefix, in one call

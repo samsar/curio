@@ -102,7 +102,7 @@ func TestRerank_OwnModel(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "example/Qwen3-Reranker-4B:Q8_0", got.Generation.Role(RoleReranker).Model)
 	assert.True(t, got.RerankOn())
-	assert.Equal(t, []Role{RoleLabels, RolePlanner, RoleReranker}, got.RolesInUse())
+	assert.Equal(t, []Role{RoleLabels, RolePlanner, RoleReranker, RoleAnswers}, got.RolesInUse())
 	assert.False(t, got.SharesModel(RoleReranker), "a model of its own")
 	assert.True(t, got.SharesModel(RolePlanner), "the planner still shares the labels'")
 
@@ -110,7 +110,7 @@ func TestRerank_OwnModel(t *testing.T) {
 	got.Generation.Roles = nil
 	assert.True(t, got.SharesModel(RoleReranker), "on generation.model, with the labels and the planner")
 	assert.True(t, got.SharesModelWith(RolePlanner, RoleReranker))
-	got.Insight.Labeling, got.Search.Understand = "terms", false
+	got.Insight.Labeling, got.Search.Understand, got.Ask.Enabled = "terms", false, new(false)
 	assert.False(t, got.SharesModel(RoleReranker), "no other role in use")
 }
 

@@ -668,3 +668,169 @@ func TestGate_Lifetime(t *testing.T) {
 	assert.Equal(t, 1, m.count(&m.warms), "nothing started after the lifetime")
 	assert.Zero(t, r.checks.Load())
 }
+
+// TestAwait_ColdThenCheckThenFit: a cold model is waited for while it
+// loads and then while it is checked, onWait told of each wait once, and
+// Await answers ready once it passes.
+func TestAwait_ColdThenCheckThenFit(t *testing.T) {
+	loads, checks := make(chan struct{}), make(chan struct{})
+	r := newRig(t, &fakeModel{warmGate: loads}, nil)
+	r.setCheck(func(context.Context) Verdict {
+		<-checks
+		return Verdict{}
+	})
+	waited := make(chan Kind, 2)
+	done := make(chan struct{})
+	var ok bool
+	var ref Refusal
+	go func() {
+		defer close(done)
+		ref, ok = r.g.Await(context.Background(), func(w Refusal) { waited <- w.Kind })
+	}()
+	assert.Equal(t, Cold, <-waited)
+	close(loads)
+	assert.Equal(t, Checking, <-waited)
+	close(checks)
+	<-done
+	assert.Empty(t, waited, "each wait told once")
+	assert.True(t, ok, "%+v", ref)
+	assert.Equal(t, int32(1), r.checks.Load())
+	assert.Equal(t, CheckFit, r.g.State().Check)
+}
+
+// TestAwait_Refusals: what the load or the check found is Await's answer:
+// a failed load, an unfit model, a check that couldn't reach it, one that
+// ran out of time.
+func TestAwait_Refusals(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		model  *fakeModel
+		check  func(context.Context) Verdict
+		kind   Kind
+		reason string
+	}{
+		{"the load fails", &fakeModel{warmErr: errors.New("out of memory")}, nil, Unavailable,
+			"loading m:1 failed: out of memory"},
+		{"unfit", &fakeModel{}, func(context.Context) Verdict { return Verdict{Probe: "abstains", Unfit: true} },
+			Unfit, `m:1 didn't pass the check "abstains"`},
+		{"the check can't reach it", &fakeModel{}, func(context.Context) Verdict {
+			return Verdict{Probe: "abstains", Err: fmt.Errorf("%w: refused", generator.ErrUnreachable)}
+		}, Unavailable, "checking m:1 failed"},
+		{"the check runs out of time", &fakeModel{}, func(context.Context) Verdict {
+			return Verdict{Probe: "abstains", Slow: true, Err: errors.New("took longer than 30s")}
+		}, TimeoutHeld, "checking m:1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t, tc.model, nil)
+			if tc.check != nil {
+				r.setCheck(tc.check)
+			}
+			ref, ok := r.g.Await(context.Background(), nil)
+			assert.False(t, ok)
+			assert.Equal(t, tc.kind, ref.Kind)
+			assert.Contains(t, ref.Reason, tc.reason)
+		})
+	}
+}
+
+// TestAwait_CallerLeaves: the caller's context ending mid-load answers no
+// refusal and records nothing, while the load goes on on the gate's
+// lifetime and finishes.
+func TestAwait_CallerLeaves(t *testing.T) {
+	gate := make(chan struct{})
+	r := newRig(t, &fakeModel{warmGate: gate}, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	ref, ok := r.g.Await(ctx, nil)
+	assert.False(t, ok)
+	assert.Zero(t, ref)
+	assert.Zero(t, r.g.State().Failure, "nothing recorded")
+	close(gate)
+	r.settle(t)
+	r.model.mu.Lock()
+	assert.True(t, r.model.loaded, "the load finished on the lifetime")
+	r.model.mu.Unlock()
+}
+
+// TestAwait_OneLoadForMany: asks waiting together share one load and one
+// check.
+func TestAwait_OneLoadForMany(t *testing.T) {
+	gate := make(chan struct{})
+	r := newRig(t, &fakeModel{warmGate: gate}, nil)
+	var wg sync.WaitGroup
+	var readies atomic.Int32
+	for range 3 {
+		wg.Go(func() {
+			if _, ok := r.g.Await(context.Background(), nil); ok {
+				readies.Add(1)
+			}
+		})
+	}
+	require.Eventually(t, func() bool { return r.model.count(&r.model.warms) == 1 }, 5*time.Second, time.Millisecond)
+	close(gate)
+	wg.Wait()
+	assert.Equal(t, int32(3), readies.Load())
+	assert.Equal(t, 1, r.model.count(&r.model.warms))
+	assert.Equal(t, int32(1), r.checks.Load())
+}
+
+// TestAwait_Stopping: once the gate's lifetime has ended no load can
+// start, so a cold model is unavailable at once rather than waited for.
+func TestAwait_Stopping(t *testing.T) {
+	r := newRig(t, &fakeModel{}, nil)
+	r.cancel()
+	start := time.Now()
+	ref, ok := r.g.Await(context.Background(), nil)
+	assert.False(t, ok)
+	assert.Equal(t, Refusal{Kind: Unavailable, Reason: "the daemon is stopping"}, ref)
+	assert.Less(t, time.Since(start), 100*time.Millisecond)
+}
+
+// TestAwait_Ready: a loaded, fit model is ready at once, telling onWait
+// nothing.
+func TestAwait_Ready(t *testing.T) {
+	r := newRig(t, &fakeModel{}, nil)
+	r.fit(t)
+	ref, ok := r.g.Await(context.Background(), func(Refusal) { t.Error("waited") })
+	assert.True(t, ok, "%+v", ref)
+}
+
+// TestReady_StaleNotLoaded: a "not loaded" answer that a warm-up overtook
+// (Loaded answered before the load finished, Ready took the lock after)
+// starts no second load and counts no eviction: the model is loaded.
+func TestReady_StaleNotLoaded(t *testing.T) {
+	warmGate, asking, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	m := &fakeModel{warmGate: warmGate}
+	var calls atomic.Int32
+	m.asked = func(context.Context) (bool, error) {
+		if calls.Add(1) == 2 {
+			// The second caller reads "not loaded" now, and is answered
+			// only after the first caller's load has finished.
+			close(asking)
+			<-release
+			return false, nil
+		}
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return m.loaded, nil
+	}
+	r := newRig(t, m, nil)
+
+	first, ok := r.g.Ready(context.Background())
+	require.False(t, ok)
+	require.Equal(t, Cold, first.Kind, "the first caller starts the load")
+
+	second := make(chan bool, 1)
+	go func() {
+		_, ok := r.g.Ready(context.Background())
+		second <- ok
+	}()
+	<-asking
+	close(warmGate)
+	r.settle(t)
+	close(release)
+
+	assert.True(t, <-second, "the load the stale answer missed made the model ready")
+	assert.Equal(t, 1, r.model.count(&r.model.warms), "no second load")
+	assert.NotContains(t, r.logs.String(), "was unloaded within its keep-alive", "no eviction counted")
+}

@@ -11,6 +11,21 @@ Everything runs on your Mac: your library, the search, and the AI models.
 ## What you can do with it
 
 - **Find that article again.** `curio search "rolling out feature flags"` searches the full text of every saved page, by meaning, not just keywords; `--saved-after 2024-01-01`, `--site example.com` or `--folder "/Bookmarks Bar/Work"` narrow it to when, where or how you saved it. Ask it a question, *"the talks on raft I saved last summer"*, and a local model first reads what the question says (the dates, the kind of page, what it points at) and searches with that; it shows what it understood, and `--literal` searches your words alone.
+- **Ask your library.** `curio ask "how long should sourdough cool before slicing?"` searches your pages, reads the best of them, and writes a short answer from them alone, every claim citing its page, then lists those pages:
+
+  ```
+  $ curio ask "how long should sourdough cool before slicing?"
+  understood (gemma4:26b, 0.9 s): evidence
+
+  Let it cool on a rack for at least an hour: the crumb is still setting, and cut early it turns gummy [1].
+
+  Sources:
+  [1] Cooling a sourdough loaf (cited)
+      https://example.com/cooling-bread
+      doc_id: 7d0c…
+  ```
+
+  When none of your pages answers, it says so rather than guessing. A claim (*"is it true that…"*) is answered with the passages for and against it, quoted; *"how have my interests changed"* with a table of your saves over time; *"everything I saved about…"* with the pages grouped by interest. It is on by default with gemma4:26b, the model measured for it; with a smaller model, `ask.enabled: true` in `~/.curio/config.yaml` turns it on.
 - **Ask your agent about your reading.** Connect Curio to your favorite agent then ask things like *"what have I saved about pricing experiments?"*
 - **See what you're into.** `curio interests` groups your library into topics and names them.
 - **Find related reads.** `curio related <id>` shows other pages about the same thing.
@@ -41,6 +56,7 @@ Run `curio up` again whenever you like. If everything's fine, it says **"Nothing
 
 ```sh
 curio search "what you remember about it"   # search your library
+curio ask "a question your pages answer"     # a cited answer from your pages
 curio status --follow                       # watch an import until it's done
 curio ui                                    # open the dashboard in your browser
 curio interests                             # the topics in your library

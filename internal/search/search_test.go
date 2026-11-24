@@ -1076,3 +1076,36 @@ func TestEngine_ZeroWeight(t *testing.T) {
 // unusedIndex is the document index of an engine whose document lists are
 // off, which never reads it: any call panics.
 type unusedIndex struct{ store.DocumentIndex }
+
+// TestEngine_QuestionVector: a search hands back the question's own
+// vector, under a plan too (never a rewrite's); none when it degraded, or
+// when no list it reads wants a vector.
+func TestEngine_QuestionVector(t *testing.T) {
+	db := sqlitetest.NewDB(t)
+	dim := sqlitetest.Width(t, db)
+	docs, chunks, _ := seedCorpus(t, db)
+	question, rewrite := filledVec(dim, 0.10), filledVec(dim, 0.20)
+	emb := &fakeEmbedder{dim: dim, byText: map[string][]float32{"mvcc": question, "transactions": rewrite}}
+	ctx := context.Background()
+	words := Config{BM25Weight: 1, VectorWeight: 1, RewriteWeight: 0.5}
+
+	res, err := New(chunks, docs, unusedIndex{}, emb, words).Search(ctx, Request{TenantID: "local", Query: "mvcc", K: 3})
+	require.NoError(t, err)
+	assert.Equal(t, question, res.Vector)
+
+	res, err = New(chunks, docs, unusedIndex{}, emb, words).Search(ctx, Request{TenantID: "local", Query: "mvcc", K: 3,
+		Rewrites: []string{"transactions"}})
+	require.NoError(t, err)
+	assert.Equal(t, question, res.Vector, "the question's, not the rewrite's")
+
+	res, err = New(chunks, docs, unusedIndex{}, failingEmbedder(), Config{BM25Weight: 1, VectorWeight: 1,
+		Log: slog.New(slog.DiscardHandler)}).Search(ctx, Request{TenantID: "local", Query: "mvcc", K: 3})
+	require.NoError(t, err)
+	require.True(t, res.Degraded)
+	assert.Nil(t, res.Vector)
+
+	res, err = New(chunks, docs, unusedIndex{}, emb, Config{BM25Weight: 1}).Search(ctx,
+		Request{TenantID: "local", Query: "mvcc", K: 3})
+	require.NoError(t, err)
+	assert.Nil(t, res.Vector, "nothing embedded")
+}

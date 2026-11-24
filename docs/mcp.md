@@ -17,10 +17,11 @@ make build      # produces ./bin/curio, ./bin/curio-daemon, ./bin/curio-mcp
 
 | Tool | Arguments | Returns |
 |---|---|---|
-| `search_bookmarks` | `query`, `k?` (1-100; default the daemon's `search.default_k`), `content_type?[]`, `source?[]`, `host?[]`, `site?[]`, `folder?[]`, `saved_after?`, `saved_before?`, `published_after?`, `published_before?`, `include_undated?` | top matching documents, by their text and by what they were saved as (title, url, doc_id, score, `state`, and a snippet; a result without a snippet matched on its bookmark, named by `saved_title` and `folder` (without the browser's root, such as Bookmarks Bar), and one whose state is dead is a page no longer available, one whose state is failed a page curio couldn't read); `degraded`/`warnings` when keyword-only; with a date filter, `undated`, how many documents it couldn't judge, and a note saying whether they were kept |
+| `search_bookmarks` | `query`, `k?` (1-100; default the daemon's `search.default_k`), `content_type?[]`, `source?[]`, `host?[]`, `site?[]`, `folder?[]`, `saved_after?`, `saved_before?`, `published_after?`, `published_before?`, `include_undated?`, `rewrites?[]` (at most 3), `names?[]` (at most 4) | top matching documents, by their text and by what they were saved as (title, url, doc_id, score, `state`, and a snippet; a result without a snippet matched on its bookmark, named by `saved_title` and `folder` (without the browser's root, such as Bookmarks Bar), and one whose state is dead is a page no longer available, one whose state is failed a page curio couldn't read); `about`, curio's one-line summary of the page, when one is written; `degraded`/`warnings` when keyword-only; with a date filter, `undated`, how many documents it couldn't judge, and a note saying whether they were kept |
 | `get_document` | `id` (doc_id) | the document's metadata + full extracted markdown; a note instead of the markdown when nothing is extracted yet. With a summary written, a structured `summary` (kind, site, author, about, names, claims, descriptions, the model that wrote it and when, whether it read the page now stored and whether another model or prompt wrote it: `current`, `outdated`) and a short summary block before the markdown, from the same document response; a dead or failed document's summary shows with its state. An unknown id, or content that fails to load, is a tool error |
-| `find_related` | `id` (doc_id), `k?` | documents similar to the given one (vector similarity over its indexed content), excluding itself |
+| `find_related` | `id` (doc_id), `k?` | documents similar to the given one (vector similarity over its indexed content), excluding itself, each with its `about` line when one is written |
 | `list_interests` | `limit?` (default 20), `interests?` (default 8), `members?` (default 2), `id?` | an outline of the user's interests from the latest rebuild: in a large library each area with its largest interests (label, size, id) and a few documents of each (doc_ids); in a small one the interests alone; then how many documents are unsorted and what the latest rebuild changed. With `id`, an area's interests or an interest's documents and loose fits. IDs last across rebuilds; a retired `id` is answered with when it was retired and the interests that took its documents, an unknown one is a tool error. Before the first rebuild finishes it says why there are none yet: waiting for 20 indexed documents, about to be grouped, being grouped, held by an embedding drift, or the last rebuild failed |
+| `saves_over_time` | `saved_after?`, `saved_before?` (YYYY-MM-DD or RFC 3339), `period?` (`auto`, `year`, `quarter`) | how the user's interests changed over time: their saved pages counted by the period each was first saved in (quarters, or years past three years of saves), under the latest rebuild's areas and interests, a row each (an area, its largest interests and the rest, the other areas, the pages in no interest) with a count a period, and the pages saved on no known day counted apart. The counts are the daemon's (`GET /v1/interests/timeline`); no model is asked. Labels are sanitized, capped and marked `content_trust: derived_untrusted`, and the text is fenced as derived from saved page content. Before the first rebuild it gives `list_interests`' note for a library not grouped yet; a date it can't read is a tool error quoting the daemon, and a daemon from before the tool one saying to restart it |
 
 `content_type` ∈ `article|repo|video|pdf|thread|unknown`, `source` ∈
 `chrome|safari|firefox|html|manual`, `host` is a URL host like
@@ -42,16 +43,25 @@ after the page was first saved. Undated documents are left out unless
 `include_undated`, which needs a date filter. A filter the daemon refuses
 is a tool error naming it (`filters.site: …`).
 
-`search_bookmarks` searches the words and filters it is given, and never
-asks the daemon to understand the question (POST /v1/search's
-`understand`): its caller is already a language model, which writes the
-filters and other wordings itself, as the tool's descriptions guide it to.
-A second, local model would add its guesses to the caller's and seconds to
-a call, ten or so while it loads, of the 30 s a tool call has. For the
-same reasons it never asks the daemon to rerank the results, nor sends a
-reranked order back (`rerank`, `rerank_order`): the caller reads the
-results and ranks them itself, and a rerank would spend up to its 7 s of
-the call's budget on an order the caller then makes its own.
+`search_bookmarks` never asks curio's models: it never asks the daemon to
+understand the question (POST /v1/search's `understand`), since its caller
+is already a language model, which writes the filters and other wordings
+itself, as the tool's descriptions guide it to. A second, local model would
+add its guesses to the caller's and seconds to a call, ten or so while it
+loads, of the 30 s a tool call has. The caller's own understanding is
+searched instead: its `rewrites` (other wordings a matching page's title or
+text would use; each at most 160 bytes) and `names` (the particular things
+the query points at, as pages name them; each at most 100 bytes), trimmed,
+empty and repeated ones dropped, go as the plan the caller wrote
+(POST /v1/search's `plan`, of kind `list` and without filters: the
+caller's filters stay the request's own), which the daemon searches with
+the query in one ranking, at curio's weights, asking no model. More than 3
+rewrites or 4 names, or one the daemon refuses, is a tool error naming the
+field. For the same reasons it never asks the daemon to rerank the results,
+nor sends a reranked order back (`rerank`, `rerank_order`): the caller
+reads the results and ranks them itself, and a rerank would spend up to its
+7 s of the call's budget on an order the caller then makes its own. Nothing
+curio's models write ever enters the request.
 
 ## Trust model
 
@@ -70,7 +80,10 @@ What curio does about it:
   forge text outside it.
 - Structured output carries `content_trust`: `untrusted_web` for saved page
   text, `derived_untrusted` for interest labels and summaries. A document
-  summary also has `derived_from_untrusted: true`.
+  summary also has `derived_from_untrusted: true`. A search's results with
+  an `about` line, a summary's, carry `about_trust: derived_untrusted`, and
+  the line sits inside the fence marked as curio's summary of the page,
+  one line, at most 300 characters.
 - HTML comments, raw HTML and remote images are removed from prose (fenced
   code blocks are left as code), control, bidi and format characters are
   escaped, `get_document` content is capped at 100,000 bytes with the

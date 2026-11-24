@@ -256,6 +256,12 @@ type Result struct {
 	Undated *int
 	// Timings are how long Search's stages took; Related sets none.
 	Timings Timings
+	// Vector is the question's own embedding, as the vector and card
+	// lists searched with it: for a caller that ranks the hits' own
+	// chunks by the question (curio ask's passages), with no second
+	// embed. Nil when nothing was embedded (both lists weighted 0) or the
+	// search degraded. Never serialized: it is the engine's alone.
+	Vector []float32 `json:"-"`
 }
 
 // Timings are how long each stage of a search took, for measuring a
@@ -339,6 +345,8 @@ func (e *Engine) Search(ctx context.Context, req Request) (*Result, error) {
 	if degraded {
 		res.Degraded = true
 		res.Warnings = []string{e.degradedWarning(read.semanticErr)}
+	} else {
+		res.Vector = read.vector
 	}
 	e.logDegraded(len(req.Query), read.semanticErr)
 	fuseStart := time.Now()

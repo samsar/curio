@@ -1366,6 +1366,112 @@ func (s *Insights) MapPositions(ctx context.Context, runID string, ids []string)
 	return out, nil
 }
 
+// The reads of a run's documents by interest, for the interests' timeline
+// and an ask's groups.
+const (
+	// runSavesSQL is every document of a run, assigned (placed 0) and
+	// placed since (placed 1), each with its interest, that interest's
+	// area from the run's groups, and its earliest bookmark of a known
+	// saved date. The groups and the bookmarks are reached by their keys
+	// from each branch; measured on the operator's library (5,329 rows,
+	// 3,101 dated): 8 ms warm, 66 to 102 ms cold. Its args are the run, the
+	// tenant and the unknown saved date.
+	runSavesSQL = `
+	SELECT m.document_id, m.interest_id, g.parent_id, m.placed,
+		(SELECT min(b.saved_at) FROM bookmarks b
+		 WHERE b.document_id = m.document_id AND b.tenant_id = ?2 AND b.saved_date <> ?3)
+	FROM (SELECT a.document_id, a.interest_id, 0 AS placed FROM interest_assignments a WHERE a.run_id = ?1
+	      UNION ALL
+	      SELECT p.document_id, p.interest_id, 1 AS placed FROM interest_placements p WHERE p.run_id = ?1) m
+	LEFT JOIN interest_groups g ON g.run_id = ?1 AND g.interest_id = m.interest_id`
+	// runInterestsOfSQL is the interest of each document of a JSON array in
+	// a run, assigned or placed, and that interest's area from the run's
+	// groups, each by its primary key. Its args are the run and the array.
+	runInterestsOfSQL = `
+	SELECT j.value, coalesce(a.interest_id, p.interest_id), g.parent_id
+	FROM json_each(?2) j
+	LEFT JOIN interest_assignments a ON a.run_id = ?1 AND a.document_id = j.value
+	LEFT JOIN interest_placements p ON p.run_id = ?1 AND p.document_id = j.value
+	LEFT JOIN interest_groups g ON g.run_id = ?1 AND g.interest_id = coalesce(a.interest_id, p.interest_id)`
+)
+
+func (s *Insights) RunSaves(ctx context.Context, tenantID, runID string) ([]store.RunSave, error) {
+	rows, err := s.db.QueryContext(ctx, runSavesSQL, runID, tenantID, store.SavedDateUnknown)
+	if err != nil {
+		return nil, fmt.Errorf("read run %s's saves: %w", runID, err)
+	}
+	defer rows.Close()
+	var out []store.RunSave
+	at := map[string]int{} // a document's index in out
+	for rows.Next() {
+		var (
+			save           store.RunSave
+			interest, area sql.NullString
+			placed         bool
+			savedAt        sql.NullString
+		)
+		if err := rows.Scan(&save.DocumentID, &interest, &area, &placed, &savedAt); err != nil {
+			return nil, fmt.Errorf("scan a save of run %s: %w", runID, err)
+		}
+		save.InterestID, save.AreaID = interest.String, area.String
+		if savedAt.Valid {
+			if save.SavedAt, err = parseTime(savedAt.String); err != nil {
+				return nil, fmt.Errorf("the first save of document %s: %w", save.DocumentID, err)
+			}
+		}
+		// A run never places a document it assigned (PlaceDocument's
+		// guard); should it hold both, the assignment counts, in whichever
+		// order the two rows come.
+		i, seen := at[save.DocumentID]
+		switch {
+		case !seen:
+			at[save.DocumentID] = len(out)
+			out = append(out, save)
+		case !placed:
+			out[i] = save
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read run %s's saves: %w", runID, err)
+	}
+	return out, nil
+}
+
+func (s *Insights) RunInterestsOf(ctx context.Context, runID string, ids []string) ([]store.DocumentInterest, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	list, err := json.Marshal(ids)
+	if err != nil {
+		return nil, fmt.Errorf("encode the documents: %w", err)
+	}
+	rows, err := s.db.QueryContext(ctx, runInterestsOfSQL, runID, string(list))
+	if err != nil {
+		return nil, fmt.Errorf("read the interests of run %s's documents: %w", runID, err)
+	}
+	defer rows.Close()
+	found := make(map[string]store.DocumentInterest, len(ids))
+	for rows.Next() {
+		var d store.DocumentInterest
+		var interest, area sql.NullString
+		if err := rows.Scan(&d.DocumentID, &interest, &area); err != nil {
+			return nil, fmt.Errorf("scan a document's interest: %w", err)
+		}
+		d.InterestID, d.AreaID = interest.String, area.String
+		found[d.DocumentID] = d
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read the interests of run %s's documents: %w", runID, err)
+	}
+	// The array's order, which SQL doesn't promise to keep.
+	out := make([]store.DocumentInterest, len(ids))
+	for i, id := range ids {
+		out[i] = found[id]
+		out[i].DocumentID = id
+	}
+	return out, nil
+}
+
 func (s *Insights) Unplaced(ctx context.Context, tenantID, runID string, since time.Time) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, unplacedSQL, tenantID, formatTime(since), store.DocStateFetched, runID)
 	if err != nil {

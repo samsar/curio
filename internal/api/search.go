@@ -3,6 +3,7 @@ package api
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -10,6 +11,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/samsar/curio/internal/rerank"
+	"github.com/samsar/curio/internal/retrieve"
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/starprompt"
 	"github.com/samsar/curio/internal/store"
@@ -82,15 +85,8 @@ type DroppedFilter struct {
 }
 
 // Planner understands search questions: the daemon's understand.Planner,
-// nil while search.understand is off. Timeout is how long a plan may take
-// (search.understand_timeout_seconds), which the dashboard's note for a
-// plan that took longer names. State is what it knows of its model, read
-// from its memory alone, for healthz.
-type Planner interface {
-	Plan(ctx context.Context, question string) (understand.Outcome, error)
-	Timeout() time.Duration
-	State() understand.State
-}
+// nil while search.understand is off (retrieve.Planner).
+type Planner = retrieve.Planner
 
 // Filters mirrors the openapi filters block; the search engine applies
 // every dimension, as search.FilterRequest reads it.
@@ -140,12 +136,14 @@ func planJSON(p understand.Plan) *PlanJSON {
 // document: its newest titled bookmark's title, as the documents list has
 // it. A hit without Matches matched on what it was saved as, and carries
 // its Bookmarks, newest saved first, to say so; a hit with matches carries
-// none.
+// none. About is the one line its current summary says the page is about,
+// when one is written: text a writing model derived from the page.
 type SearchHitResponse struct {
 	Document      DocumentResponse    `json:"document"`
 	Score         float64             `json:"score"`
 	MarkdownPath  string              `json:"markdown_path,omitempty"`
 	BookmarkTitle string              `json:"bookmark_title,omitempty"`
+	About         string              `json:"about,omitempty"`
 	Matches       []ChunkMatchJSON    `json:"matches,omitempty"`
 	Bookmarks     []SearchHitBookmark `json:"bookmarks,omitempty"`
 }
@@ -256,41 +254,21 @@ func (d Deps) search(ctx context.Context, req SearchRequest) (SearchResponse, er
 	end := d.Foreground.Begin()
 	defer end()
 	start := time.Now()
-	plan, understanding, err := d.understand(ctx, req)
+	q := retrieve.Query{Question: req.Query, K: req.K, Offset: req.Offset, Filters: req.Filters.request(),
+		Understand: req.Understand, Rerank: req.Rerank, RerankOrder: req.RerankOrder}
+	if req.Plan != nil {
+		p := req.Plan.plan()
+		q.Plan = &p
+	}
+	got, err := d.retriever().Retrieve(ctx, q)
+	if qe, ok := errors.AsType[*retrieve.QueryError](err); ok {
+		return SearchResponse{}, &requestError{err: qe.Err}
+	}
 	if err != nil {
 		return SearchResponse{}, err
 	}
-	sreq := search.Request{TenantID: d.TenantID, Query: req.Query, K: req.K, Offset: req.Offset}
-	merged := req.Filters.request()
-	if plan != nil {
-		var dropped []understand.Dropped
-		merged, dropped = mergeFilters(req.Filters.request(), plan.Filters)
-		applied := *plan
-		applied.Filters = withoutDropped(plan.Filters, dropped)
-		understanding.Plan = planJSON(applied)
-		understanding.Dropped = append(understanding.Dropped, droppedJSON(dropped)...)
-		sreq.Rewrites, sreq.Names = plan.Rewrites, plan.Names
-	}
-	if sreq.Filters, err = merged.Resolve(); err != nil {
-		return SearchResponse{}, &requestError{err: err}
-	}
-	// A reranked head is read from the top whatever the window: the
-	// engine is asked for both, and the window cut from the head reordered
-	// and the first ranking's rest.
-	rp := d.planRerank(req, plan)
-	res, err := d.Search.Search(ctx, rerankWindow(sreq, rp, k))
-	if err != nil {
-		return SearchResponse{}, err
-	}
-	hits, reranking, err := d.applyRerank(ctx, req, plan, rp, res.Items)
-	if err != nil {
-		return SearchResponse{}, err
-	}
-	if rp.depth > 0 {
-		hits = hitWindow(hits, req.Offset, k)
-	}
-
-	items, err := d.searchHitsToResponse(ctx, hits)
+	res := got.Result
+	items, err := d.searchHitsToResponse(ctx, res.Items)
 	if err != nil {
 		return SearchResponse{}, err
 	}
@@ -309,8 +287,8 @@ func (d Deps) search(ctx context.Context, req SearchRequest) (SearchResponse, er
 		Degraded:      res.Degraded,
 		Warnings:      res.Warnings,
 		Undated:       res.Undated,
-		Understanding: understanding,
-		Reranking:     reranking,
+		Understanding: understandingOf(got.Understanding),
+		Reranking:     rerankingOf(got.Reranking),
 		Items:         items,
 	}, nil
 }
@@ -333,134 +311,35 @@ func (d Deps) countSearch(req SearchRequest, items, wordHits int) bool {
 	return d.Star.Searched(cmp.Or(req.surface, starprompt.SurfaceCLI))
 }
 
-// understand is req's plan and how it came to be: the plan it supplied,
-// checked by understand.Validate; the planner's, when it asked for
-// understanding and the planner gave one; or none, with the status that
-// says why. A request that asked for neither has no Understanding. Only
-// the caller's context ending is an error besides a refused plan.
-func (d Deps) understand(ctx context.Context, req SearchRequest) (*understand.Plan, *Understanding, error) {
-	switch {
-	case req.Plan != nil && req.Understand:
-		return nil, nil, badRequest("send understand or plan, not both")
-	case req.Plan != nil:
-		p := req.Plan.plan()
-		if err := understand.Validate(p); err != nil {
-			return nil, nil, &requestError{err: err}
-		}
-		return &p, &Understanding{Status: string(understand.StatusSupplied)}, nil
-	case !req.Understand:
-		return nil, nil, nil
-	case d.Planner == nil:
-		return nil, &Understanding{Status: string(understand.StatusOff), Reason: understand.OffReason}, nil
+// retriever is the search path over d's engine, models and stores.
+func (d Deps) retriever() retrieve.Retriever {
+	var summaries rerank.SummaryReader
+	if d.Summaries != nil {
+		summaries = d.Summaries
 	}
-	out, err := d.Planner.Plan(ctx, req.Query)
-	if err != nil {
-		return nil, nil, err
-	}
-	u := &Understanding{Status: string(out.Status), Model: out.Model, TookMS: out.Took.Milliseconds(),
-		Dropped: droppedJSON(out.Dropped)}
-	if out.Status != understand.StatusPlanned {
-		u.Reason = out.Reason
-	}
-	return out.Plan, u, nil
+	return retrieve.Retriever{Engine: d.Search, Planner: d.Planner, Reranker: d.Reranker, Fields: d.Index,
+		Summaries: summaries, TenantID: d.TenantID, Log: d.Log}
 }
 
-// mergeFilters lays a plan's filters under the request's: each dimension
-// the request sets is the request's, and the plan's of that dimension, if
-// it set one, is dropped. A window (saved, published) is one dimension,
-// its two bounds together; include_undated goes with the request's dates
-// when it sets any, and with the plan's otherwise.
-func mergeFilters(req, plan search.FilterRequest) (search.FilterRequest, []understand.Dropped) {
-	out := req
-	var dropped []understand.Dropped
-	lists := []struct {
-		field     string
-		req, plan []string
-		to        *[]string
-	}{
-		{"content_type", req.ContentType, plan.ContentType, &out.ContentType},
-		{"host", req.Host, plan.Host, &out.Host},
-		{"source", req.Source, plan.Source, &out.Source},
-		{"site", req.Site, plan.Site, &out.Site},
-		{"folder", req.Folder, plan.Folder, &out.Folder},
+// understandingOf is u on the wire; nil for a search that asked for no
+// understanding.
+func understandingOf(u *retrieve.Understanding) *Understanding {
+	if u == nil {
+		return nil
 	}
-	for _, l := range lists {
-		switch {
-		case len(l.req) == 0:
-			*l.to = l.plan
-		case len(l.plan) > 0:
-			dropped = append(dropped, understand.Dropped{Field: l.field, Reason: "the request sets " + l.field})
-		}
+	out := &Understanding{Status: string(u.Status), Reason: u.Reason, Model: u.Model, TookMS: u.Took.Milliseconds(),
+		Dropped: droppedJSON(u.Dropped)}
+	if u.Plan != nil {
+		out.Plan = planJSON(*u.Plan)
 	}
-	windows := []struct {
-		field                 string
-		reqSet, planSet       bool
-		planAfter, planBefore string
-		toAfter, toBefore     *string
-	}{
-		{"saved", req.SavedAfter != "" || req.SavedBefore != "", plan.SavedAfter != "" || plan.SavedBefore != "",
-			plan.SavedAfter, plan.SavedBefore, &out.SavedAfter, &out.SavedBefore},
-		{"published", req.PublishedAfter != "" || req.PublishedBefore != "",
-			plan.PublishedAfter != "" || plan.PublishedBefore != "", plan.PublishedAfter, plan.PublishedBefore,
-			&out.PublishedAfter, &out.PublishedBefore},
-	}
-	reqDates := false
-	for _, w := range windows {
-		reqDates = reqDates || w.reqSet
-		switch {
-		case !w.reqSet:
-			*w.toAfter, *w.toBefore = w.planAfter, w.planBefore
-		case w.planSet:
-			dropped = append(dropped, understand.Dropped{Field: w.field,
-				Reason: fmt.Sprintf("the request sets %s_after or %s_before", w.field, w.field)})
-		}
-	}
-	switch {
-	case !reqDates:
-		out.IncludeUndated = plan.IncludeUndated
-	case plan.IncludeUndated && !req.IncludeUndated:
-		dropped = append(dropped, understand.Dropped{Field: "include_undated",
-			Reason: "the request sets its own dates, without include_undated"})
-	}
-	return out, dropped
+	return out
 }
 
-// withoutDropped is f less the dimensions dropped names: what of a plan's
-// filters a search applied.
-func withoutDropped(f search.FilterRequest, dropped []understand.Dropped) search.FilterRequest {
-	for _, d := range dropped {
-		f = withoutDimension(f, d.Field)
-	}
-	return f
-}
-
-// withoutDimension is f less the dimension field names: content_type,
-// host, source, site, folder, saved or published (a window, both bounds),
-// or include_undated. Taking out its last date filter takes
-// include_undated with it, which keeps nothing alone.
+// withoutDimension is f less the dimension field names
+// (retrieve.WithoutDimension): a chip of an understood search's page
+// searches by the plan without it.
 func withoutDimension(f search.FilterRequest, field string) search.FilterRequest {
-	switch field {
-	case "content_type":
-		f.ContentType = nil
-	case "host":
-		f.Host = nil
-	case "source":
-		f.Source = nil
-	case "site":
-		f.Site = nil
-	case "folder":
-		f.Folder = nil
-	case "saved":
-		f.SavedAfter, f.SavedBefore = "", ""
-	case "published":
-		f.PublishedAfter, f.PublishedBefore = "", ""
-	case "include_undated":
-		f.IncludeUndated = false
-	}
-	if f.SavedAfter == "" && f.SavedBefore == "" && f.PublishedAfter == "" && f.PublishedBefore == "" {
-		f.IncludeUndated = false
-	}
-	return f
+	return retrieve.WithoutDimension(f, field)
 }
 
 func droppedJSON(dropped []understand.Dropped) []DroppedFilter {
@@ -476,8 +355,9 @@ func droppedJSON(dropped []understand.Dropped) []DroppedFilter {
 
 // searchHitsToResponse maps engine hits to wire hits, populating each
 // hit's markdown path from its current extraction, naming the untitled
-// ones by their bookmarks (bookmarkTitles), and giving each hit without
-// matches the bookmarks it was saved under (savedUnder).
+// ones by their bookmarks (bookmarkTitles), giving each hit without
+// matches the bookmarks it was saved under (savedUnder), and each hit its
+// current summary's about line (aboutLines).
 //
 // One extra DB hit per result to surface the markdown path. K is at most
 // store.MaxSearchK (100), so this stays small; GetByIDsWithLastError, which
@@ -489,6 +369,10 @@ func (d Deps) searchHitsToResponse(ctx context.Context, hits []search.Hit) ([]Se
 		return nil, err
 	}
 	saved, err := d.savedUnder(ctx, hits)
+	if err != nil {
+		return nil, err
+	}
+	about, err := d.aboutLines(ctx, hits)
 	if err != nil {
 		return nil, err
 	}
@@ -514,6 +398,7 @@ func (d Deps) searchHitsToResponse(ctx context.Context, hits []search.Hit) ([]Se
 			Score:         hit.Score,
 			MarkdownPath:  mdPath,
 			BookmarkTitle: titles[hit.Document.ID],
+			About:         about[hit.Document.ID],
 			Matches:       matches,
 			Bookmarks:     saved[hit.Document.ID],
 		})
@@ -544,6 +429,29 @@ func (d Deps) savedUnder(ctx context.Context, hits []search.Hit) (map[string][]S
 			out[doc] = append(out[doc], SearchHitBookmark{Title: strings.TrimSpace(deref(b.Title)),
 				FolderPath: deref(b.FolderPath), Source: b.Source, SavedAt: b.SavedAt, SavedDate: string(b.SavedDate)})
 		}
+	}
+	return out, nil
+}
+
+// aboutLines is, by document, the about line of each hit's current
+// summary (SummaryStore.CurrentSummaries, which leaves out a summary that
+// says the page isn't one), read for every hit at once; none without a
+// summary store.
+func (d Deps) aboutLines(ctx context.Context, hits []search.Hit) (map[string]string, error) {
+	out := map[string]string{}
+	if d.Summaries == nil || len(hits) == 0 {
+		return out, nil
+	}
+	ids := make([]string, len(hits))
+	for i, hit := range hits {
+		ids[i] = hit.Document.ID
+	}
+	summaries, err := d.Summaries.CurrentSummaries(ctx, d.TenantID, ids)
+	if err != nil {
+		return nil, fmt.Errorf("read the hits' summaries: %w", err)
+	}
+	for id, s := range summaries {
+		out[id] = s.About
 	}
 	return out, nil
 }

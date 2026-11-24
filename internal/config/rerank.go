@@ -37,15 +37,16 @@ func RerankMeasured(model string) (RerankPoint, bool) {
 
 // RerankOn reports whether searches may be reranked: as search.rerank
 // says when config.yaml sets it, and left out, only with a model measured
-// as the reranker, while search understanding is on (every point is
-// measured on understood searches), and, when its measured point needs
-// the candidates' summaries, only while they are written (SummariesOn).
+// as the reranker, while questions are understood (Understands: every
+// point is measured on understood searches), and, when its measured point
+// needs the candidates' summaries, only while they are written
+// (SummariesOn).
 func (c Config) RerankOn() bool {
 	if c.Search.Rerank != nil {
 		return *c.Search.Rerank
 	}
 	p, ok := RerankMeasured(c.Generation.Role(RoleReranker).Model)
-	return ok && c.Search.Understand && (!p.NeedsSummaries || c.SummariesOn())
+	return ok && c.Understands() && (!p.NeedsSummaries || c.SummariesOn())
 }
 
 // RerankOffByDefault reports whether reranking is off because config.yaml

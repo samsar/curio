@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/samsar/curio/internal/api"
+	"github.com/samsar/curio/internal/ask"
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/daemonctl"
@@ -27,8 +28,10 @@ import (
 	"github.com/samsar/curio/internal/insight"
 	"github.com/samsar/curio/internal/jobs"
 	"github.com/samsar/curio/internal/keepawake"
+	"github.com/samsar/curio/internal/modelgate"
 	"github.com/samsar/curio/internal/ollama"
 	"github.com/samsar/curio/internal/rerank"
+	"github.com/samsar/curio/internal/retrieve"
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/starprompt"
 	"github.com/samsar/curio/internal/store"
@@ -481,6 +484,7 @@ type daemon struct {
 	savedDates *api.SavedDateClassifier
 	planner    *planner // nil while search.understand is off
 	reranker   *reranker
+	asker      *asker
 	// hold holds the index and cards jobs back while the embedding model
 	// doesn't answer.
 	hold *jobs.EmbedderHold
@@ -562,17 +566,20 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 	// The person's use of the models, which the summary pass yields to:
 	// searches, the planner's calls and a rebuild's labels.
 	foreground := jobs.NewForeground(timing.quiet)
+	// One record of every role's calls of each model: a plan or a rerank
+	// that waited behind an answer isn't held against its model.
+	traffic := &modelgate.Traffic{}
 	// Built only while its role is in use: with search.understand off, a
 	// search that asks to be understood is told it is off.
 	var planner *planner
 	if slices.Contains(cfg.RolesInUse(), config.RolePlanner) {
-		if planner, err = newPlanner(ctx, cfg, foreground.Begin); err != nil {
+		if planner, err = newPlanner(ctx, cfg, foreground.Begin, traffic); err != nil {
 			return nil, err
 		}
 	}
 	// Built whether or not its role is in use: off, a search that asks to
 	// be reranked is told why, on healthz too.
-	reranker, err := newReranker(ctx, cfg, foreground.Begin)
+	reranker, err := newReranker(ctx, cfg, foreground.Begin, traffic)
 	if err != nil {
 		return nil, err
 	}
@@ -697,8 +704,21 @@ func newDaemon(ctx context.Context, cfg config.Config, home *curiohome.Home, dim
 	if planner != nil {
 		apiDeps.Planner = planner
 	}
+	// Built whether or not its role is in use: off, an ask is told why, on
+	// healthz too. It retrieves through the API's own search path.
+	ret := retrieve.Retriever{Engine: engine, Reranker: reranker, Fields: index, Summaries: summaries,
+		TenantID: store.LocalTenantID, Log: slog.Default()}
+	if planner != nil {
+		ret.Planner = planner
+	}
+	asker, err := newAsker(ctx, cfg, ret, ask.Stores{Library: docs, Fields: index, Summaries: summaries,
+		Bookmarks: bms, Chunks: chunks, Interests: insights, TenantID: store.LocalTenantID}, foreground.Begin, traffic)
+	if err != nil {
+		return nil, err
+	}
+	apiDeps.Asker = asker
 	return &daemon{apiDeps: apiDeps, pools: pools, drift: driftMonitor, keeper: keeper, scheduler: scheduler,
-		savedDates: savedDates, planner: planner, reranker: reranker, hold: hold, reembed: reembed,
+		savedDates: savedDates, planner: planner, reranker: reranker, asker: asker, hold: hold, reembed: reembed,
 		summaries: feed}, nil
 }
 
@@ -719,24 +739,28 @@ func newSummaryWriter(cfg config.Config) (*summarize.Writer, error) {
 type planner struct {
 	*understand.Planner
 	stop context.CancelFunc
+	// traffic is the record its calls are kept in, the reranker's and the
+	// asker's too.
+	traffic *modelgate.Traffic
 }
 
 // newPlanner builds search's planner, writing with the planner role's
 // model, telling using of each call it makes of it (the summary pass yields
-// to them). Its background work, loading and checking that model, runs on a
-// context of ctx, the daemon's lifetime, never a request's: a request
-// cancelled during a cold load would abort the load itself. A provider
-// without structured output gets a planner that answers every question
-// off, logged once.
-func newPlanner(ctx context.Context, cfg config.Config, using func() func()) (*planner, error) {
+// to them) and recording each in traffic. Its background work, loading and
+// checking that model, runs on a context of ctx, the daemon's lifetime,
+// never a request's: a request cancelled during a cold load would abort
+// the load itself. A provider without structured output gets a planner
+// that answers every question off, logged once.
+func newPlanner(ctx context.Context, cfg config.Config, using func() func(), traffic *modelgate.Traffic) (*planner,
+	error) {
 	gen, err := generator.New(cfg.Generation.Role(config.RolePlanner))
 	if err != nil {
 		return nil, err
 	}
 	opts := understand.OptionsFrom(cfg)
-	opts.Using = using
+	opts.Using, opts.Traffic = using, traffic
 	lifetime, stop := context.WithCancel(ctx)
-	return &planner{Planner: understand.New(lifetime, gen, opts), stop: stop}, nil
+	return &planner{Planner: understand.New(lifetime, gen, opts), stop: stop, traffic: traffic}, nil
 }
 
 // reranker is search's reranker, and the end of its background work's
@@ -744,22 +768,55 @@ func newPlanner(ctx context.Context, cfg config.Config, using func() func()) (*p
 type reranker struct {
 	*rerank.Reranker
 	stop context.CancelFunc
+	// traffic is the record its calls are kept in, the planner's and the
+	// asker's too.
+	traffic *modelgate.Traffic
 }
 
 // newReranker builds search's reranker, writing with the reranker role's
 // model, telling using of each call it makes of it (the summary pass yields
-// to them), off with its reason while the role isn't in use. Its
-// background work runs on a context of ctx, the daemon's lifetime, as the
-// planner's does.
-func newReranker(ctx context.Context, cfg config.Config, using func() func()) (*reranker, error) {
+// to them) and recording each in traffic, off with its reason while the
+// role isn't in use. Its background work runs on a context of ctx, the
+// daemon's lifetime, as the planner's does.
+func newReranker(ctx context.Context, cfg config.Config, using func() func(), traffic *modelgate.Traffic) (*reranker,
+	error) {
 	gen, err := generator.New(cfg.Generation.Role(config.RoleReranker))
 	if err != nil {
 		return nil, err
 	}
 	opts := rerank.OptionsFrom(cfg)
-	opts.Using = using
+	opts.Using, opts.Traffic = using, traffic
 	lifetime, stop := context.WithCancel(ctx)
-	return &reranker{Reranker: rerank.New(lifetime, gen, opts), stop: stop}, nil
+	return &reranker{Reranker: rerank.New(lifetime, gen, opts), stop: stop, traffic: traffic}, nil
+}
+
+// asker answers questions, and the end of its background work's context,
+// so serve stops it however serving ended.
+type asker struct {
+	*ask.Asker
+	stop context.CancelFunc
+	// traffic is the record its answers are kept in, the planner's and the
+	// reranker's too.
+	traffic *modelgate.Traffic
+}
+
+// newAsker builds the asker, writing with the answers role's model,
+// retrieving through ret and reading stores, telling using of the whole of
+// each ask and each call it makes of its model (the summary pass yields to
+// them) and recording its answers in traffic as long calls, off with its
+// reason while the role isn't in use. Its background work runs on a
+// context of ctx, the daemon's lifetime, as the planner's does; an ask in
+// flight when it ends stops, saying the daemon is stopping.
+func newAsker(ctx context.Context, cfg config.Config, ret retrieve.Retriever, stores ask.Stores,
+	using func() func(), traffic *modelgate.Traffic) (*asker, error) {
+	gen, err := generator.New(cfg.Generation.Role(config.RoleAnswers))
+	if err != nil {
+		return nil, err
+	}
+	opts := ask.OptionsFrom(cfg)
+	opts.Using, opts.Traffic = using, traffic
+	lifetime, stop := context.WithCancel(ctx)
+	return &asker{Asker: ask.New(lifetime, gen, ret, stores, opts), stop: stop, traffic: traffic}, nil
 }
 
 // driftHold says how the embeddings drifted, as the monitor last reported
@@ -1101,8 +1158,8 @@ func indexing(queue store.JobStore) func(context.Context) (bool, error) {
 // classifications owed, the embedder hold's probes, the re-embed's feed and
 // the summary pass's alongside the API until ctx is cancelled or the API
 // fails, then shuts them down within the documented budget: the keeper
-// releases its hold as its context ends, and the planner's and the
-// reranker's background work stops with their own.
+// releases its hold as its context ends, and the planner's, the
+// reranker's and the asker's background work stops with their own.
 func (d *daemon) serve(ctx context.Context, served *servingAPI) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -1139,6 +1196,8 @@ func (d *daemon) serve(ctx context.Context, served *servingAPI) error {
 	}
 	d.reranker.stop()
 	d.reranker.Wait()
+	d.asker.stop()
+	d.asker.Wait()
 	if stuck, drained := d.drain(&workers, workerDrainTimeout); !drained {
 		slog.Warn("jobs still running after the shutdown grace period; exiting anyway "+
 			"(the next start requeues them)", "grace", workerDrainTimeout, "job_ids", stuck)

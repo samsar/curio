@@ -11,15 +11,13 @@
 package understand
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"slices"
 	"strings"
 	"time"
 
+	"github.com/samsar/curio/internal/jsonstrict"
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/textutil"
 )
@@ -194,22 +192,18 @@ type invalidAnswer struct {
 
 func (e *invalidAnswer) Error() string { return "the model's answer couldn't be used: " + e.reason }
 
-// decodeAnswer reads raw strictly: one JSON object of the schema's shape,
-// no key it doesn't have, a kind of the set, and at most the schema's
+// decodeAnswer reads raw strictly (jsonstrict): one JSON object of the
+// schema's shape, each key spelled as the schema spells it, none repeated
+// and none it doesn't have, a kind of the set, and at most the schema's
 // names and rewrites, each a text textutil.TextProblem takes. A plan held
 // to these is a dashboard ?plan token of bounded size (internal/api's
 // maxPlanParam). The schema holds
 // Ollama's decoding to most of this; a provider or a model that strays
 // is caught here. A failure is an *invalidAnswer.
 func decodeAnswer(raw []byte) (answer, error) {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
 	var a answer
-	if err := dec.Decode(&a); err != nil {
-		return answer{}, &invalidAnswer{"shape", "it isn't a plan's JSON (" + err.Error() + ")"}
-	}
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return answer{}, &invalidAnswer{"shape", "it holds more than one JSON value"}
+	if err := jsonstrict.Decode(raw, &a); err != nil {
+		return answer{}, &invalidAnswer{"shape", "it isn't a plan's JSON"}
 	}
 	if !slices.Contains(Kinds(), a.Kind) {
 		return answer{}, &invalidAnswer{"kind", "its kind isn't one of: " + joinKinds()}

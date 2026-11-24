@@ -8,7 +8,11 @@
 // cost. The planner (internal/understand) and the reranker
 // (internal/rerank) each keep a Gate, worded for their feature, and ask it
 // before every call; what they ask and how they read the answer stays
-// theirs.
+// theirs. An ask (internal/ask) is a deliberate wait, so its writer awaits
+// the load and the check (Await) rather than going on without its model.
+// A process's gates share a Traffic: a call that ran past its timeout
+// behind another feature's long call (an answer) waited for it, and isn't
+// counted toward holding its own feature.
 package modelgate
 
 import (
@@ -125,6 +129,13 @@ type Options struct {
 	// func that marks the call ended. The daemon's summary pass yields to
 	// these calls; nil tells nobody.
 	Using func() (end func())
+	// Traffic, when set, is the process's record of every feature's calls
+	// of each model, which the gate records its own in (Use, Hold) and
+	// reads the others' from (HeldSince, SharedSince); nil records and
+	// sees nothing. Server is the base URL the model is on, which with
+	// Model names it there.
+	Traffic *Traffic
+	Server  string
 	// Now is the clock holds and retries are judged by; nil is time.Now.
 	Now func() time.Time
 	// Location is where a reason's time of day is; nil is time.Local.
@@ -188,6 +199,8 @@ type Gate struct {
 	shared    bool
 	short     bool // a sharer sends no keep-alive, or a shorter one
 	using     func() (end func())
+	traffic   *Traffic
+	server    string
 	now       func() time.Time
 	loc       *time.Location
 	log       *slog.Logger
@@ -202,11 +215,19 @@ type Gate struct {
 	unfitReason string
 	checkedAt   time.Time // when the verdict was reached
 	running     bool      // a warm-up or check is in flight
-	warmErr     error     // the last warm-up's failure
-	warmErrAt   time.Time // when it failed
-	checkErr    error     // the last check that couldn't reach the model
-	checkErrAt  time.Time
-	logged      map[string]bool // the causes logged at WARN since the last call that succeeded
+	// loads counts the warm-ups that loaded the model. Ready asks whether
+	// the model is loaded without g.mu held, so a load can finish between
+	// the question and the answer's use: Ready compares it before and after
+	// and takes a "not loaded" a load overtook for loaded.
+	loads uint64
+	// workDone is closed when the warm-up or the check in flight ends, and
+	// is closed already while neither runs: what Await waits on.
+	workDone   chan struct{}
+	warmErr    error     // the last warm-up's failure
+	warmErrAt  time.Time // when it failed
+	checkErr   error     // the last check that couldn't reach the model
+	checkErrAt time.Time
+	logged     map[string]bool // the causes logged at WARN since the last call that succeeded
 	// timeouts counts the calls in a row that timed out, each past limit;
 	// while timeoutHoldUntil is ahead, Ready refuses at once, and
 	// timeoutHold is how long the last hold of the run lasted. slowCheck,
@@ -245,13 +266,17 @@ func New(lifetime context.Context, gen generator.Generator, opts Options) *Gate 
 		shared:    opts.Shared,
 		short:     opts.ShortSharer,
 		using:     opts.Using,
+		traffic:   opts.Traffic,
+		server:    opts.Server,
 		now:       opts.Now,
 		loc:       opts.Location,
 		log:       opts.Log,
 		runCheck:  opts.Check,
 		lifetime:  lifetime,
 		logged:    map[string]bool{},
+		workDone:  make(chan struct{}),
 	}
+	close(g.workDone)
 	if g.keepAlive <= 0 {
 		g.keepAlive = DefaultKeepAlive
 	}
@@ -271,15 +296,23 @@ func New(lifetime context.Context, gen generator.Generator, opts Options) *Gate 
 	return g
 }
 
-// Use marks a call of the model beginning (Options.Using), and returns the
-// func that marks it ended, which its callers defer: a call that panics
-// (net/http recovers a search's) would otherwise leave the use open,
-// holding the summary pass back until a restart.
+// Use marks a call of the model beginning (Options.Using, and the
+// traffic), and returns the func that marks it ended, which its callers
+// defer: a call that panics (net/http recovers a search's) would otherwise
+// leave the use open, holding the summary pass back until a restart.
 func (g *Gate) Use() (end func()) {
-	if g.using == nil {
-		return func() {}
+	ends := make([]func(), 0, 2)
+	if g.using != nil {
+		ends = append(ends, g.using())
 	}
-	return g.using()
+	if g.traffic != nil {
+		ends = append(ends, g.traffic.begin(g, false))
+	}
+	return func() {
+		for _, end := range ends {
+			end()
+		}
+	}
 }
 
 // Wait returns once the gate's background work has stopped, after the
@@ -314,6 +347,7 @@ func (g *Gate) Ready(ctx context.Context) (Refusal, bool) {
 		g.mu.Unlock()
 		return r, false
 	}
+	loads := g.loads
 	g.mu.Unlock()
 
 	loaded := true
@@ -354,6 +388,12 @@ func (g *Gate) Ready(ctx context.Context) (Refusal, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	now := g.now()
+	if !loaded && g.loads != loads {
+		// A warm-up loaded the model after Loaded answered: the answer is
+		// stale. Taken as it stands, it would count the fresh load's
+		// keep-alive as an eviction and start a second load.
+		loaded, missing = true, nil
+	}
 	if !loaded {
 		if r, held := g.unloadedLocked(now); held {
 			return r, false
@@ -387,6 +427,47 @@ func (g *Gate) Ready(ctx context.Context) (Refusal, bool) {
 	default:
 		g.startLocked(false)
 		return Refusal{Kind: Checking, Reason: "curio is checking " + g.model}, false
+	}
+}
+
+// stopping is Await's refusal once the gate's lifetime has ended: no load
+// or check can start, so a model still cold or unchecked stays so.
+const stopping = "the daemon is stopping"
+
+// Await is Ready for a caller that can wait. While Ready refuses because
+// the model is loading (Cold) or being checked (Checking), it tells onWait
+// (nil allowed) once of each as that wait begins, waits for the gate's
+// background work to end, and asks Ready again. It returns any other
+// refusal as Ready gives it. When ctx ends first it returns a false with
+// no Refusal, recording and logging nothing, and the load or check goes
+// on, on the gate's lifetime. It polls nothing: each wait is for the work
+// in flight to end.
+func (g *Gate) Await(ctx context.Context, onWait func(Refusal)) (Refusal, bool) {
+	told := map[Kind]bool{}
+	for {
+		r, ready := g.Ready(ctx)
+		switch {
+		case ready:
+			return Refusal{}, true
+		case r.Kind == 0:
+			return Refusal{}, false
+		case r.Kind != Cold && r.Kind != Checking:
+			return r, false
+		case g.lifetime.Err() != nil:
+			return Refusal{Kind: Unavailable, Reason: stopping}, false
+		}
+		if onWait != nil && !told[r.Kind] {
+			told[r.Kind] = true
+			onWait(r)
+		}
+		g.mu.Lock()
+		done := g.workDone
+		g.mu.Unlock()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return Refusal{}, false
+		}
 	}
 }
 
@@ -556,16 +637,26 @@ func (g *Gate) startLocked(warm bool) {
 		return
 	}
 	g.running = true
+	done := make(chan struct{})
+	g.workDone = done
 	g.work.Go(func() {
 		defer func() {
 			g.mu.Lock()
 			g.running = false
+			close(done)
 			g.mu.Unlock()
 		}()
 		if warm && !g.warm() {
 			return
 		}
 		g.mu.Lock()
+		if warm {
+			// The load is done: an Await waiting on it asks again, and
+			// waits on the check from here.
+			close(done)
+			done = make(chan struct{})
+			g.workDone = done
+		}
 		unknown := g.verdict == verdictUnknown
 		g.mu.Unlock()
 		if !unknown {
@@ -601,6 +692,7 @@ func (g *Gate) warm() bool {
 		return false
 	}
 	g.warmErr = nil
+	g.loads++
 	g.keptUntil = g.now().Add(g.keptFor())
 	return true
 }
@@ -655,13 +747,23 @@ type checkResult struct {
 // provider couldn't serve, leaves the verdict unknown, to be tried again
 // after RetryAfter; one whose probe ran out of time leaves it unknown and
 // holds the feature as calls that keep timing out do, so a model too slow
-// here isn't asked again every minute. It records and logs the verdict.
+// here isn't asked again every minute, unless another feature's long call
+// held the model meanwhile (HeldSince): the probe then waited for it, and
+// the check runs again after RetryAfter. It records and logs the verdict.
 func (g *Gate) check(ctx context.Context) checkResult {
+	began := time.Now()
 	v := g.runCheck(ctx)
 	if cerr := ctx.Err(); cerr != nil {
 		return checkResult{unreached: cerr}
 	}
 	switch {
+	case v.Slow && g.HeldSince(began):
+		g.mu.Lock()
+		g.checkErr, g.checkErrAt = v.Err, g.now()
+		g.mu.Unlock()
+		g.log.Debug(g.words.Feature+": checking "+g.role()+" waited for another feature's call; checking it again "+
+			"later", "model", g.model, "probe", v.Probe, "err", v.Err, "retry_in", RetryAfter)
+		return checkResult{unreached: fmt.Errorf("probe %q: %w", v.Probe, v.Err)}
 	case v.Probe == "":
 		g.mu.Lock()
 		g.verdict, g.checkErr, g.checkedAt = verdictFit, nil, g.now()

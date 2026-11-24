@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/samsar/curio/internal/config"
+	"github.com/samsar/curio/internal/modelgate"
 	"github.com/samsar/curio/internal/understand"
 )
 
@@ -59,6 +60,11 @@ type Options struct {
 	Unplanned string
 	// Using, when set, is told of each call of the model (Gate's Using).
 	Using func() (end func())
+	// Traffic, when set, is the process's record of every feature's calls
+	// of each model (modelgate.Traffic): a rerank that runs past its
+	// timeout while an answer holds the model waited for it, and doesn't
+	// count toward holding reranking.
+	Traffic *modelgate.Traffic
 	// Now is the gate's clock; nil is time.Now.
 	Now func() time.Time
 	// Log receives the reranker's records; nil is slog.Default().
@@ -87,12 +93,6 @@ func OptionsFrom(c config.Config) Options {
 		o.OffReason = offReason(c, model.Model)
 	}
 	o.ByDefault = o.On && c.Search.Rerank == nil
-	if o.ByDefault && o.Unplanned != "" {
-		// Its measured point reranks understood searches, and none is:
-		// off by default, not a hold of reranking nobody asked for.
-		o.On, o.ByDefault = false, false
-		o.OffReason = fmt.Sprintf("search reranking is off by default for %s: %s", model.Model, o.Unplanned)
-	}
 	o.fitBudget(planSeconds(c), c.Search.EmbedTimeoutSeconds, c.Search.RerankTimeoutSeconds)
 	return o
 }
@@ -111,23 +111,25 @@ func (o Options) Held() string {
 	return ""
 }
 
-// unplanned is why no search has a plan under c, "" when one may: search
-// understanding is off, or withheld from its model (understand.OptionsFrom).
+// unplanned is why no search has a plan under c, "" when one may
+// (config.Config.Understands): search understanding is off, or withheld
+// from its model, worded as understand.OptionsFrom words it.
 func unplanned(c config.Config) string {
-	switch p := understand.OptionsFrom(c); {
-	case !p.On:
+	if c.Understands() {
+		return ""
+	}
+	if !c.Search.Understand {
 		return "curio reranks only understood searches, and search.understand is off; set search.understand: " +
 			"true, or search.rerank: false"
-	case p.Withheld != "":
-		return "curio reranks only understood searches, and no question is understood: " + p.Withheld
 	}
-	return ""
+	return "curio reranks only understood searches, and no question is understood: " +
+		understand.OptionsFrom(c).Withheld
 }
 
 // offReason is why reranking is off under c: config.yaml turned it off,
 // or, left out, its model isn't measured, search understanding, which its
-// measured point reranks, is off, or that point needs the summaries,
-// which aren't written.
+// measured point reranks, is off or withheld, or that point needs the
+// summaries, which aren't written.
 func offReason(c config.Config, model string) string {
 	switch p, measured := config.RerankMeasured(model); {
 	case c.Search.Rerank != nil:
@@ -135,6 +137,10 @@ func offReason(c config.Config, model string) string {
 	case measured && !c.Search.Understand:
 		return fmt.Sprintf("search reranking is off by default for %s without search understanding, which it "+
 			"reranks; search.understand: true turns it on (then restart)", model)
+	case measured && !c.Understands():
+		// Its measured point reranks understood searches, and none is:
+		// off by default, not a hold of reranking nobody asked for.
+		return fmt.Sprintf("search reranking is off by default for %s: %s", model, unplanned(c))
 	case measured && p.NeedsSummaries:
 		return fmt.Sprintf("search reranking is off by default for %s without the summaries, which it was "+
 			"measured with; %s", model, SummariesFix)
@@ -143,24 +149,15 @@ func offReason(c config.Config, model string) string {
 		model, OnFix)
 }
 
-// budgetSeconds is what an understood, reranked search may spend before
-// and between its reads: asking whether the planner's model is loaded
-// (1 s), the plan, the query's embed, asking whether the reranker's model
-// is loaded (1 s) and the rerank stay under it, so `curio search`, which
-// gives up after 30 s, keeps 5 s for the reads and gets its first ranking
-// rather than a client timeout when Ollama is slow. The planner holds its
-// own share to the same budget (understand.OptionsFrom).
-const budgetSeconds = 25
-
 // planSeconds is the most an understood search's plan costs under c: its
-// timeout as understand.OptionsFrom sets it, and a second for asking
-// whether the planner's model is loaded; 0 when no plan is asked for.
+// timeout as held to the budget (config.Config.PlanTimeout), and a second
+// for asking whether the planner's model is loaded; 0 when no plan is
+// asked for.
 func planSeconds(c config.Config) int {
-	p := understand.OptionsFrom(c)
-	if !p.On || p.Withheld != "" {
+	if !c.Understands() {
 		return 0
 	}
-	return int(p.Timeout/time.Second) + 1
+	return int(c.PlanTimeout()/time.Second) + 1
 }
 
 // fitBudget holds a rerank to the budget: past it, the rerank's timeout is
@@ -169,22 +166,23 @@ func planSeconds(c config.Config) int {
 // reranker, since the keys it adds to, valid before reranking existed,
 // can reach it: a refused config would stop the daemon on an upgrade.
 func (o *Options) fitBudget(planSeconds, embedSeconds, rerankSeconds int) {
-	if planSeconds+embedSeconds+rerankSeconds+1 < budgetSeconds {
+	budget := config.SearchBudgetSeconds
+	if planSeconds+embedSeconds+rerankSeconds+1 < budget {
 		return
 	}
-	left := budgetSeconds - 1 - planSeconds - embedSeconds - 1
+	left := budget - 1 - planSeconds - embedSeconds - 1
 	if left >= 1 {
 		o.Timeout = time.Duration(left) * time.Second
 		o.Shortened = fmt.Sprintf("search.rerank_timeout_seconds (%d) with the plan's %d s, "+
 			"search.embed_timeout_seconds (%d) and 1 s reaches %d s, past which curio search could give up before "+
-			"its results: reranks get %d s", rerankSeconds, planSeconds, embedSeconds, budgetSeconds, left)
+			"its results: reranks get %d s", rerankSeconds, planSeconds, embedSeconds, budget, left)
 		return
 	}
 	if o.Withheld == "" {
 		o.Withheld = fmt.Sprintf("the plan's %d s and search.embed_timeout_seconds (%d) leave no time for a "+
 			"rerank: with search.rerank_timeout_seconds and 1 s for asking whether its model is loaded they must "+
 			"stay under %d s, so curio search answers within 30 s; lower search.understand_timeout_seconds or "+
-			"search.embed_timeout_seconds, or set search.rerank: false", planSeconds, embedSeconds, budgetSeconds)
+			"search.embed_timeout_seconds, or set search.rerank: false", planSeconds, embedSeconds, budget)
 	}
 }
 

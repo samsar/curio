@@ -80,6 +80,19 @@ func Context(doc DocumentContext, headings []string) string {
 	return strings.Join(parts, contextSeparator)
 }
 
+// HeadingPath is the heading path Context appended to a chunk's context
+// for doc: what follows Context(doc, nil) and " — " when context begins
+// with exactly that, else "". A document whose title or site changed
+// since its chunk was embedded, or a chunk embedded without its context,
+// gives "", never a wrong heading.
+func HeadingPath(context string, doc DocumentContext) string {
+	path, ok := strings.CutPrefix(context, Context(doc, nil)+contextSeparator)
+	if !ok {
+		return ""
+	}
+	return path
+}
+
 // headingPath is the path of the headings a chunk sits under, whitespace
 // collapsed, leaving out those that are empty or repeat title or site: the
 // nearest, after its parent when both fit in maxContextPathBytes.

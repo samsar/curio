@@ -7,11 +7,11 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"slices"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"golang.org/x/term"
 
 	"github.com/samsar/curio/internal/client"
@@ -83,6 +83,13 @@ func newSearchCmd(env *daemonctl.Env, interactive func(stdout, stderr io.Writer)
 	f.IntVarP(&k, "k", "k", 0, "Number of results to return, 1-100 (default: the daemon's search.default_k)")
 	f.BoolVar(&literal, "literal", false, "Search the words alone, without understanding the question or reranking")
 	f.BoolVar(&noRerank, "no-rerank", false, "Understand the question, but keep the first order of the results")
+	addFilterFlags(f, &filters)
+	return cmd
+}
+
+// addFilterFlags registers the search filters' flags on f, writing into
+// filters: what curio search and curio ask narrow their search by.
+func addFilterFlags(f *pflag.FlagSet, filters *client.SearchFilters) {
 	f.StringSliceVar(&filters.ContentType, "type", nil,
 		"Filter by content type (article|repo|video|pdf|thread|unknown); repeatable")
 	f.StringSliceVar(&filters.Source, "source", nil,
@@ -99,7 +106,6 @@ func newSearchCmd(env *daemonctl.Env, interactive func(stdout, stderr io.Writer)
 	f.StringVar(&filters.PublishedBefore, "published-before", "", "Published before this date or date-time")
 	f.BoolVar(&filters.IncludeUndated, "include-undated", false,
 		"Keep the documents a date filter can't judge, which it leaves out by default")
-	return cmd
 }
 
 // searchInteractive reports whether a person reads curio search's output:
@@ -194,11 +200,40 @@ func predates(err error, field string) bool {
 // and how the results were ordered, then a blank line; nothing when there
 // is nothing to say.
 func renderHeader(w io.Writer, u *client.Understanding, r *client.Reranking, loc *time.Location) {
-	lines := slices.Concat(understandingLines(u, loc), rerankingLines(r))
+	header := headerLines(u, r, loc)
+	lines := make([]string, 0, len(header))
+	for _, l := range header {
+		lines = append(lines, l.text)
+	}
 	if len(lines) == 0 {
 		return
 	}
 	fmt.Fprint(w, strings.Join(lines, "\n")+"\n\n")
+}
+
+// headerLine is a line of what a question came to: how it was understood
+// and ordered, fallback marking one that says why its understanding or
+// its rerank fell back, or that its head was ordered by an order sent
+// rather than reranked.
+type headerLine struct {
+	text     string
+	fallback bool
+}
+
+// headerLines are the lines renderHeader writes, in its order, each
+// marked.
+func headerLines(u *client.Understanding, r *client.Reranking, loc *time.Location) []headerLine {
+	understood := u != nil && u.Plan != nil
+	reranked := r != nil && r.Status == "reranked"
+	ulines, rlines := understandingLines(u, loc), rerankingLines(r)
+	out := make([]headerLine, 0, len(ulines)+len(rlines))
+	for _, text := range ulines {
+		out = append(out, headerLine{text: text, fallback: !understood})
+	}
+	for _, text := range rlines {
+		out = append(out, headerLine{text: text, fallback: !reranked})
+	}
+	return out
 }
 
 // understandingLines say how the question was understood: the plan's kind

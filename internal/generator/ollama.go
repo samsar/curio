@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -20,7 +21,7 @@ import (
 const maxReplyBytes = ollama.MaxResponseBody
 
 // Ollama is a Generator backed by a local (or remote) Ollama server, using the
-// /api/generate endpoint (single-turn completion, non-streaming).
+// /api/generate endpoint (single-turn completion), whole or streamed.
 //
 // Unlike the embedder, generation is slow and occasionally flaky (the model
 // may still be loading), so this client retries transient failures with a
@@ -190,7 +191,7 @@ func (o *Ollama) Unload(ctx context.Context) error {
 
 // request is the completion request for prompt under opts.
 func (o *Ollama) request(prompt string, opts Options) generateRequest {
-	return generateRequest{
+	req := generateRequest{
 		Model:     o.client.Model(),
 		Prompt:    prompt,
 		System:    opts.System,
@@ -203,6 +204,10 @@ func (o *Ollama) request(prompt string, opts Options) generateRequest {
 			NumPredict:  opts.MaxTokens,
 		},
 	}
+	if opts.RefuseLongPrompt {
+		req.Truncate = new(false)
+	}
+	return req
 }
 
 // generate posts req to /api/generate, retrying transient failures (see
@@ -269,6 +274,8 @@ func classify(err error) error {
 		kind = ErrModelMissing
 	case errors.Is(err, ollama.ErrUnreachable):
 		kind = ErrUnreachable
+	case errors.As(err, &se) && se.Code == http.StatusBadRequest && exceedsContext(se.Body):
+		kind = ErrPromptTooLong
 	case errors.As(err, &se):
 		kind = statusKind(se.Code)
 	}
@@ -276,6 +283,20 @@ func classify(err error) error {
 		return err
 	}
 	return &classified{err: err, kind: kind}
+}
+
+// contextRefusals are what Ollama says, in a 400's error, of a prompt
+// longer than the model's context that it was told not to cut (truncate:
+// false): "request (12013 tokens) exceeds the available context size
+// (2048 tokens), try increasing it" on 0.40.16, "the input length exceeds
+// the context length" before it.
+var contextRefusals = []string{"exceeds the available context size", "exceeds the context length"}
+
+// exceedsContext reports whether body, a 400's, is Ollama refusing a
+// prompt longer than the model's context.
+func exceedsContext(body string) bool {
+	lower := strings.ToLower(body)
+	return slices.ContainsFunc(contextRefusals, func(s string) bool { return strings.Contains(lower, s) })
 }
 
 // statusKind is the sentinel an HTTP status Ollama answered with is.
@@ -321,11 +342,16 @@ type generateRequest struct {
 	// Raw sends Prompt through no chat template, and Logprobs with
 	// TopLogprobs asks for each token's log probability and the likeliest
 	// alternatives, for FirstTokens; every other call leaves them out.
-	Raw         bool            `json:"raw,omitempty"`
-	Logprobs    bool            `json:"logprobs,omitempty"`
-	TopLogprobs int             `json:"top_logprobs,omitempty"`
-	KeepAlive   string          `json:"keep_alive,omitempty"`
-	Options     generateOptions `json:"options"`
+	Raw         bool   `json:"raw,omitempty"`
+	Logprobs    bool   `json:"logprobs,omitempty"`
+	TopLogprobs int    `json:"top_logprobs,omitempty"`
+	KeepAlive   string `json:"keep_alive,omitempty"`
+	// Truncate false tells Ollama to refuse a prompt longer than the
+	// context rather than drop its head, the instructions, silently: a
+	// stream sends it, and a call that asks (Options.RefuseLongPrompt);
+	// every other leaves it out, its body as it was measured.
+	Truncate *bool           `json:"truncate,omitempty"`
+	Options  generateOptions `json:"options"`
 }
 
 // warmRequest loads the model: a generate request without a prompt.

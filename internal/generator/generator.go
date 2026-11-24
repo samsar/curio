@@ -11,13 +11,17 @@
 // falls back to parsing Generate's prose. Likewise a provider that can't
 // say how likely the first tokens of a reply are must not implement
 // LogprobGenerator: the reranker scores by those probabilities, and has no
-// prose to fall back to.
+// prose to fall back to. And a provider that can't pass a reply on as it
+// is written must not implement StreamGenerator: an answer that arrives
+// whole after a minute is not one a person watches being written, and
+// nothing buffers a reply to pretend otherwise.
 package generator
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -38,7 +42,24 @@ type Options struct {
 	// Usage, when set, receives what the call cost as the provider reports
 	// it, for any reply it gave, one it can't use included.
 	Usage *Usage
+	// Idle bounds a stream's silence between two pieces of its reply,
+	// once the first has arrived (GenerateStream); 0 is
+	// DefaultStreamIdle. The first piece waits for the model's load and
+	// its reading of the prompt, which only the caller's context bounds.
+	Idle time.Duration
+	// RefuseLongPrompt asks the provider to refuse a prompt longer than
+	// the model's context, ErrPromptTooLong, rather than cut it: Ollama
+	// otherwise drops the prompt's head, its instructions, without a
+	// word. A stream always refuses (GenerateStream); any other call asks
+	// here, and one that doesn't is sent as it was measured.
+	RefuseLongPrompt bool
 }
+
+// DefaultStreamIdle is a stream's idle bound when Options.Idle is 0.
+// Ollama writes several pieces a second while a reply streams (95 tokens a
+// second measured with gemma4:26b on 0.40.16); half a minute of silence is
+// a server or a connection that hung.
+const DefaultStreamIdle = 30 * time.Second
 
 // Usage is what a call cost, as its provider reports it: the tokens of
 // the prompt and of the reply, and how long loading the model, reading
@@ -83,6 +104,15 @@ var (
 	// would refuse it again: a prompt too long for the model, an option or
 	// output format it doesn't support (400, 413, 422 and the other 4xx).
 	ErrBadRequest = errors.New("the model's provider refuses the request")
+	// ErrPromptTooLong: the provider refuses a prompt longer than the
+	// model's context, which it was told not to cut: the caller's prompt
+	// must be made to fit. It matches neither ErrBadRequest nor
+	// ErrUnavailable: the model is fine, and the same prompt would be
+	// refused again.
+	ErrPromptTooLong = errors.New("the prompt is longer than the model's context")
+	// ErrStalled: a stream went quiet past its idle bound (Options.Idle)
+	// in the middle of its reply. It matches ErrUnavailable too.
+	ErrStalled = fmt.Errorf("the model's provider stopped mid-reply: %w", ErrUnavailable)
 )
 
 // Generator produces text from a prompt. Implementations are safe for
@@ -140,6 +170,28 @@ type LogprobGenerator interface {
 	// in [1, MaxTopTokens]; any other is an error before a request. A reply
 	// without the probabilities is an error wrapping ErrNoLogprobs.
 	FirstTokens(ctx context.Context, prompt string, raw bool, top int, opts Options) ([]TokenChoice, error)
+}
+
+// StreamEnd is how a streamed reply ended: Truncated when it stopped at
+// its token limit (Options.MaxTokens) rather than where the model ended it.
+type StreamEnd struct {
+	Truncated bool
+}
+
+// StreamGenerator is a Generator whose provider passes a reply on as the
+// model writes it.
+type StreamGenerator interface {
+	Generator
+	// GenerateStream writes the reply to prompt, passing emit each piece as
+	// it arrives, in order: never an empty one, and each whole UTF-8 text,
+	// so the pieces joined are the reply. opts.MaxTokens must be set: a
+	// stream with no cap could hold the model for its whole context. A
+	// reply cut at the cap ends Truncated, with no error. An error emit
+	// returns stops the stream, and comes back wrapped. A stream that
+	// fails after its first piece is never retried: what was emitted
+	// stays, and the error says why the rest is missing.
+	GenerateStream(ctx context.Context, prompt string, opts Options, emit func(piece string) error) (StreamEnd,
+		error)
 }
 
 // Warmer is a generator whose model can be asked about, and loaded, apart

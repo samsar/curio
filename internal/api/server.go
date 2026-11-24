@@ -60,6 +60,7 @@ type Deps struct {
 	Search          *search.Engine
 	Planner         Planner  // understands a question for a search that asks; nil while search.understand is off
 	Reranker        Reranker // reorders a search's head when it asks; nil reports reranking off
+	Asker           Asker    // answers a question from the search's pages; nil answers off
 	Insights        store.InsightStore
 	InsightEnabled  bool                            // config insight.enabled: gates POST /v1/interests/rebuild, and "off" in the interests' state
 	MapOff          bool                            // config insight.map: false: GET /v1/interests/map answers 404 map_off
@@ -80,7 +81,16 @@ type Deps struct {
 	Foreground      *jobs.Foreground                // the person's use of the models, marked around each search; nil marks none
 	Star            StarPrompt                      // counts a person's searches until the one ask for a star; nil never asks
 	TenantID        string                          // default store.LocalTenantID
+	Location        *time.Location                  // the person's zone, which the interests' timeline counts days in; nil is time.Local
 	Log             *slog.Logger
+
+	// askHeartbeat is how long an ask's stream goes without a line before
+	// its last progress is written again; 0 is askHeartbeat. Tests shorten
+	// it.
+	askHeartbeat time.Duration
+	// asks holds a place for each ask in flight or waiting, maxAsks at
+	// most; newRouter makes it.
+	asks chan struct{}
 }
 
 // Server is the HTTP layer. It serves from the moment the daemon binds its
@@ -192,6 +202,7 @@ func useMiddleware(r chi.Router, origin localOrigin, pages dashboard, log *slog.
 // own origin under origin, and the dashboard's when pages has them. deps
 // must have Log and TenantID set.
 func newRouter(deps Deps, origin localOrigin, pages dashboard) (chi.Router, error) {
+	deps.asks = make(chan struct{}, maxAsks)
 	r := chi.NewRouter()
 	useMiddleware(r, origin, pages, deps.Log)
 	r.NotFound(func(w http.ResponseWriter, req *http.Request) {
@@ -236,12 +247,14 @@ func newRouter(deps Deps, origin localOrigin, pages dashboard) (chi.Router, erro
 		r.Get("/failures", deps.handleFailures)
 
 		r.Post("/search", deps.handleSearch)
+		r.Post("/ask", deps.handleAsk)
 
 		r.Route("/interests", func(r chi.Router) {
 			r.Get("/", deps.handleListInterests)
 			r.Get("/unsorted", deps.handleUnsorted)
 			r.Get("/changes", deps.handleInterestChanges)
 			r.Get("/map", deps.handleInterestMap)
+			r.Get("/timeline", deps.handleInterestsTimeline)
 			r.Post("/rebuild", deps.handleRebuildInterests)
 			r.Get("/{id}", deps.handleGetInterest)
 		})

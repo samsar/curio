@@ -24,6 +24,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/samsar/curio/internal/api"
+	"github.com/samsar/curio/internal/ask"
 	"github.com/samsar/curio/internal/config"
 	"github.com/samsar/curio/internal/curiohome"
 	"github.com/samsar/curio/internal/drift"
@@ -360,6 +361,76 @@ func (r *Reranker) Questions() []string {
 // WithReranker is an option for Start that reranks searches with r.
 func WithReranker(r *Reranker) func(*api.Deps) {
 	return func(d *api.Deps) { d.Reranker = r }
+}
+
+// Asker is an asker that answers every question with its events, whose
+// state a test sets, recording the requests it is asked. Its state, until
+// set, an asker that is on and hasn't checked its model. Safe for
+// concurrent use.
+type Asker struct {
+	mu       sync.Mutex
+	events   []ask.Event
+	err      error
+	state    *ask.State
+	requests []ask.Request
+}
+
+// NewAsker is an asker that answers every question with events.
+func NewAsker(events ...ask.Event) *Asker { return &Asker{events: events} }
+
+// Ask implements api.Asker: the events, then err.
+func (a *Asker) Ask(_ context.Context, req ask.Request, emit func(ask.Event) error) error {
+	a.mu.Lock()
+	a.requests = append(a.requests, req)
+	events, err := slices.Clone(a.events), a.err
+	a.mu.Unlock()
+	for _, e := range events {
+		if err := emit(e); err != nil {
+			return err
+		}
+	}
+	return err
+}
+
+// Timeout implements api.Asker: config.yaml's default.
+func (*Asker) Timeout() time.Duration {
+	return time.Duration(config.Default().Ask.TimeoutSeconds) * time.Second
+}
+
+// State implements api.Asker.
+func (a *Asker) State() ask.State {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.state != nil {
+		return *a.state
+	}
+	return ask.State{On: true, Model: "m:1", Check: "unchecked"}
+}
+
+// SetState makes s the asker's state from now on.
+func (a *Asker) SetState(s ask.State) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.state = &s
+}
+
+// Set makes events the answer from now on, and err the error after them.
+func (a *Asker) Set(err error, events ...ask.Event) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.events, a.err = events, err
+}
+
+// Requests are the requests the asker was asked, in order.
+func (a *Asker) Requests() []ask.Request {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return slices.Clone(a.requests)
+}
+
+// WithAsker is an option for Start that answers questions with a.
+func WithAsker(a *Asker) func(*api.Deps) {
+	return func(d *api.Deps) { d.Asker = a }
 }
 
 // AddBookmark saves url from source as title in folder through ingest,

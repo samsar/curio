@@ -1,15 +1,12 @@
 package summarize
 
 import (
-	"bytes"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/samsar/curio/internal/jsonstrict"
 	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/textutil"
 )
@@ -35,23 +32,17 @@ type InvalidAnswer struct {
 
 func (e *InvalidAnswer) Error() string { return "the model's summary couldn't be used: " + e.Reason }
 
-// decodeAnswer reads raw strictly: one JSON object of the schema's shape,
-// no key it doesn't have, a kind of the set, and at most the schema's
+// decodeAnswer reads raw strictly (jsonstrict): one JSON object of the
+// schema's shape, each key spelled as the schema spells it, none repeated
+// and none it doesn't have, a kind of the set, and at most the schema's
 // items in each list, each text within its cap in bytes and a text
 // textutil.TextProblem takes. The schema holds Ollama's decoding to most
 // of this; a provider or a model that strays is caught here. A failure is
 // an *InvalidAnswer.
 func decodeAnswer(raw []byte) (answer, error) {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
 	var a answer
-	// The decoder's error can quote the answer (an unknown key), so it is
-	// left out.
-	if err := dec.Decode(&a); err != nil {
+	if err := jsonstrict.Decode(raw, &a); err != nil {
 		return answer{}, &InvalidAnswer{"shape", "it isn't a JSON object of a summary's keys and types"}
-	}
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return answer{}, &InvalidAnswer{"shape", "it holds more than one JSON value"}
 	}
 	if !a.Kind.Valid() {
 		return answer{}, &InvalidAnswer{"kind", "its kind isn't one of the summary kinds"}

@@ -278,13 +278,16 @@ A model that can't turn thinking off answers the request with an error,
 and its interests get term labels; pick another.
 
 Each use of a writing model is a *role*, and `generation.roles` gives a
-role a model of its own. There are four roles: `labels`, the interest and
+role a model of its own. There are five roles: `labels`, the interest and
 area labels, in use while `insight.enabled` is true and `insight.labeling`
 is `llm`; `planner`, which understands a search question, in use while
 `search.understand` is true (the default); `summaries`, each page's
 summary, in use while `summaries.enabled` is true (see Document
-summaries); and `reranker`, which reorders a search's first results, in
-use while search reranking is on (see Search). A role is in use only while
+summaries); `reranker`, which reorders a search's first results, in
+use while search reranking is on (see Search); and `answers`, which
+answers `curio ask`'s questions, in use while Ask is on (`ask.enabled`
+true, or left out for a model measured as the answer writer; see Ask). A
+role is in use only while
 its feature is on; with none, no writing model is built, pulled or
 checked. Understanding is on whatever insight says. With
 `generation.auto_pull` the daemon pulls the labels' model, and the
@@ -1054,6 +1057,105 @@ too, `search.rerank: false` keeping it off. Going back to a 2.7, remove `search.
 `generation.roles.reranker` from `config.yaml` first: an older curio
 refuses keys and roles it doesn't know.
 
+## Ask
+
+`curio ask <question>` answers a question from the pages you saved: the
+question is searched as `curio search` searches it (understood, then
+reranked as `ask.rerank` says), the best pages the search finds are read,
+each shown the parts of its text nearest the question, and the answers
+role's writing model (`generation.roles.answers`, `generation.model`
+without it) writes an answer from them alone, every claim citing its page
+as [1], [2] or [1, 3], streamed as it is written. Then come the pages it
+was written from, the cited ones marked, with their URL and `doc_id`, and
+the pages the search found that curio couldn't read (a dead link, a
+sign-in wall): never a source, since no text of theirs backs a claim, but
+often the page you mean. A question your pages don't answer is answered
+"None of your saved pages answers this." `--rerank`, `--no-rerank`,
+`--literal` and the filters are `curio search`'s (one of the first three
+at most; none leaves the rerank to `ask.rerank`); `--sources N` answers
+from N pages; `--json` writes the daemon's events as JSON lines.
+
+A question about the whole library takes one of three fixed plans, chosen
+by its words (English only; another language is answered from the search),
+or by `--mode answer|evidence|interests|list`:
+
+- **evidence**, for a claim ("is it true that…", "evidence for…",
+  "debunked", "does … actually work", "is Rust faster than C"): the best passage of each of the first 20 readable pages is
+  judged against the claim, `judging N pages…` on stderr, and the answer is
+  written from those that support or contradict it, both sides cited, each
+  source marked by its side with the words that show it. A judgment that
+  fails is answered as any question is, with a note.
+- **interests**, for how your interests changed ("how have my interests
+  changed", "what was I into two years ago", "how many pages did I save in
+  2023", "how has my saving about cooking changed"): nothing is searched. Your saves are counted by the period each
+  page was first saved in, under the interests the latest rebuild found,
+  in the question's saved window; the table is printed (a period a line,
+  its three largest areas, then the saves with no known date) and the
+  model describes it, citing its rows as [T1]. It takes only
+  `--saved-after` and `--saved-before` of the filters. Before the first
+  rebuild of the interests, it says the library isn't grouped yet.
+- **list**, for everything on a topic ("everything I saved about…",
+  "what have I got on…", "which pages have I saved about…", "anything
+  on…"): the search's first 50 pages are grouped by
+  interest and the model gives an overview citing the groups as [G1]; the
+  groups follow the answer, each page with its URL and `doc_id`.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `ask.enabled` | left out | answer questions: true with any model, its fitness check guarding it; false answers none; left out, on only for a model measured as the answer writer (gemma4:26b) |
+| `ask.sources` | 6 | how many pages an answer is written from, 1 to 12 |
+| `ask.max_tokens` | 768 | the longest answer, in tokens, 128 to 2048; one cut there is marked truncated |
+| `ask.timeout_seconds` | 90 | a whole ask, 15 to 300: waiting for the model to load and pass its check, the search and the answer |
+| `ask.rerank` | false | reorder an ask's search head with the reranker before its sources are read (`search.rerank` governs searches); a request's own choice wins. Off by the measurement: the writer reads its sources itself, and the rerank's seconds cost the first token its bar |
+
+Before its first answer the writer's model must pass a fitness check: three
+made-up questions, one a source answers, one none does, and one whose
+source tells the model to do something else. A model that fails answers
+nothing (`curio doctor` says why); one the check can't reach is checked
+again a minute later.
+
+**Which models answer by default.** With `ask.enabled` left out, Ask is
+on only for a model measured as the answer writer against Ask's bars:
+gemma4:26b, on 40 questions. Every other model, the smaller tiers `curio
+up` picks among them, answers nothing until `ask.enabled: true` turns it
+on (then restart), its fitness check still guarding it; `curio ask` says
+so, and `curio doctor` says it in an untroubled line. qwen3:4b-instruct,
+gemma4:12b and gemma4:26b-a4b-it-qat each pass the check, but none was
+measured on the questions. `curio up` writes no `ask` key.
+
+**Time.** An ask waits for its model rather than going on without it: the
+first ask after a restart loads it (about 11 s for gemma4:26b on a 64 GB
+M4 Max) and runs its check (three short answers), then searches, which the
+planner and the reranker, writing with the same model by default, find
+warm. A warm ask's first words come once the search is done and the model
+has read the pages. One answer is written at a time; a second ask waits
+for the first, and with four asks answering or waiting another is refused
+at once, saying to ask again in a few seconds. Ask shares search's keep-alive
+(`search.understand_keep_alive_minutes`), so an answer between searches
+never unloads their model early.
+
+**Memory.** The answers write with `generation.model` unless their role
+names another, so by default Ask needs no memory beyond the planner's
+model. A model of their own (`generation.roles.answers.model`) is loaded
+beside it: `curio up` offers to pull it, with consent, when no other role
+writes with it. While Ask is on, a summaries pass on the answers' model
+sends search's keep-alive too, as it does beside the planner or the
+reranker, so a page summarized between two asks never cuts the model's
+warm window to Ollama's 5 minutes; with none of the three on its model, a
+pass sends no keep-alive, and Ollama frees the model about 5 minutes
+after its last page.
+
+**Where questions go.** An ask sends the model your question, passages and
+summaries of your pages, and their titles and saved dates. They go off this
+machine, or to a provider other than Ollama, only when
+`generation.roles.answers` names that `base_url` (or `provider`) itself; a
+remote `generation.base_url` alone is for the other roles, and Ask then
+answers nothing, saying so in `curio status` and `curio doctor`.
+
+**Going back to 2.9.** Remove the `ask` section and
+`generation.roles.answers` from `config.yaml` first: an older curio refuses
+keys and roles it doesn't know.
+
 ## Document summaries
 
 The daemon can ask the writing model for each page's summary, one page at
@@ -1170,7 +1272,8 @@ model not answering" under Troubleshooting).
 | `search.embed_timeout_seconds` | 10 | embedding a search query; past it, search returns keyword-only results marked `degraded`. Keep it well under 30: the CLI and MCP give up on a request after 30 s, so a hung Ollama would surface as a client timeout instead |
 | `search.understand_timeout_seconds` | 5 | one plan of a search question, at most 23; past it, the search searches the question's words. It plus `search.embed_timeout_seconds` plus 1 stays under 25, for the same reason: past that the planner gets what the embed timeout leaves, and none below a second |
 | `search.rerank_timeout_seconds` | 7 | one rerank of a search's first results, at most 23; past it, they keep their first order. With the plan's timeout and its second, the embed's and a second for the reranker's loaded check it stays under 25 (5 + 1 + 10 + 7 + 1 = 24 by default): past that the rerank gets what is left, and none below a second |
-| `generation.timeout_seconds` | 120 | one LLM request; timeouts aren't retried. A role's `generation.roles.<role>.timeout_seconds` replaces it for that role |
+| `ask.timeout_seconds` | 90 | a whole ask, 15 to 300, its waits for the model's load and check included; past it the answer stops where it got to, marked |
+| `generation.timeout_seconds` | 120 | one LLM request; timeouts aren't retried. A role's `generation.roles.<role>.timeout_seconds` replaces it for that role. An answer streams, bounded by `ask.timeout_seconds` instead |
 | `insight.labeling_timeout_seconds` | 900 | all LLM labeling in one rebuild of the interests; the rest get term labels |
 
 ## Troubleshooting

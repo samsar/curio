@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -462,6 +463,51 @@ func TestPostJSON(t *testing.T) {
 			assert.Equal(t, tc.wantStatus, se.Code)
 		})
 	}
+}
+
+// TestPostStream: a 2xx reply's body is the caller's to read as it
+// arrives, past the client's per-request timeout; a non-2xx is what
+// PostJSON makes of it.
+func TestPostStream(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var in map[string]any
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&in))
+		switch in["model"] {
+		case "missing":
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprint(w, `{"error":"model 'missing' not found"}`)
+		case "bad":
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error":"invalid options"}`)
+		default:
+			for i := range 3 {
+				fmt.Fprintf(w, "{\"n\":%d}\n", i)
+				w.(http.Flusher).Flush()
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	// A timeout no request could meet: the stream ignores it.
+	c, err := New(srv.URL, "m", time.Nanosecond)
+	require.NoError(t, err)
+	body, err := c.PostStream(context.Background(), "/api/generate", map[string]string{"model": "m"})
+	require.NoError(t, err)
+	raw, err := io.ReadAll(body)
+	require.NoError(t, body.Close())
+	require.NoError(t, err)
+	assert.Equal(t, "{\"n\":0}\n{\"n\":1}\n{\"n\":2}\n", string(raw))
+
+	_, err = c.PostStream(context.Background(), "/api/generate", map[string]string{"model": "missing"})
+	require.ErrorIs(t, err, ErrModelNotLoaded)
+	var se *StatusError
+	require.ErrorAs(t, err, &se)
+	assert.Equal(t, http.StatusNotFound, se.Code)
+
+	_, err = c.PostStream(context.Background(), "/api/generate", map[string]string{"model": "bad"})
+	require.ErrorAs(t, err, &se)
+	assert.Equal(t, http.StatusBadRequest, se.Code)
+	assert.NotErrorIs(t, err, ErrModelNotLoaded)
 }
 
 // TestPostJSON_ErrorBodyIsQuotedUpToTheCap: an error body that arrives in

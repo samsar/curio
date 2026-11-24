@@ -234,50 +234,6 @@ func TestSearch_RequestFiltersCheckedAlone(t *testing.T) {
 	assert.Contains(t, p.Detail, "filters.include_undated")
 }
 
-// TestMergeFilters: each dimension the request sets is its own, the plan's
-// of that dimension dropped; a window is one dimension; include_undated
-// goes with the request's dates when it sets any.
-func TestMergeFilters(t *testing.T) {
-	plan := search.FilterRequest{ContentType: []string{"video"}, Source: []string{"safari"},
-		SavedAfter: "2024-01-01T00:00:00-05:00", SavedBefore: "2025-01-01T00:00:00-05:00",
-		PublishedBefore: "2020-01-01", IncludeUndated: true}
-	for _, tc := range []struct {
-		name    string
-		req     search.FilterRequest
-		want    search.FilterRequest
-		dropped []string
-	}{
-		{"nothing set", search.FilterRequest{}, plan, nil},
-		{"a type", search.FilterRequest{ContentType: []string{"pdf"}}, search.FilterRequest{
-			ContentType: []string{"pdf"}, Source: plan.Source, SavedAfter: plan.SavedAfter,
-			SavedBefore: plan.SavedBefore, PublishedBefore: plan.PublishedBefore, IncludeUndated: true},
-			[]string{"content_type"}},
-		{"one bound of the saved window", search.FilterRequest{SavedBefore: "2023-01-01"}, search.FilterRequest{
-			ContentType: plan.ContentType, Source: plan.Source, SavedBefore: "2023-01-01",
-			PublishedBefore: plan.PublishedBefore}, []string{"saved", "include_undated"}},
-		{"the request's dates, undated kept", search.FilterRequest{PublishedAfter: "2019-01-01",
-			IncludeUndated: true}, search.FilterRequest{ContentType: plan.ContentType, Source: plan.Source,
-			SavedAfter: plan.SavedAfter, SavedBefore: plan.SavedBefore, PublishedAfter: "2019-01-01",
-			IncludeUndated: true}, []string{"published"}},
-		{"a site the plan hasn't", search.FilterRequest{Site: []string{"example.com"}}, search.FilterRequest{
-			ContentType: plan.ContentType, Source: plan.Source, Site: []string{"example.com"},
-			SavedAfter: plan.SavedAfter, SavedBefore: plan.SavedBefore, PublishedBefore: plan.PublishedBefore,
-			IncludeUndated: true}, nil},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got, dropped := mergeFilters(tc.req, plan)
-			assert.Equal(t, tc.want, got)
-			var fields []string
-			for _, d := range dropped {
-				fields = append(fields, d.Field)
-			}
-			assert.Equal(t, tc.dropped, fields)
-			_, err := got.Resolve()
-			assert.NoError(t, err)
-		})
-	}
-}
-
 // TestSearch_Fallbacks: every way a question goes without a plan answers
 // 200 with the literal search's results, and the status and reason; with
 // no planner, understanding is off.

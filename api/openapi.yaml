@@ -668,6 +668,98 @@ paths:
 
   # ---------- search ----------
 
+  /v1/ask:
+    post:
+      tags: [search]
+      operationId: ask
+      summary: Answer a question from the saved pages, citing them, streamed
+      description: >
+        Searches the question as POST /v1/search does (understood by the
+        planner unless understand is false or a plan is supplied, reranked
+        as rerank says, else as ask.rerank does), reads the ranking's first
+        readable pages as numbered sources, each shown the parts of its text
+        nearest the question (failed and dead pages are listed apart as
+        unreadable, never sources), and streams an answer the answers role's
+        writing model (generation.roles.answers, ask.enabled) writes from
+        them alone, citing each claim as [n]. A question the sources don't
+        answer is answered with the one sentence "None of your saved pages
+        answers this." The answer's text is never changed once sent: how its
+        citations read is in the done event.
+
+        The route is the request's mode, else decided by English word rules
+        over the question (another language takes answer): evidence, for a
+        claim ("is it true that…"), judges the first 20 readable pages'
+        best passages against it, quoting each that takes a side, and
+        answers from those, both sides cited (an evidence event says how;
+        a judgment that fails answers as answer does); interests, for how
+        the interests changed ("what was I into in 2021"), searches nothing:
+        it reads the interests' saves over time as GET
+        /v1/interests/timeline counts them, in the question's saved window
+        (a table event), and describes them citing the rows as [Tn]; list,
+        for everything on a topic ("everything I saved about…"), groups the
+        ranking's first 50 pages (10 when ranked by meaning alone) by
+        interest (a groups event) and gives an overview citing the groups as
+        [Gn]. A question routed to the interests by its words but asked
+        with a filter other than its saved window takes the answer route.
+
+        A request refused before anything is streamed is a problem: a
+        malformed body, an unknown field, an empty question or one over 512
+        bytes, sources outside 1..12, a mode no route is, mode interests
+        with a filter other than saved_after and saved_before, a filter
+        that won't resolve (filters.<field>), both understand true and a
+        plan, or a plan its schema refuses. Past that the answer is 200 and
+        a stream of application/x-ndjson, one AskEvent a line, each flushed
+        as it is written: progress events, one retrieval event, the route's
+        own event (evidence, table or groups), delta events carrying the
+        answer's pieces, then one done event, whose status says how the ask
+        ended; or, for a failure inside the daemon after the stream began,
+        one error event. Nothing follows the done or error event.
+        While nothing else is written for 10 s (a load, a check, a slow
+        search), the last progress event is written again. The stream lasts
+        at most ask.timeout_seconds and 10 s more; a client that closes it
+        cancels the ask, and the model's generation with it.
+
+        The writer's model is waited for: a cold load and its fitness check,
+        once a process, are progress events (loading, checking), not
+        failures. One answer is written at a time; an ask that waits for
+        another says so (waiting). At most 4 asks are in flight or waiting
+        at once: another is refused with 503 and a Retry-After before
+        anything is streamed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AskRequest" }
+      responses:
+        "200":
+          description: The ask's events, one JSON object a line.
+          content:
+            application/x-ndjson:
+              schema: { $ref: "#/components/schemas/AskEvent" }
+        "400":
+          description: >
+            An empty question or one over 512 bytes, sources outside 1..12,
+            an unknown mode, mode interests with a filter it doesn't take, a
+            filter that won't resolve, both understand true and a plan, a
+            plan its schema or a filter refuses, an unknown field, or a
+            malformed body
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "503":
+          description: >
+            4 asks are in flight or waiting already (or the daemon is
+            starting: see the Startup convention). Nothing was asked; ask
+            again after Retry-After seconds.
+          headers:
+            Retry-After:
+              description: Seconds to wait before asking again
+              schema: { type: integer }
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        default: { $ref: "#/components/responses/Problem" }
+
   /v1/search:
     post:
       tags: [search]
@@ -880,6 +972,53 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: "#/components/schemas/InterestMapUnavailable" }
+        default: { $ref: "#/components/responses/Problem" }
+
+  /v1/interests/timeline:
+    get:
+      tags: [insight]
+      operationId: interestsTimeline
+      summary: The latest rebuild's interests, by when their pages were first saved
+      description: >
+        The interests of the latest rebuild, each document counted once, on
+        the day it was first saved (its earliest bookmark whose saved date is
+        known, in the daemon's zone), under its interest (a member, a loose
+        fit, or placed since) and that interest's area, or under Unsorted.
+        Periods are quarters while the dated saves span at most 12 of them,
+        else years, oldest to newest with empty ones included; past 25 the
+        oldest are one "before …" period. Rows are the areas by total, the
+        12 largest each followed by its 3 largest interests and a row for
+        the rest, then a row for the other areas (a flat rebuild: its 15
+        largest interests and a row for the rest), then Unsorted; a row
+        that counts nothing is left out. Documents without a known saved
+        date are counted apart, as undated, whatever the window. No model
+        is asked. A rebuild that commits while the table is read is
+        answered from the newer run.
+      parameters:
+        - in: query
+          name: saved_after
+          description: Count saves at or after this, read as POST /v1/search's filters.saved_after.
+          schema: { type: string }
+        - in: query
+          name: saved_before
+          description: Count saves before this, read as POST /v1/search's filters.saved_before.
+          schema: { type: string }
+        - in: query
+          name: period
+          description: The unit counted by; auto picks quarters or years by the span.
+          schema: { type: string, enum: [auto, year, quarter], default: auto }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/InterestsTimeline" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404":
+          description: No rebuild of the interests is done yet
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/InterestsUnavailable" }
         default: { $ref: "#/components/responses/Problem" }
 
   /v1/interests/rebuild:
@@ -1273,7 +1412,8 @@ components:
         understanding: { $ref: "#/components/schemas/UnderstandingHealth" }
         reranking: { $ref: "#/components/schemas/RerankingHealth" }
         summaries: { $ref: "#/components/schemas/SummariesHealth" }
-      required: [status, pid, home, version, schema_version, embedding_model, embedding_dim, generation_model, generation_roles, ollama_reachable, upstreams, github_token, interests, document_fields, saved_dates, understanding, reranking, summaries]
+        asking: { $ref: "#/components/schemas/AskingHealth" }
+      required: [status, pid, home, version, schema_version, embedding_model, embedding_dim, generation_model, generation_roles, ollama_reachable, upstreams, github_token, interests, document_fields, saved_dates, understanding, reranking, summaries, asking]
 
     SummariesHealth:
       description: >
@@ -2082,6 +2222,81 @@ components:
 
     # ---------- search ----------
 
+    AskingHealth:
+      description: >
+        What the daemon's asker knows of its model, read from its memory
+        alone: healthz never asks the model. Status stays ok whatever it
+        says.
+      type: object
+      properties:
+        "on":
+          type: boolean
+          description: >
+            Whether questions are answered: ask.enabled as config.yaml sets
+            it, or left out, whether the answers role's model is one
+            measured as the answer writer.
+        on_by_default:
+          type: boolean
+          description: >
+            Present (true) when Ask is on because config.yaml leaves
+            ask.enabled out and the model is measured as the answer writer.
+        model: { type: string, description: "The answers role's model" }
+        reason:
+          type: string
+          description: >
+            Why no question is answered at all, present only then: Ask is
+            off (ask.enabled false), off by default for a model not measured
+            as the answer writer (ask.enabled left out; the reason says how
+            to turn it on), its provider can't stream, or questions and
+            pages would leave this machine (generation.base_url off
+            loopback, or another provider) for a server the answers role
+            doesn't name (generation.roles.answers).
+        check:
+          type: string
+          enum: [unchecked, fit, unfit]
+          description: >
+            The fitness check's verdict on the model, run before its first
+            answer and kept until the daemon restarts.
+        checked_at: { type: string, format: date-time, description: "When the verdict was reached" }
+        unfit: { type: string, description: "Why the model is unfit, and the fix; present only then" }
+        last_status:
+          type: string
+          description: The last ask's done status, if any was asked since the daemon started.
+        last_at: { type: string, format: date-time, description: "When the last ask ended" }
+        timeout_hold_until:
+          type: string
+          format: date-time
+          description: >
+            Present only while asks are held because 3 answers in a row ran
+            past ask.timeout_seconds: until then every ask ends timeout at
+            once. The hold lasts 2 minutes, twice as long each time it holds
+            again, at most 15, and an answer in time ends the run.
+        eviction_hold_until:
+          type: string
+          format: date-time
+          description: >
+            Present only while the asker doesn't load its model because
+            Ollama unloaded it within its keep-alive twice within an hour,
+            for other models.
+        last_failure:
+          type: object
+          description: The asker's last failure since the daemon started.
+          properties:
+            cause:
+              type: string
+              description: >
+                What failed, as the daemon's log names it: timeout,
+                timeout:held, timeout:check, unavailable:loaded,
+                unavailable:missing, unavailable:load, unavailable:check,
+                unavailable:generate, unavailable:too_long (an answer's
+                prompt past the context), retry:too_long (one asked again
+                without its last source), unavailable:judge,
+                unavailable:judge_too_long, unfit or evicted.
+            at: { type: string, format: date-time }
+            error: { type: string }
+          required: [cause, at]
+      required: ["on"]
+
     RerankingHealth:
       description: >
         What the daemon's reranker knows of its model, read from its memory
@@ -2155,6 +2370,333 @@ components:
             error: { type: string }
           required: [cause, at]
       required: ["on"]
+
+    AskRequest:
+      type: object
+      properties:
+        question:
+          type: string
+          minLength: 1
+          maxLength: 512
+          description: >
+            The question, at most 512 bytes (maxLength counts characters:
+            the byte cap allows fewer of a question in a script of
+            multi-byte characters); not only whitespace.
+        filters: { $ref: "#/components/schemas/SearchFilters" }
+        plan:
+          $ref: "#/components/schemas/Plan"
+          description: >
+            A plan to search by, asking no model, as POST /v1/search takes
+            it; the request's own filters win over its, dimension by
+            dimension. With a plan, understand defaults to false and may not
+            be true.
+        understand:
+          type: boolean
+          description: Ask the planner what the question means; default true without a plan.
+        rerank:
+          type: boolean
+          description: Ask the reranker to reorder the ranking's head; default ask.rerank.
+        sources:
+          type: integer
+          minimum: 1
+          maximum: 12
+          description: How many pages to answer from; omitted, ask.sources.
+        mode:
+          type: string
+          enum: [answer, evidence, interests, list]
+          description: >
+            The route to take; omitted, decided by the question's words.
+            answer: from the pages the search finds; evidence: for and
+            against a claim; interests: how the interests changed over time
+            (it takes the saved window alone of the filters); list:
+            everything on a topic, grouped by interest.
+      required: [question]
+
+    AskEvent:
+      description: One line of an ask's stream, told apart by its type.
+      oneOf:
+        - { $ref: "#/components/schemas/AskProgressEvent" }
+        - { $ref: "#/components/schemas/AskRetrievalEvent" }
+        - { $ref: "#/components/schemas/AskEvidenceEvent" }
+        - { $ref: "#/components/schemas/AskTableEvent" }
+        - { $ref: "#/components/schemas/AskGroupsEvent" }
+        - { $ref: "#/components/schemas/AskDeltaEvent" }
+        - { $ref: "#/components/schemas/AskDoneEvent" }
+        - { $ref: "#/components/schemas/AskErrorEvent" }
+
+    AskProgressEvent:
+      type: object
+      description: What the ask is busy with now; written again while nothing else is.
+      properties:
+        type: { const: progress }
+        stage:
+          type: string
+          enum: [retrieving, loading, checking, waiting, judging, writing]
+          description: >
+            retrieving: understanding, searching and reranking the question;
+            loading: the writer's model is loading; checking: it is being
+            checked before its first answer; waiting: another ask's answer
+            is being written; judging: the model is judging a claim's
+            passages (the evidence route); writing: the model is reading the
+            sources and writing.
+        model: { type: string, description: "The model the ask waits on or writes with" }
+        pages: { type: integer, minimum: 1, description: "While judging, how many pages' passages are judged" }
+      required: [type, stage]
+
+    AskRetrievalEvent:
+      type: object
+      description: What the question retrieved, written once, before the answer.
+      properties:
+        type: { const: retrieval }
+        route: { type: string, enum: [answer, evidence, interests, list], description: "How the question is answered" }
+        understanding: { $ref: "#/components/schemas/Understanding" }
+        reranking: { $ref: "#/components/schemas/Reranking" }
+        degraded: { type: boolean, description: "The search went without its semantic lists; warnings say why" }
+        warnings:
+          type: array
+          items: { type: string }
+        sources:
+          type: array
+          items: { $ref: "#/components/schemas/AskSource" }
+          description: >
+            The pages the answer is written from, numbered as it cites them:
+            on the evidence route those judged to take a side, the
+            supporting first; none on the interests and list routes, which
+            write from a table and from groups.
+        unreadable:
+          type: array
+          items: { $ref: "#/components/schemas/AskUnreadable" }
+          description: >
+            At most 3 pages the search found among the sources' ranks that
+            curio couldn't read (failed or dead): never sources, since no
+            text of theirs can back a claim, but often the page meant.
+      required: [type, route, sources]
+
+    AskSource:
+      type: object
+      properties:
+        "n": { type: integer, minimum: 1, description: "The number the answer cites it by" }
+        doc_id: { type: string, format: uuid }
+        url: { type: string }
+        title: { type: string, description: "Its title, else the first it was saved as, else its host" }
+        saved_as:
+          type: array
+          items: { type: string }
+          description: The other titles it was saved as.
+        site: { type: string }
+        saved_on:
+          type: string
+          description: >
+            The day it was first saved, YYYY-MM-DD in the daemon's zone,
+            "about" before it when that day is approximate; absent when no
+            save of it has a known date.
+        about: { type: string, description: "Its summary's one-line about, when one is written" }
+        quote:
+          type: string
+          description: An evidence source's words that show its side, as the model quoted them and curio found them in its passage.
+        passages:
+          type: array
+          items: { $ref: "#/components/schemas/AskPassage" }
+          description: >
+            The parts of its text the model was shown, in their page's
+            order: its chunks nearest the question, neutralized, the last
+            fitted to the source's allowance by its paragraphs.
+      required: ["n", doc_id, url, title]
+
+    AskPassage:
+      type: object
+      properties:
+        text: { type: string, description: "As the prompt showed it; ' … ' marks text left out between two parts" }
+        section: { type: string, description: "The headings of the page it sits under, when the page names any" }
+      required: [text]
+      additionalProperties: false
+
+    AskUnreadable:
+      type: object
+      properties:
+        doc_id: { type: string, format: uuid }
+        url: { type: string }
+        title: { type: string }
+        state: { type: string, enum: [failed, dead] }
+        reason: { type: string, description: "Why it can't be read" }
+      required: [doc_id, url, title, state, reason]
+
+    AskEvidenceEvent:
+      type: object
+      description: >
+        How the evidence route judged a claim's passages, after the
+        retrieval event and before the answer. judged: some pages take a
+        side, and the answer is written from them; none: none does once
+        their quotes are checked against their passages, and the ask ends
+        no_sources; invalid, timeout, unavailable, unsupported: the
+        judgment failed (a reply that can't be used or was cut at its cap;
+        past half of what was left of the ask's time; the model couldn't be
+        reached; a provider that can't judge), and the claim is answered as
+        any question is, from the retrieval event's sources.
+      properties:
+        type: { const: evidence }
+        status: { type: string, enum: [judged, none, invalid, timeout, unavailable, unsupported] }
+        reason: { type: string, description: "Why, for any status but judged" }
+        judged: { type: integer, minimum: 0, description: "How many pages' passages the judgment judged: 0 when it failed" }
+        supports:
+          type: array
+          items: { type: integer, minimum: 1 }
+          description: The sources, by number, that support the claim.
+        contradicts:
+          type: array
+          items: { type: integer, minimum: 1 }
+          description: The sources, by number, that contradict it.
+        dropped_quotes: { type: integer, minimum: 0, description: "Judgments dropped for a quote their passage doesn't hold" }
+        took_ms: { type: integer, minimum: 0 }
+      required: [type, status, judged, supports, contradicts, dropped_quotes, took_ms]
+
+    AskTableEvent:
+      description: >
+        The interests route's table, after the retrieval event: the
+        interests' saves over time, as GET /v1/interests/timeline answers
+        them in the question's saved window, each row the prompt showed
+        carrying its citation mark (T1… in the table's order), the undated
+        count's mark last, undated_marker. shown is how many marks there
+        are, the undated count's included.
+      type: object
+      properties:
+        type: { const: table }
+        run: { $ref: "#/components/schemas/TimelineRun" }
+        period: { type: string, enum: [year, quarter] }
+        periods:
+          type: array
+          items: { type: string }
+        rows:
+          type: array
+          items: { $ref: "#/components/schemas/TimelineRow" }
+        dated: { type: integer, minimum: 0 }
+        undated: { type: integer, minimum: 0 }
+        window: { $ref: "#/components/schemas/TimelineWindow" }
+        undated_marker: { type: string }
+        shown: { type: integer, minimum: 1 }
+      required: [type, run, period, periods, rows, dated, undated, undated_marker, shown]
+      additionalProperties: false
+
+    AskGroupsEvent:
+      type: object
+      description: >
+        The list route's groups, after the retrieval event: the ranking's
+        first pages grouped by the interest the latest rebuild put each in,
+        the most first, Unsorted (and pages outside the rebuild) last; one
+        group, not grouped yet, before any rebuild. shown is how many of
+        them the prompt held, G1 to G<shown>.
+      properties:
+        type: { const: groups }
+        groups:
+          type: array
+          items: { $ref: "#/components/schemas/AskGroup" }
+        listed: { type: integer, minimum: 0, description: "The pages grouped" }
+        ranked: { type: integer, minimum: 0, description: "How many the search ranked" }
+        wordless: { type: boolean, description: "The ranking was by meaning alone, so only its first 10 are grouped" }
+        shown: { type: integer, minimum: 0 }
+      required: [type, groups, listed, ranked, shown]
+
+    AskGroup:
+      type: object
+      properties:
+        marker: { type: string, description: "Its citation mark, G1…" }
+        interest_id: { type: string, format: uuid, description: "Absent for Unsorted and before any rebuild" }
+        label: { type: string }
+        area_label: { type: string }
+        count: { type: integer, minimum: 1 }
+        documents:
+          type: array
+          items: { $ref: "#/components/schemas/AskGroupDocument" }
+      required: [marker, label, count, documents]
+      additionalProperties: false
+
+    AskGroupDocument:
+      type: object
+      properties:
+        doc_id: { type: string, format: uuid }
+        url: { type: string }
+        title: { type: string }
+        state: { type: string, enum: [pending, fetched, failed, dead] }
+        about: { type: string }
+      required: [doc_id, url, title, state]
+      additionalProperties: false
+
+    AskDeltaEvent:
+      type: object
+      description: A piece of the answer, as the model wrote it; the pieces joined are the answer.
+      properties:
+        type: { const: delta }
+        text: { type: string }
+      required: [type, text]
+
+    AskDoneEvent:
+      type: object
+      description: How the ask ended; the last line of a stream.
+      properties:
+        type: { const: done }
+        status:
+          type: string
+          enum: [answered, truncated, no_sources, "off", withheld, unfit, timeout, unavailable]
+          description: >
+            answered: the answer was written whole. truncated: it ran past
+            ask.max_tokens. no_sources: the library has no page curio has
+            read, or the search found none to answer from, and no model was
+            asked. off: ask.enabled is false, or its provider can't stream.
+            withheld: the question and pages would leave this machine (or go
+            to another provider) for a server the answers role doesn't name.
+            unfit: the writer's model failed its check. timeout: the ask ran
+            past ask.timeout_seconds, or answers kept timing out and Ask is
+            held for a while. unavailable: the model couldn't be reached or
+            run, isn't pulled, Ollama keeps unloading it, or the daemon is
+            stopping.
+        reason: { type: string, description: "Why, for any status but answered" }
+        model: { type: string, description: "The answers role's model" }
+        prompt_version: { type: string, description: "The SHA-256 of the prompts the answer was written with" }
+        route: { type: string, enum: [answer, evidence, interests, list] }
+        citations:
+          type: array
+          items: { type: integer, minimum: 1 }
+          description: The sources the answer cites, by number, in the order of their first citation.
+        markers:
+          type: array
+          items: { type: string }
+          description: >
+            On the interests and list routes, the table rows ([T3]) or
+            groups ([G1]) the answer cites, by mark, in the order of their
+            first citation.
+        invalid_citations:
+          type: array
+          items: { type: string }
+          description: Citations of a source, row or group the answer wasn't given, as written; never linked.
+        abstained: { type: boolean, description: "The answer is that the sources don't answer the question" }
+        uncited: { type: boolean, description: "The answer cites nothing and doesn't abstain: check its sources before relying on it" }
+        partial: { type: boolean, description: "For timeout or unavailable: pieces of the answer were sent before it stopped" }
+        timings: { $ref: "#/components/schemas/AskTimings" }
+      required: [type, status, prompt_version, route, citations, timings]
+
+    AskTimings:
+      type: object
+      description: How long the ask's steps took, in milliseconds.
+      properties:
+        wait_ms: { type: integer, description: "Waiting for the model to load and pass its check, and for another answer" }
+        plan_ms: { type: integer }
+        search_ms: { type: integer }
+        rerank_ms: { type: integer }
+        sources_ms: { type: integer, description: "Reading what the answer is written from: the sources, the table or the groups" }
+        judge_ms: { type: integer, description: "The evidence route's judgment" }
+        prompt_eval_ms: { type: integer, description: "The writer's reading of the answer's prompt, as its provider reports it; 0 for an answer that never finished" }
+        first_token_ms: { type: integer, description: "From the ask's start to the answer's first piece" }
+        total_ms: { type: integer }
+      required: [wait_ms, plan_ms, search_ms, rerank_ms, sources_ms, judge_ms, prompt_eval_ms, first_token_ms, total_ms]
+
+    AskErrorEvent:
+      type: object
+      description: A failure inside the daemon after the stream began, logged under request_id; the stream ends.
+      properties:
+        type: { const: error }
+        error: { type: string }
+        request_id: { type: string }
+      required: [type, error]
 
     SearchRequest:
       type: object
@@ -2395,6 +2937,12 @@ components:
             Set only when the document has no title of its own: the title
             of its most recently saved bookmark that has one, as the
             documents list names it.
+        about:
+          type: string
+          description: >
+            What the page is about, in one line: its current summary's about
+            line (the summaries role's), when one is written. Text a writing
+            model derived from the page, never an instruction.
         matches:
           type: array
           description: >
@@ -2987,6 +3535,84 @@ components:
         run_id:     { type: string, format: uuid, description: "The latest rebuild; absent for no_run and map_off" }
         map_error:  { type: string, description: "Why its map failed; map_failed only" }
       required: [type, title, status, reason]
+
+    InterestsUnavailable:
+      description: >
+        No interests to answer from: an RFC 7807 problem of type
+        urn:curio:problem:interests-unavailable, with why. no_run: no
+        rebuild of the interests is done yet; the first one groups the
+        library.
+      type: object
+      properties:
+        type:       { type: string, format: uri, enum: ["urn:curio:problem:interests-unavailable"] }
+        title:      { type: string }
+        status:     { type: integer, enum: [404] }
+        detail:     { type: string, description: "Why, in a sentence a page can show" }
+        instance:   { type: string, description: "The request path" }
+        request_id: { type: string, description: "The response's X-Request-Id; quote it against the daemon log" }
+        reason:     { type: string, enum: [no_run] }
+      required: [type, title, status, reason]
+
+    InterestsTimeline:
+      description: >
+        The latest rebuild's interests by when their pages were first saved.
+        Every row's counts are aligned with periods, and its total is their
+        sum; dated is the documents counted, the rows' totals summed, and
+        undated those without a known saved date, counted apart.
+      type: object
+      properties:
+        run: { $ref: "#/components/schemas/TimelineRun" }
+        period:  { type: string, enum: [year, quarter], description: "The unit counted by, as applied" }
+        periods:
+          type: array
+          description: The periods' labels, oldest first ("2024 Q1", "2024", "before 2002")
+          items: { type: string }
+        rows:
+          type: array
+          items: { $ref: "#/components/schemas/TimelineRow" }
+        dated:   { type: integer, minimum: 0 }
+        undated: { type: integer, minimum: 0 }
+        window: { $ref: "#/components/schemas/TimelineWindow" }
+      required: [run, period, periods, rows, dated, undated]
+      additionalProperties: false
+
+    TimelineRun:
+      type: object
+      description: The rebuild a timeline counts by
+      properties:
+        id:          { type: string, format: uuid }
+        finished_at: { type: string, format: date-time }
+        shape:       { type: string, enum: [flat, areas] }
+      required: [id, finished_at, shape]
+      additionalProperties: false
+
+    TimelineWindow:
+      type: object
+      description: The saved window counted, as applied; absent without one
+      properties:
+        saved_after:  { type: string, format: date-time }
+        saved_before: { type: string, format: date-time }
+      additionalProperties: false
+
+    TimelineRow:
+      description: >
+        A row of the interests' timeline: an area, an interest (area_id its
+        area), the areas or an area's interests past the largest (merged
+        says how many), or Unsorted.
+      type: object
+      properties:
+        kind:    { type: string, enum: [area, other_areas, interest, other_interests, unsorted] }
+        id:      { type: string, format: uuid, description: "The area or interest; absent for the merged rows and Unsorted" }
+        area_id: { type: string, format: uuid, description: "An interest's area, or the area whose interests a merged row holds" }
+        label:   { type: string, description: "Its label; empty for the merged rows, Unsorted and one not named yet" }
+        counts:
+          type: array
+          items: { type: integer, minimum: 0 }
+        total:   { type: integer, minimum: 0 }
+        merged:  { type: integer, minimum: 1, description: "How many areas or interests a merged row holds" }
+        marker:  { type: string, description: "In an ask's table event, the row's citation mark ([T3] cites T3), on each row the prompt showed" }
+      required: [kind, label, counts, total]
+      additionalProperties: false
 
     # ---------- jobs ----------
 

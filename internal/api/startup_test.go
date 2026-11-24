@@ -98,6 +98,19 @@ func TestStarting_RefusesEverythingElse(t *testing.T) {
 	assert.Zero(t, s.count(t, "jobs"))
 }
 
+// TestStarting_RefusesAnAsk: a starting daemon answers an ask with the
+// starting problem, before a byte of a stream, and asks nothing.
+func TestStarting_RefusesAnAsk(t *testing.T) {
+	asker := contractAsker()
+	s := newStartingTestServer(t, func(d *Deps) { d.Asker = asker })
+	resp := s.do(t, request{method: http.MethodPost, path: "/v1/ask", contentType: "application/json",
+		body: `{"question":"kafka"}`})
+	p := assertProblem(t, resp, http.StatusServiceUnavailable)
+	assert.Equal(t, StartingProblemType, p.Type)
+	assert.Equal(t, startingRetryAfter, resp.header.Get("Retry-After"))
+	assert.Empty(t, asker.requests(), "nothing asked")
+}
+
 // TestStarting_Root: while starting, / is refused like any other path
 // without the dashboard, and redirects to it with the dashboard.
 func TestStarting_Root(t *testing.T) {

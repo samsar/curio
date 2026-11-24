@@ -1151,3 +1151,87 @@ func TestInsights_DocumentPlace(t *testing.T) {
 	assert.Equal(t, store.DocumentPlace{Fit: store.InterestFitMember, InterestID: "flat-1", Similarity: 0.7}, *got,
 		"in no area, unlabeled")
 }
+
+// TestInsights_RunSaves: every document of a run once, assigned and
+// placed since, with its interest, that interest's area and its earliest
+// bookmark of a known saved date; an unknown date, another tenant's
+// bookmark and a document with none leave it undated; a document both
+// assigned and placed, which PlaceDocument's guard never writes, counts
+// as assigned.
+func TestInsights_RunSaves(t *testing.T) {
+	f := newInsightFixture(t, 9)
+	d := f.docs
+	run := f.run(t, "local")
+	require.NoError(t, f.ins.CommitRun(f.ctx, f.firstCommit(run)))
+	placed, err := f.ins.PlaceDocument(f.ctx, "local", store.Placement{RunID: run.ID, DocumentID: d[7],
+		InterestID: "interest-2", Similarity: 0.6})
+	require.NoError(t, err)
+	require.True(t, placed)
+	early := time.Date(2023, 3, 1, 9, 0, 0, 0, time.UTC)
+	late := time.Date(2024, 6, 1, 9, 0, 0, 0, time.UTC)
+	bookmark := func(id, tenant, doc string, at time.Time, date store.SavedDate) {
+		t.Helper()
+		_, err := f.db.Exec(`INSERT INTO bookmarks (id, tenant_id, document_id, url, saved_at, source, saved_date)
+			VALUES (?, ?, ?, ?, ?, ?, ?)`, id, tenant, doc, "https://example.com/"+id, formatTime(at),
+			store.SourceChrome, date)
+		require.NoError(t, err)
+	}
+	bookmark("b0", "local", d[0], late, store.SavedDateExact)
+	bookmark("b1", "local", d[0], early, store.SavedDateApprox)
+	bookmark("b2", "local", d[3], early, store.SavedDateUnknown)
+	bookmark("b3", "other", d[4], early, store.SavedDateExact)
+	bookmark("b4", "local", d[7], late, store.SavedDateExact)
+	_, err = f.db.Exec(`INSERT INTO interest_placements (run_id, document_id, interest_id, similarity, placed_at)
+		VALUES (?, ?, ?, ?, ?)`, run.ID, d[1], "interest-2", 0.6, formatTime(late))
+	require.NoError(t, err, "a placement past the guard")
+
+	saves, err := f.ins.RunSaves(f.ctx, "local", run.ID)
+	require.NoError(t, err)
+	byDoc := map[string]store.RunSave{}
+	for _, s := range saves {
+		_, twice := byDoc[s.DocumentID]
+		require.False(t, twice, "each document once")
+		byDoc[s.DocumentID] = s
+	}
+	assert.Len(t, byDoc, 8, "the seven assigned and the one placed")
+	assert.Equal(t, store.RunSave{DocumentID: d[0], InterestID: "interest-1", AreaID: "area-1", SavedAt: early},
+		byDoc[d[0]], "the earliest known save")
+	assert.Equal(t, store.RunSave{DocumentID: d[2], InterestID: "interest-1", AreaID: "area-1"}, byDoc[d[2]],
+		"a loose fit, under its interest")
+	assert.Equal(t, store.RunSave{DocumentID: d[1], InterestID: "interest-1", AreaID: "area-1"}, byDoc[d[1]],
+		"assigned, not placed")
+	assert.True(t, byDoc[d[3]].SavedAt.IsZero(), "an unknown saved date")
+	assert.True(t, byDoc[d[4]].SavedAt.IsZero(), "another tenant's bookmark")
+	assert.Equal(t, store.RunSave{DocumentID: d[5]}, byDoc[d[5]], "unsorted")
+	assert.Equal(t, store.RunSave{DocumentID: d[7], InterestID: "interest-2", AreaID: "area-1", SavedAt: late},
+		byDoc[d[7]], "placed since")
+
+	none, err := f.ins.RunSaves(f.ctx, "local", "no-such-run")
+	require.NoError(t, err)
+	assert.Empty(t, none)
+}
+
+// TestInsights_RunInterestsOf: each document asked for, in order, with
+// where the run put it: assigned, placed since, unsorted, or outside it.
+func TestInsights_RunInterestsOf(t *testing.T) {
+	f := newInsightFixture(t, 9)
+	d := f.docs
+	run := f.run(t, "local")
+	require.NoError(t, f.ins.CommitRun(f.ctx, f.firstCommit(run)))
+	_, err := f.ins.PlaceDocument(f.ctx, "local", store.Placement{RunID: run.ID, DocumentID: d[7],
+		InterestID: "interest-1", Similarity: 0.6})
+	require.NoError(t, err)
+
+	got, err := f.ins.RunInterestsOf(f.ctx, run.ID, []string{d[8], d[3], d[7], d[5], d[2]})
+	require.NoError(t, err)
+	assert.Equal(t, []store.DocumentInterest{
+		{DocumentID: d[8]},
+		{DocumentID: d[3], InterestID: "interest-2", AreaID: "area-1"},
+		{DocumentID: d[7], InterestID: "interest-1", AreaID: "area-1"},
+		{DocumentID: d[5]},
+		{DocumentID: d[2], InterestID: "interest-1", AreaID: "area-1"},
+	}, got)
+	none, err := f.ins.RunInterestsOf(f.ctx, run.ID, nil)
+	require.NoError(t, err)
+	assert.Empty(t, none)
+}

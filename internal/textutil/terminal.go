@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 	"unicode"
+	"unicode/utf16"
 	"unicode/utf8"
 )
 
@@ -105,4 +106,28 @@ func (t *terminalWriter) Write(p []byte) (int, error) {
 		return 0, err
 	}
 	return len(p), nil
+}
+
+// TerminalJSON is raw, a line of JSON, with every rune a terminal would
+// act on (terminalUnsafe: newline and tab too, which raw JSON holds only
+// escaped) written as a JSON \u escape, a surrogate pair past the Basic
+// Multilingual Plane. Such runes can only be inside a JSON string, where
+// the escape decodes to the same text, so the line stays valid JSON and
+// says the same; Go's encoder leaves DEL, the C1 controls and the format
+// characters raw. Invalid UTF-8 is written as U+FFFD.
+func TerminalJSON(raw []byte) []byte {
+	var b strings.Builder
+	b.Grow(len(raw))
+	for _, r := range string(raw) {
+		if !terminalUnsafe(r) && r != '\n' && r != '\t' {
+			b.WriteRune(r)
+			continue
+		}
+		if r1, r2 := utf16.EncodeRune(r); r1 != utf8.RuneError {
+			fmt.Fprintf(&b, `\u%04x\u%04x`, r1, r2)
+			continue
+		}
+		fmt.Fprintf(&b, `\u%04x`, r)
+	}
+	return []byte(b.String())
 }

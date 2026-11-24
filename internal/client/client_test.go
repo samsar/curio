@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1136,4 +1137,38 @@ func TestSearchRequest_RerankFields(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, h.Reranking)
 	assert.True(t, h.Reranking.On)
+}
+
+// TestInterestsTimeline: before any rebuild the timeline is ErrNotGrouped;
+// after, the rebuild's saves by period, with the window as sent.
+func TestInterestsTimeline(t *testing.T) {
+	s, c := start(t)
+	ctx := context.Background()
+	_, err := c.InterestsTimeline(ctx, client.InterestsTimelineOpts{})
+	require.ErrorIs(t, err, client.ErrNotGrouped)
+	assert.True(t, client.IsNotFound(err))
+
+	a := s.AddDocument(t, "https://example.com/a", store.DocStateFetched)
+	saved := s.AddBookmark(t, a.URL, store.SourceManual, "", "")
+	run := s.AddRun(t, apitest.RunSpec{Areas: []apitest.Area{{Label: "Programming", Interests: []apitest.Interest{
+		{Label: "Go", Members: []*store.Document{a}}}}}})
+
+	got, err := c.InterestsTimeline(ctx, client.InterestsTimelineOpts{Period: "year", SavedAfter: "2000-01-01"})
+	require.NoError(t, err)
+	assert.Equal(t, run.ID, got.Run.ID)
+	assert.Equal(t, "areas", got.Run.Shape)
+	assert.Equal(t, "year", got.Period)
+	assert.Equal(t, []string{strconv.Itoa(saved.SavedAt.In(time.Local).Year())}, got.Periods,
+		"the save's year where the daemon counts")
+	assert.Equal(t, 1, got.Dated)
+	require.Len(t, got.Rows, 2)
+	assert.Equal(t, client.TimelineRow{Kind: "area", ID: run.Areas[0], Label: "Programming", Counts: []int{1},
+		Total: 1}, got.Rows[0])
+	require.NotNil(t, got.Window)
+	require.NotNil(t, got.Window.SavedAfter)
+	assert.Equal(t, 2000, got.Window.SavedAfter.Year())
+
+	_, err = c.InterestsTimeline(ctx, client.InterestsTimelineOpts{Period: "week"})
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, client.ErrNotGrouped)
 }
