@@ -815,8 +815,12 @@ func TestRun_FailureAfterBindStopsServing(t *testing.T) {
 }
 
 // TestRun_CancelWhileMigrating: a daemon told to stop while it migrates
-// returns once the migration step it is in ends, with its port closed and
-// its lock released.
+// returns context.Canceled with its port closed and its lock released. A
+// cancel that finds goose blocked in a step (here on another writer's
+// lock) returns once that step ends. The Applying hook reports the phase
+// before goose begins the step, so the cancel can also land in between,
+// and goose then stops before the step's first statement (decisions.md
+// "Shutdown during a migration").
 func TestRun_CancelWhileMigrating(t *testing.T) {
 	listen := freeLoopbackAddr(t)
 	home := newHome(t, listen)
@@ -827,8 +831,8 @@ func TestRun_CancelWhileMigrating(t *testing.T) {
 
 	r.cancel()
 	select {
-	case err := <-r.done:
-		t.Fatalf("run returned mid-step: %v", err)
+	case r.err = <-r.done: // the cancel came before the step began
+		r.ended = true
 	case <-time.After(200 * time.Millisecond):
 	}
 	release()
