@@ -281,11 +281,36 @@ func failureCauseHref(cause string) string {
 // search by the plan without asking the model again.
 const PlanParam = "plan"
 
+// RerankParam and OrderParam are the search page's query parameters of a
+// reranked search: rerank=1 asks the reranker to reorder the head of a
+// plan's ranking, and order= searches by the head a reranked page
+// returned, a token of its document IDs, asking no model.
+const (
+	RerankParam = "rerank"
+	OrderParam  = "order"
+)
+
 // searchHref is page, from 1, of the search page's results for q, limited
-// to contentType when it is set and searched by the plan token plan when
-// it is set; the first page names none. A blank q is the search home,
-// which has no pages and no plan.
-func searchHref(q, contentType string, page int, plan string) string {
+// to contentType when it is set, searched by the plan token plan when it
+// is set, and its head in the order the token order names when that is
+// set; the first page names none. A blank q is the search home, which has
+// no pages, no plan and no order. Only a window of the same ranking
+// carries an order: another type, or a plan less a filter, is another
+// ranking, whose head the order doesn't hold.
+func searchHref(q, contentType string, page int, plan, order string) string {
+	return searchAddress(searchQuery(q, contentType, page, plan, order))
+}
+
+// rerankHref is searchHref(q, contentType, page, plan, "") asking for its
+// head to be reordered by the reranker: an understood page's follow-up.
+func rerankHref(q, contentType string, page int, plan string) string {
+	v := searchQuery(q, contentType, page, plan, "")
+	v.Set(RerankParam, "1")
+	return searchAddress(v)
+}
+
+// searchQuery is searchHref's query.
+func searchQuery(q, contentType string, page int, plan, order string) url.Values {
 	v := url.Values{}
 	if strings.TrimSpace(q) != "" {
 		v.Set("q", q)
@@ -295,10 +320,18 @@ func searchHref(q, contentType string, page int, plan string) string {
 		if plan != "" {
 			v.Set(PlanParam, plan)
 		}
+		if order != "" {
+			v.Set(OrderParam, order)
+		}
 	}
 	if contentType != "" {
 		v.Set("content_type", contentType)
 	}
+	return v
+}
+
+// searchAddress is the search page with query v.
+func searchAddress(v url.Values) string {
 	if len(v) == 0 {
 		return "/ui/"
 	}

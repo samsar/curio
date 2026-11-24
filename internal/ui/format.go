@@ -387,6 +387,8 @@ func triggerLabel(trigger string) string {
 // value it doesn't know is shown as stored.
 func freshReason(owed string) string {
 	switch owed {
+	case string(store.FreshReindex):
+		return "after a re-embedding"
 	case string(store.FreshManual):
 		return "you asked for one"
 	case freshParams:

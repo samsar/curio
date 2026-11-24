@@ -36,6 +36,24 @@ plan's address to push, so reload, back and forward never ask the model
 again. Without JavaScript the address keeps understand=1, and a reload
 plans again.
 
+An understood page's ranking is reordered after it is shown: its
+#ranking, the results head, the results and the pager (the understood
+line, the callouts and the star ask stay outside it), opens with a
+follow-up ("reorder") that asks for the same page reordered by the
+reranker and swaps it in. The head's time (#search-took) stays the
+instant page's, how long the results took to show: the follow-up's
+answer marks its own hx-preserve, so htmx keeps the one on the page.
+The reordered page's address, which replaces the understood one in
+history, carries the order (order=, IDs built and read in Go), as its
+pager's links do, so its pages and a reload ask no model; the type
+links, the chips and the words' search start a ranking of their own, in
+its first order. #results, a live region, reads out
+the searches typed, Entered and paged to; the follow-up's swap is
+silent (search.js turns the region off for it, and on again before any
+other swap), and #rerank-said, a status outside #results, says what the
+follow-up did in one line: its answer's, out of band, which the box's
+and the form's answers clear.
+
 A search whose ranking matched nothing by the query's words (no passage,
 title, folder or site: POST /v1/search's bm25_hits, fields_hits and
 title_hits all 0), which the vector search answers with whatever is
@@ -66,26 +84,41 @@ whose first page found something by its words asks for a star on GitHub:
 one quiet line under that page's results, never on another page or for
 a keystroke's search. It is a link, and nothing is sent.
 
+Ask: on a page that can ask (Search.CanAsk), a switch over the box
+(js-only) turns it from searching to asking, and the answer's shell,
+#ask, sits beside #results, outside its live region. The page's
+data-mode, which ask.js sets and app.css reads once the script runs,
+shows one or the other. In Ask mode Enter asks (ask.js), typing sends
+nothing, and ?mode=ask, the address an ask keeps, opens the page with
+its question and asks nothing until Enter. The box and its button carry
+Search's words in either mode, since without the script Enter searches;
+ask.js gives them Ask's, from the switch's attributes. The box keeps its
+words' search: its hx-trigger answers curio:search too, which ask.js
+sends on leaving Ask with words #results doesn't show. A page whose
+address asked but that can't ask searches the words, and a quiet line
+says why, in Go's words for the kind.
+
 The page is its own search box, so the header has none. The define holds
 an HTML comment, which html/template leaves out of the page, because
 text/template keeps a block's default over an empty define.
 */}}
 {{define "header-search"}}<!-- no header search -->{{end}}
 
-{{define "head"}}<script src="{{asset "search.js"}}" defer></script>{{end}}
+{{define "head"}}<script src="{{asset "search.js"}}" defer></script>{{if .CanAsk}}<script src="{{asset "ask.js"}}" defer></script>{{end}}{{end}}
 
 {{define "content" -}}
-<div class="search-page">
+<div class="search-page" data-mode="{{.DataMode}}">
 <h1 class="visually-hidden">Search</h1>
 <form class="search-hero" action="{{navHref "search"}}" method="get" role="search"
  hx-get="{{navHref "search"}}" hx-trigger="submit" hx-sync="closest .search-page:replace"
- hx-target="#results" hx-select="#results > *" hx-select-oob="#search-scope" hx-swap="innerHTML" hx-push-url="true" hx-indicator="#understanding">
+ hx-target="#results" hx-select="#results > *" hx-select-oob="#search-scope,#rerank-said:innerHTML" hx-swap="innerHTML" hx-push-url="true" hx-indicator="#understanding">
 <label class="visually-hidden" for="q">Search your library</label>
+{{with .Toggles}}<div class="segmented search-modes js-only" role="group" aria-label="Search or ask">{{range .}}<button type="button" id="{{.ID}}" aria-pressed="{{.Pressed}}" data-mode="{{.Mode}}" data-label="{{.Label}}" data-placeholder="{{.Placeholder}}">{{.Label}}</button>{{end}}</div>{{end}}
 <div class="searchbox">
 {{template "icon" "search"}}
 <input id="q" type="search" name="q" value="{{.Query}}" placeholder="{{.Placeholder}}" autocomplete="off" autofocus
- hx-get="{{navHref "search"}}" hx-trigger="input changed delay:400ms" hx-sync="closest .search-page:replace" hx-include="closest form"
- hx-target="#results" hx-select="#results > *" hx-select-oob="#search-scope" hx-swap="innerHTML" hx-push-url="true" hx-indicator="#searching">
+ hx-get="{{navHref "search"}}" hx-trigger="input changed delay:400ms, curio:search" hx-sync="closest .search-page:replace" hx-include="closest form"
+ hx-target="#results" hx-select="#results > *" hx-select-oob="#search-scope,#rerank-said:innerHTML" hx-swap="innerHTML" hx-push-url="true" hx-indicator="#searching">
 <div class="searchbox-end"><span id="searching" class="htmx-indicator spinner" aria-hidden="true"></span><button class="btn btn-primary" type="submit" name="understand" value="1" aria-label="Search">{{template "icon" "search"}}<span class="label">Search</span></button></div>
 </div>
 <p id="understanding" class="htmx-indicator understanding" aria-hidden="true"><span class="spinner"></span>Understanding your question…</p>
@@ -106,6 +139,7 @@ text/template keeps a block's default over an empty define.
 </nav>{{end}}
 </div>
 {{else}}<div class="results">
+{{with .AskOffNote}}<p class="understood-note">{{.}}</p>{{end}}
 {{template "understood" .}}
 {{with .Err}}{{template "panel-error" .}}{{end}}
 {{with .Results}}
@@ -117,17 +151,19 @@ text/template keeps a block's default over an empty define.
 <p class="callout-title">Nothing in your library uses these words</p>
 <div class="callout-body"><p>No page's text, title, folder or site has them. These are the pages nearest in meaning, which may have nothing to do with it. Try other words, or fewer.</p></div>
 </div>{{end}}
-{{if .Total}}<div class="results-head"><span>{{if .Wordless}}<strong>Nearest by meaning</strong>{{else}}<strong>{{.Count}}</strong> {{.Verb}}{{if .Capped}} · showing the best {{num .Total}}{{end}}{{if .ByMeaning}} · these by meaning alone{{end}}{{end}} · {{.TookMS}} ms</span>
+{{if .Total}}<div id="ranking">{{template "reorder" $}}
+<div class="results-head"><span>{{if .Wordless}}<strong>Nearest by meaning</strong>{{else}}<strong>{{.Count}}</strong> {{.Verb}}{{if .Capped}} · showing the best {{num .Total}}{{end}}{{if .ByMeaning}} · these by meaning alone{{end}}{{end}} · <span id="search-took"{{if $.FollowUp}} hx-preserve="true"{{end}}>{{.TookMS}} ms</span></span>
 {{- if .Hits}}<label class="toggle"><input type="checkbox" id="show-scores" hx-preserve="true"> Show scores</label>{{else}}<div class="scores-kept"><input type="checkbox" id="show-scores" hx-preserve="true" tabindex="-1" aria-hidden="true"></div>{{end}}</div>
 {{if .Hits}}<ol class="results">
 {{range $.LeadHits}}{{template "result" .}}
 {{end}}</ol>
-{{with $.RestHits}}<details class="more-results"><summary>Show {{num (len .)}} more nearest in meaning</summary><ol class="results" start="{{$.RestStart}}">
+{{with $.RestHits}}<details class="more-results"><summary id="more-nearest">Show {{num (len .)}} more nearest in meaning</summary><ol class="results" start="{{$.RestStart}}">
 {{range .}}{{template "result" .}}
 {{end}}</ol></details>{{end}}
 {{else}}{{with $.OutOfRange}}{{template "out-of-range" .}}{{end}}{{end}}
 {{if $.CappedNote}}<p class="results-note">curio ranks the best {{num .Total}} matches; refine the query to see others.</p>{{end}}
 {{with $.Pager}}<div hx-boost="true" hx-target="#results" hx-select="#results > *" hx-swap="innerHTML show:#results:top" hx-sync="closest .search-page:drop">{{template "pager" .}}</div>{{end}}
+</div>
 {{with $.Star}}<p class="star-ask">{{.Message}} <a href="{{.Href}}" rel="noopener noreferrer" target="_blank">{{.Label}}</a>. {{.Once}}</p>{{end}}
 {{else}}<div class="scores-kept"><input type="checkbox" id="show-scores" hx-preserve="true" tabindex="-1" aria-hidden="true"></div>
 <div class="card"><div class="empty">
@@ -138,7 +174,38 @@ text/template keeps a block's default over an empty define.
 {{end}}
 </div>{{end}}
 </div>
+<p class="visually-hidden" id="rerank-said" role="status" aria-live="polite">{{.ReorderSaid}}</p>
+{{with .Shell}}{{template "ask" .}}{{end}}
 </div>
+{{- end}}
+
+{{/*
+Where ask.js writes an answer, an AskShell: outside #results, whose live
+region would read an answer out piece by piece; the one line it
+announces is #ask-status, how the answer ended, said once, over the
+notes that follow it. Its addresses are built in Go, as is the problem
+type that tells a starting daemon's refusal from a busy one's, and its
+notes, a template each, are Go's words for each way an ask ends,
+refused, failed or cut off included, and each flag of its answer, which
+ask.js shows by key: never the daemon's text. The rest is empty until an
+answer fills it: what the ask is busy with, the answer, how it ended and
+its notes, the evidence for and against a claim, the interests' table,
+the pages it cites and those curio couldn't read, and the groups of a
+list.
+*/}}
+{{define "ask" -}}
+<section class="ask js-only" id="ask" aria-label="Answer" data-src="{{.Src}}" data-page="{{.PageHref}}" data-document-page="{{.DocumentPrefix}}" data-interest-page="{{.InterestPrefix}}" data-unsorted-page="{{.UnsortedPage}}" data-starting-type="{{.StartingType}}">
+<p class="ask-progress"></p>
+<div class="ask-answer" dir="auto"></div>
+<p class="action-status" id="ask-status" role="status" aria-live="polite"></p>
+<div class="ask-notes"></div>
+<div class="ask-evidence"></div>
+<div class="ask-table"></div>
+<div class="ask-sources"></div>
+<div class="ask-unreadable"></div>
+<div class="ask-groups"></div>
+{{range .Notes}}<template data-note="{{.Key}}">{{.Text}}</template>
+{{end}}</section>
 {{- end}}
 
 {{/*
@@ -163,6 +230,30 @@ there.
 {{- end}}
 
 {{/*
+The head of an understood search's ranking, in #ranking's first slot: an
+understood page's follow-up, which asks for its head to be reordered as
+soon as the page is shown, or what the page says of its order. The
+follow-up (js-only, so without JavaScript the first ranking stays) loads
+once, never on a timer: htmx sends its own page with rerank=1, swaps the
+reordered #ranking in its place and #rerank-said's words out of band,
+and drops the request if a keystroke, Enter or a page is in flight, or
+is asked for while it waits (the search page's hx-sync, abort; ask.js
+aborts it too, as Ask is entered). While it waits, a quiet line says so,
+its height kept whether it shows or not. Its answer is the whole
+reordered #ranking, its focusable elements with the same ids as the
+first ranking's, so focus and the scroll stay where they were (focus on
+a result it moved off the page goes to the one now in its place,
+search.js); a 204 when the reranker had nothing to change or to say; or,
+for a model that failed its check or a reranker resting, the note alone
+in this slot (the answer retargets it). search.js swaps no error into
+it.
+*/}}
+{{define "reorder" -}}
+{{with .Reorder}}<p class="rerank-status js-only" id="rerank-status" hx-get="{{$.ReorderHref}}" hx-trigger="load" hx-target="#ranking" hx-select="#ranking" hx-select-oob="#rerank-said:innerHTML" hx-swap="outerHTML" hx-sync="closest .search-page:abort"><span class="htmx-indicator spinner" aria-hidden="true"></span><span class="htmx-indicator">Reordering with {{.Model}}…</span></p>
+{{- else}}{{with .Reordered}}<p class="rerank-status" id="rerank-status">{{.Note}}</p>{{end}}{{end}}
+{{- end}}
+
+{{/*
 One result, a ShownHit: where it lives, after its type's icon, its title,
 its best passage, or what it was saved as, its badge when it has one, its
 score, and its other passages a click away.
@@ -170,12 +261,12 @@ score, and its other passages a click away.
 {{define "result" -}}
 {{$hit := .}}<li class="result">
 <div class="result-where"><span class="fav">{{template "icon" (typeIcon .ContentType)}}</span><span class="path" title="{{.URL}}">{{with host .URL}}<b>{{.}}</b>{{with urlTrail $hit.URL}} › {{.}}{{end}}{{else}}{{.URL}}{{end}}</span></div>
-{{with .Ref}}<h2 class="result-title"><a href="{{documentHref .ID}}" title="{{.Hover}}"{{with .Class}} class="{{.}}"{{end}}>{{.Name}}</a></h2>{{end}}
+{{with .Ref}}<h2 class="result-title"><a id="{{$hit.TitleID}}" href="{{documentHref .ID}}" title="{{.Hover}}"{{with .Class}} class="{{.}}"{{end}}>{{.Name}}</a></h2>{{end}}
 {{range .ShownMatches}}{{template "match" .}}{{end}}
 {{- if not .Matches}}{{with .Saved}}<p class="saved-as" title="{{.}}">{{.}}</p>{{end}}{{end}}
-{{- with .Unavailable}}<p class="saved-gone">Saved — {{.}}{{with outbound $hit.URL}} · <a href="{{.}}" rel="noopener noreferrer" target="_blank">the original address</a>{{end}}</p>{{end}}
+{{- with .Unavailable}}<p class="saved-gone">Saved — {{.}}{{with outbound $hit.URL}} · <a id="{{$hit.OriginalID}}" href="{{.}}" rel="noopener noreferrer" target="_blank">the original address</a>{{end}}</p>{{end}}
 <div class="result-foot">{{with .Badge}}<span class="badge badge-accent plain">{{.}}</span>{{end}}<span class="score">score {{printf "%.4f" .Score}}</span>
-{{- with .MoreMatches}}<details><summary>{{count (len .) "more passage" "more passages"}}</summary>{{range .}}{{template "match" .}}{{end}}</details>{{end}}</div>
+{{- with .MoreMatches}}<details><summary id="{{$hit.MoreID}}">{{count (len .) "more passage" "more passages"}}</summary>{{range .}}{{template "match" .}}{{end}}</details>{{end}}</div>
 </li>
 {{- end}}
 

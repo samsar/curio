@@ -32,9 +32,9 @@ type AskRequest struct {
 // Rows, Dated, Undated, Window, with UndatedMarker and Shown: Table),
 // groups (Groups, Listed, Ranked, Wordless, Shown), delta (Text), done
 // (Status, Reason, Model, PromptVersion, Route, Citations, Markers,
-// InvalidCitations, Abstained, Uncited, Partial, Timings) or error (Error,
-// RequestID). Raw is the line as the daemon sent it, fields this client
-// doesn't know included.
+// CitedAt, InvalidCitations, Abstained, Uncited, Partial, Timings) or
+// error (Error, RequestID). Raw is the line as the daemon sent it, fields
+// this client doesn't know included.
 type AskEvent struct {
 	Type string `json:"type"`
 
@@ -78,6 +78,7 @@ type AskEvent struct {
 	PromptVersion    string     `json:"prompt_version,omitempty"`
 	Citations        []int      `json:"citations,omitempty"`
 	Markers          []string   `json:"markers,omitempty"`
+	CitedAt          []AskMark  `json:"cited_at,omitempty"`
 	InvalidCitations []string   `json:"invalid_citations,omitempty"`
 	Abstained        bool       `json:"abstained,omitempty"`
 	Uncited          bool       `json:"uncited,omitempty"`
@@ -100,6 +101,21 @@ func (e AskEvent) Table() *InterestsTimeline {
 		Undated: e.Undated, Window: e.Window}
 }
 
+// AskMark mirrors api.AskMark.
+type AskMark struct {
+	Start  int    `json:"start"`
+	End    int    `json:"end"`
+	N      int    `json:"n,omitempty"`
+	Marker string `json:"marker,omitempty"`
+}
+
+// AskNames mirrors api.AskNames.
+type AskNames struct {
+	Name     string `json:"name"`
+	FullName string `json:"full_name"`
+	Untitled bool   `json:"untitled,omitempty"`
+}
+
 // AskSource mirrors api.AskSource.
 type AskSource struct {
 	N        int          `json:"n"`
@@ -112,6 +128,7 @@ type AskSource struct {
 	About    string       `json:"about,omitempty"`
 	Quote    string       `json:"quote,omitempty"`
 	Passages []AskPassage `json:"passages,omitempty"`
+	AskNames
 }
 
 // AskPassage mirrors api.AskPassage.
@@ -137,6 +154,7 @@ type AskGroupDocument struct {
 	Title string `json:"title"`
 	State string `json:"state"`
 	About string `json:"about,omitempty"`
+	AskNames
 }
 
 // AskUnreadable mirrors api.AskUnreadable.
@@ -146,6 +164,7 @@ type AskUnreadable struct {
 	Title  string `json:"title"`
 	State  string `json:"state"`
 	Reason string `json:"reason"`
+	AskNames
 }
 
 // AskTimings mirrors api.AskTimings.

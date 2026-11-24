@@ -3,6 +3,7 @@ package ask
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/samsar/curio/internal/docmeta"
@@ -25,7 +26,8 @@ const maxUnreadable = 3
 // it was first saved (YYYY-MM-DD, "about" before it when the day is
 // approximate, empty when unknown), its summary's about line, for an
 // evidence source the quote that shows its side, and its passages, as the
-// prompt showed them.
+// prompt showed them. OwnTitle and SavedTitle are what a list elsewhere
+// names it by (Names), which no prompt reads.
 type Source struct {
 	N        int
 	DocID    string
@@ -37,6 +39,7 @@ type Source struct {
 	About    string
 	Quote    string
 	Passages []Passage
+	Names
 
 	// side is an evidence source's: supports or contradicts.
 	side string
@@ -60,6 +63,53 @@ type Unreadable struct {
 	Title  string
 	State  store.DocState
 	Reason string
+	Names
+}
+
+// Names are what the dashboard's lists name a document by, besides its
+// URL: its own title (documents.title, "" for none), and, while it has
+// none, the title it was last saved under (savedTitle). A Title, which
+// falls back to the first title it was saved as, then its host, is the
+// prompt's; these are the pages', so an answer's sources read as Search
+// and the Library name them.
+type Names struct {
+	OwnTitle   string
+	SavedTitle string
+}
+
+// namesOf are doc's Names, its saved title read from its bookmarks.
+func namesOf(doc *store.Document, bookmarks []*store.Bookmark) Names {
+	own := deref(doc.Title)
+	return Names{OwnTitle: own, SavedTitle: savedTitle(own, bookmarks)}
+}
+
+// asciiSpace is what a bookmark's title may hold and still be blank, as
+// the store reads it for an untitled document's name: ASCII whitespace.
+const asciiSpace = " \t\n\v\f\r"
+
+// savedTitle is the title an untitled document is named by: its most
+// recently saved bookmark's (the latest saved_at, then the highest ID, as
+// the store's ListByDocuments orders them) whose title isn't blank of
+// ASCII whitespace, trimmed as the search page trims it; "" when own, its
+// own title, names it, or no bookmark has a title. A title of other
+// spaces alone is chosen, as the store chooses it, and trims to "".
+func savedTitle(own string, bookmarks []*store.Bookmark) string {
+	if own != "" {
+		return ""
+	}
+	var newest *store.Bookmark
+	for _, b := range bookmarks {
+		if strings.Trim(deref(b.Title), asciiSpace) == "" {
+			continue
+		}
+		if newest == nil || b.SavedAt.After(newest.SavedAt) || b.SavedAt.Equal(newest.SavedAt) && b.ID > newest.ID {
+			newest = b
+		}
+	}
+	if newest == nil {
+		return ""
+	}
+	return strings.TrimSpace(*newest.Title)
 }
 
 // reading is what an ask read of the ranking's first hits besides the
@@ -130,7 +180,7 @@ func (a *Asker) sources(r reading, k int) ([]Source, []Unreadable) {
 			if len(unread) < maxUnreadable {
 				title, _ := titles(doc, r.fields[doc.ID])
 				unread = append(unread, Unreadable{DocID: doc.ID, URL: doc.URL, Title: title, State: doc.State,
-					Reason: docmeta.Unavailable(string(doc.State))})
+					Reason: docmeta.Unavailable(string(doc.State)), Names: namesOf(doc, r.bookmarks[doc.ID])})
 			}
 		case len(r.candidates[doc.ID]) == 0 && summary == nil:
 		default:
@@ -146,7 +196,7 @@ func (a *Asker) source(r reading, doc *store.Document, n int) Source {
 	title, saved := titles(doc, f)
 	s := Source{N: n, DocID: doc.ID, URL: doc.URL, Title: title, SavedAs: saved,
 		Site: docmeta.SiteOrHost(f.SiteName, hostOf(doc, f)), SavedOn: a.savedOn(r.bookmarks[doc.ID]),
-		candidates: r.candidates[doc.ID]}
+		Names: namesOf(doc, r.bookmarks[doc.ID]), candidates: r.candidates[doc.ID]}
 	if summary := r.summaries[doc.ID]; summary != nil {
 		s.About = summary.About
 	}

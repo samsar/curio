@@ -143,9 +143,22 @@ func TestStylesheet(t *testing.T) {
 	assert.Equal(t, "hidden", declarations(ruleFor(t, rules, "", "table.data td").body)["overflow"],
 		"a cell's content stays in its column")
 	for col, width := range map[string]string{"col.c-type": "6.5rem", "col.c-when": "7.5rem",
-		"col.c-saved": "9rem", "col.c-sim": "6.5rem", "col.c-rank": "3.5rem", "col.c-nearest": "16rem"} {
+		"col.c-saved": "9rem", "col.c-sim": "6.5rem", "col.c-rank": "3.5rem", "col.c-nearest": "16rem",
+		"col.c-marker": "3.5rem", "col.c-label": "16rem", "col.c-period": "5rem", "col.c-total": "5rem"} {
 		assert.Equal(t, width, declarations(ruleFor(t, rules, "", col).body)["width"], col)
 	}
+	// The search page shows the search's results or the answer, by its
+	// mode, once JavaScript runs; the answer at its reading measure, its
+	// lines as written.
+	for _, selector := range []string{`:root[data-js] .search-page[data-mode="ask"] #results`,
+		`:root[data-js] .search-page[data-mode="ask"] #search-scope`,
+		`:root[data-js] .search-page[data-mode="ask"] #understanding`,
+		`:root[data-js] .search-page[data-mode="search"] #ask`} {
+		assert.Equal(t, "none", declarations(ruleFor(t, rules, "", selector).body)["display"], selector)
+	}
+	answer := declarations(ruleFor(t, rules, "", ".ask-answer").body)
+	assert.Equal(t, "70ch", answer["max-width"])
+	assert.Equal(t, "pre-wrap", answer["white-space"])
 	// An unknown save date takes two lines in its column: what it is, then
 	// when curio imported it.
 	assert.Equal(t, "block", declarations(ruleFor(t, rules, "", "table.data td.c-when .saved-what").body)["display"])

@@ -3,6 +3,7 @@ package ui
 import (
 	"math"
 	"slices"
+	"strconv"
 )
 
 // A numbered list shows a page of its rows at a time, the pages counted
@@ -53,6 +54,10 @@ type PagerItem struct {
 
 // Gap reports whether the item stands for pages left out.
 func (i PagerItem) Gap() bool { return i.Page == 0 }
+
+// ID is the id of the item's link, the same on every page of its list, so
+// that htmx gives focus back to it where it swaps the pager in.
+func (i PagerItem) ID() string { return "pager-page-" + strconv.Itoa(i.Page) }
 
 // pageSpan is a page of a numbered list, as its pager counts it.
 type pageSpan struct {

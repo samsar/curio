@@ -145,6 +145,12 @@ func rebuildAction() Action {
 // api/openapi.yaml as the Actions are held.
 const interestMapAPIPath = "/v1/interests/map"
 
+// askAPIPath is where static/ask.js asks a question: the one /v1 path a
+// page POSTs to without an Action, since its answer is a stream that
+// actions.js doesn't read. TestAskShell, in internal/api, holds it to the
+// router and to api/openapi.yaml as interestMapAPIPath is held.
+const askAPIPath = "/v1/ask"
+
 // queueAction is a change of the queue's settings: body holds the fields
 // PUT /v1/queue changes.
 func queueAction(kind ActionKind, body map[string]any, done string) Action {

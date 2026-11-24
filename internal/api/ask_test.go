@@ -30,6 +30,7 @@ import (
 	"github.com/samsar/curio/internal/rerank"
 	"github.com/samsar/curio/internal/retrieve"
 	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/ui"
 	"github.com/samsar/curio/internal/understand"
 )
 
@@ -87,6 +88,7 @@ func contractAsks(_ context.Context, req ask.Request, emit func(ask.Event) error
 	case "kafka":
 		plan := kafkaPlan()
 		done.Status, done.Citations, done.InvalidCitations = ask.StatusAnswered, []int{1, 2}, []string{"9"}
+		done.CitedAt = []ask.CitedAt{{Start: 25, End: 26, N: 1}, {Start: 28, End: 29, N: 2}}
 		return emitAll(emit,
 			ask.Progress{Stage: ask.StageLoading, Model: "gemma4:26b"},
 			ask.Progress{Stage: ask.StageRetrieving},
@@ -99,10 +101,13 @@ func contractAsks(_ context.Context, req ask.Request, emit func(ask.Event) error
 				Degraded: true, Warnings: []string{"semantic search unavailable"},
 				Sources: []ask.Source{{N: 1, DocID: uuid.NewString(), URL: "https://example.com/a", Title: "A",
 					SavedAs: []string{"a saved"}, Site: "example.com", SavedOn: "2024-03-05", About: "About a.",
-					Passages: []ask.Passage{{Text: "A passage.", Section: "Setup › Groups"}}},
-					{N: 2, DocID: uuid.NewString(), URL: "https://example.org/b", Title: "B"}},
+					Passages:   []ask.Passage{{Text: "A passage.", Section: "Setup › Groups"}},
+					SavedTitle: "A saved"},
+					{N: 2, DocID: uuid.NewString(), URL: "https://example.org/b", Title: "B",
+						OwnTitle: "B"}},
 				Unreadable: []ask.Unreadable{{DocID: uuid.NewString(), URL: "https://example.net/c", Title: "C",
-					State: store.DocStateDead, Reason: "the page is no longer available"}}},
+					State: store.DocStateDead, Reason: "the page is no longer available",
+					SavedTitle: "C saved"}}},
 			ask.Progress{Stage: ask.StageWriting, Model: "gemma4:26b"},
 			ask.Delta{Text: "Kafka shares partitions [1][2] "},
 			ask.Delta{Text: "and moves them [9]."},
@@ -169,10 +174,12 @@ func contractAsks(_ context.Context, req ask.Request, emit func(ask.Event) error
 			ask.Delta{Text: "Bread grew [T1]."}, done)
 	case "everything about kafka":
 		done.Status, done.Route, done.Markers = ask.StatusAnswered, ask.RouteList, []string{"G1"}
+		done.CitedAt = []ask.CitedAt{{Start: 13, End: 15, Marker: "G1"}}
 		return emitAll(emit, ask.Retrieved{Route: ask.RouteList},
 			ask.Groups{Groups: []ask.Group{{Marker: "G1", InterestID: uuid.NewString(), Label: "Kafka",
 				AreaLabel: "Systems", Count: 1, Documents: []ask.GroupDocument{{DocID: uuid.NewString(),
-					URL: "https://example.com/a", Title: "A", State: store.DocStateFetched, About: "About a."}}}},
+					URL: "https://example.com/a", Title: "example.com", State: store.DocStateFetched,
+					About: "About a."}}}},
 				Listed: 1, Ranked: 40, Wordless: true, Shown: 1},
 			ask.Delta{Text: "Kafka pages [G1]."}, done)
 	case "broken":
@@ -246,6 +253,92 @@ func TestAsk_Stream(t *testing.T) {
 	assert.False(t, req.Understand, "a plan understands nothing")
 	require.NotNil(t, req.Plan)
 	assert.Equal(t, []string{"a b"}, req.Plan.Rewrites)
+}
+
+// TestAsk_CitedAt: an answered ask's done line says where each citation
+// is written, in code points of the delta texts joined; one that found
+// nothing to answer from says nowhere, an empty array.
+func TestAsk_CitedAt(t *testing.T) {
+	s := newTestServer(t, func(d *Deps) { d.Asker = contractAsker() })
+	for _, q := range []string{"kafka", "everything about kafka"} {
+		_, lines := askLines(t, s, `{"question":"`+q+`"}`)
+		var answer strings.Builder
+		for _, l := range lines {
+			if l["type"] == "delta" {
+				answer.WriteString(l["text"].(string))
+			}
+		}
+		runes := []rune(answer.String())
+		done := lines[len(lines)-1]
+		marks := done["cited_at"].([]any)
+		require.NotEmpty(t, marks, q)
+		for _, m := range marks {
+			mark := m.(map[string]any)
+			written := string(runes[int(mark["start"].(float64)):int(mark["end"].(float64))])
+			if marker, ok := mark["marker"]; ok {
+				assert.Equal(t, marker, written, q)
+				continue
+			}
+			assert.Equal(t, fmt.Sprint(mark["n"]), written, q)
+		}
+	}
+	_, lines := askLines(t, s, `{"question":"anything else"}`)
+	done := lines[len(lines)-1]
+	assert.Equal(t, "no_sources", done["status"])
+	assert.Equal(t, []any{}, done["cited_at"])
+}
+
+// TestAsk_Names: every page an ask reports, a source, an unreadable page
+// or a group's document, is named as the dashboard's lists name it
+// (ui.DocRef): untitled, by the title it was last saved under, or by its
+// short URL when that title is an address, marked untitled either way; by
+// its own title otherwise.
+func TestAsk_Names(t *testing.T) {
+	docs := []struct {
+		id, url string
+		names   ask.Names
+		name    string
+	}{
+		{uuid.NewString(), "https://example.com/saved", ask.Names{SavedTitle: "Newer title"}, "Newer title"},
+		{uuid.NewString(), "https://example.com/a/b", ask.Names{SavedTitle: "https://example.com/a/b"},
+			ui.DocRef{URL: "https://example.com/a/b"}.Name()},
+		{uuid.NewString(), "https://example.com/titled", ask.Names{OwnTitle: "Its own"}, "Its own"},
+	}
+	sources := make([]ask.Source, 0, len(docs))
+	unread := make([]ask.Unreadable, 0, len(docs))
+	grouped := make([]ask.GroupDocument, 0, len(docs))
+	for i, d := range docs {
+		sources = append(sources, ask.Source{N: i + 1, DocID: d.id, URL: d.url, Title: "prompt's", Names: d.names})
+		unread = append(unread, ask.Unreadable{DocID: d.id, URL: d.url, Title: "prompt's", State: store.DocStateDead,
+			Reason: "gone", Names: d.names})
+		grouped = append(grouped, ask.GroupDocument{DocID: d.id, URL: d.url, Title: "prompt's",
+			State: store.DocStateFetched, Names: d.names})
+	}
+	asker := &fakeAsker{answer: func(_ context.Context, _ ask.Request, emit func(ask.Event) error) error {
+		return emitAll(emit, ask.Retrieved{Route: ask.RouteList, Sources: sources, Unreadable: unread},
+			ask.Groups{Groups: []ask.Group{{Marker: "G1", Label: "L", Count: len(grouped), Documents: grouped}}},
+			ask.Done{Status: ask.StatusAnswered, PromptVersion: ask.PromptVersion, Route: ask.RouteList})
+	}}
+	s := newTestServer(t, func(d *Deps) { d.Asker = asker })
+	_, lines := askLines(t, s, `{"question":"q"}`)
+	require.Len(t, lines, 3)
+	retrieval, groups := lines[0], lines[1]["groups"].([]any)[0].(map[string]any)
+	for what, pages := range map[string][]any{"source": retrieval["sources"].([]any),
+		"unreadable": retrieval["unreadable"].([]any), "group document": groups["documents"].([]any)} {
+		require.Len(t, pages, len(docs), what)
+		for i, d := range docs {
+			page := pages[i].(map[string]any)
+			ref := ui.DocRef{ID: d.id, Title: d.names.OwnTitle, Fallback: d.names.SavedTitle, URL: d.url}
+			assert.Equal(t, d.name, page["name"], what)
+			assert.Equal(t, ref.Name(), page["name"], what)
+			assert.Equal(t, ref.Hover(), page["full_name"], what)
+			untitled, _ := page["untitled"].(bool)
+			assert.Equal(t, ref.Untitled(), untitled, what)
+			assert.Equal(t, d.names.OwnTitle == "", untitled, what)
+			assert.Equal(t, "prompt's", page["title"], "%s: the prompt's title is kept", what)
+		}
+	}
+	assert.Equal(t, "https://example.com/a/b", retrieval["sources"].([]any)[1].(map[string]any)["full_name"])
 }
 
 // TestAsk_Refused: what is refused before a byte of the stream, each a

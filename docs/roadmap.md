@@ -11,11 +11,14 @@ deferred. Design reasoning lives in `docs/decisions.md`.
 **Where things stand:** M0–M4 are shipped. M6 is under way ahead of M5: its
 first PR, the search evaluation and model roles, is merged; metadata
 search, real saved dates with search filters, and chunks embedded with
-their context are done; understanding the question is done; and
-summaries written by the LLM are done, stored and off by default; and
+their context are done; understanding the question is done;
+summaries written by the LLM are done, stored and off by default;
 reranking is done, on by default for gemma4:26b while summaries are
-written. **Next: Ask (PR 6), and the dashboard
-bringing reranking in after its instant results.**
+written; Ask is done (`curio ask`, `/v1/ask`); and the dashboard asks,
+and reranks an understood search after its instant results (PR 7). The
+M6 design's end-of-milestone target for the operator's own queries is
+not met: their nDCG@10 is 0.475 against 0.60 (M6's status, below, has
+each target).
 
 ## M0 — Walking skeleton
 
@@ -415,7 +418,7 @@ before it:
   the head's order back (`rerank_order`) and ask no model. Surfaces:
   `POST /v1/search` `rerank`/`rerank_order` and `reranking`, healthz
   `reranking`, `curio search` (`--no-rerank`), `curio status`/`doctor`;
-  MCP and `curio eval` stay literal, and the dashboard doesn't rerank yet.
+  MCP and `curio eval` stay literal; the dashboard reranks since PR 7.
   searcheval gained reranked variants, `-rerank-with`, and recorded,
   replayable answers. The grid, by the rule written before it ran: listwise
   gemma4:26b at 30 raised the operator's planned all-queries nDCG@10 from
@@ -491,9 +494,60 @@ before it:
   0.317. Still open: "old ideas worth revisiting",
   conversation, and the tiers as answer writers on the questions
   (decisions.md "Ask: a cited, streamed answer over the search path").
-- PR 7, next: the dashboard's Ask mode, built on `/v1/ask`, reranking on
-  the dashboard after its instant results, and the dashboard's wording of
-  a rebuild of the interests that is due.
+- PR 7, done: the dashboard asks and reranks. The search page's switch
+  turns the box from Search to Ask, which streams `POST /v1/ask` through
+  a first-party script (`static/ask.js`) into a shell beside the results,
+  outside their live region: only Enter asks (`?mode=ask` never asks as it
+  loads); the pages are named and the citations linked from what the
+  events now carry, computed in Go (`name`, `full_name`, `untitled`,
+  `cited_at`); and why Ask is off is said in Go's words for the kind. An
+  understood search shows its first ranking at once, then a follow-up of
+  the page's own swaps the reordered head in, its address replacing the
+  page's with the order's IDs (`?order=`), which its pages keep and ask no
+  model; the follow-up is rendered only after the page's own request asked
+  the planner. The Enter page's time is unchanged (1.08 s p50, 1.38 s p95
+  before; 1.08 s and 1.39 s after, the planner dominating), and the
+  reordered head arrives 2.86 s p50, 3.04 s p95 after it, for the
+  topical questions the reranker reorders (decisions.md "Dashboard: Ask
+  mode", "Dashboard: reranking after the instant results"). The
+  dashboard's wording of a due rebuild of the interests now says what it
+  waits for, as `curio status` does. Three fix rounds after a review
+  loop, an SRE review and two fresh verifications: entering Ask aborts
+  the search in flight, so a rerank never outlives it or takes the Ask
+  address; an unfit or resting reranker is said on Enter's page with no
+  follow-up; the reordered head is swapped in without being read out
+  again, one status saying it; a browser's prefetch or prerender never
+  asks a model; Ask's every failure is worded in Go with the request's
+  ID; the follow-up logs how it ended; leaving Ask follows the searches
+  that land and puts the results' address back; an answer left for
+  Search ends on a note saying so; a page past the reranker's head sends
+  no follow-up; and the reordered head keeps the instant page's time,
+  focus on a result it moved off the page going to the one now in its
+  place.
+
+  **Where M6 stands.** It delivered the search evaluation and model roles,
+  metadata search, real saved dates and filters, chunks embedded with
+  their context, understanding the question, summaries, reranking, and
+  Ask, on the CLI, the API, MCP and the dashboard. The operator's planned
+  all-queries nDCG@10 rose from 0.762 to 0.796 with reranking (2.7's
+  planned baseline to the topical-only rerank), and Ask met every bar
+  written before its last confirmation run.
+
+  **Against the M6 design's targets.** The design ("Design: curio M6,
+  search and ask") set end-of-milestone targets for search on the graded
+  queries; beside each, the number decisions.md records for the shipped
+  ranking (the reranking grid's pick, the topical kinds listwise with the
+  summaries, "Reranking: a reranker role over the ranking's head"):
+
+  - the operator's queries' nDCG@10 ≥ 0.60: 0.475, not met;
+  - keyword R@10 ≥ 0.84: 0.864, met;
+  - Enter to results within 7 s: 1.18 s p50 and 4.73 s p95 on the grid,
+    1.16 to 1.28 s p50 and 4.17 to 4.19 s p95 live, met;
+  - the operator's queries' R@10 ≥ 0.70 and all queries' R@10 ≥ 0.80:
+    decisions.md records no R@10 of the shipped ranking, whose grid
+    scored nDCG@10; the last it records for a planned search, before
+    reranking ("Understanding the question", measured on the
+    implementation), is 0.266 and 0.664, neither met.
 
 ## M7 — Hosted mode
 

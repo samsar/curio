@@ -148,8 +148,16 @@ func (h pageHandlers) rebuild(r *http.Request, shown string, poll bool) ui.Rebui
 // terms.
 func interestsStateView(s InterestsState) ui.InterestsState {
 	return ui.InterestsState{State: s.State, LastRebuildAt: s.LastRebuildAt, LastKind: s.LastKind,
-		Changed: s.ChangedDocuments, RebuildAt: s.RebuildAt, FreshOwed: s.FreshOwed, HeldReason: s.HeldReason,
-		RetryAt: s.RetryAt, LastError: s.LastError}
+		Changed: s.ChangedDocuments, RebuildAt: s.RebuildAt, WaitingFor: s.WaitingFor, FreshOwed: s.FreshOwed,
+		MapOwed: mapOwed(s), HeldReason: s.HeldReason, RetryAt: s.RetryAt, LastError: s.LastError}
+}
+
+// mapOwed reports whether s is a rebuild due only to draw the map, as
+// curio status infers it: due, the done rebuild drew no map, no rebuild
+// from scratch is owed, and fewer documents changed than make one due.
+func mapOwed(s InterestsState) bool {
+	return s.State == string(insight.StateDue) && s.Map != nil && s.Map.Status == string(insight.MapNone) &&
+		s.FreshOwed == "" && s.ChangedDocuments < s.RebuildAt
 }
 
 // interest answers GET /ui/interests/{id}: an area, with a page of its

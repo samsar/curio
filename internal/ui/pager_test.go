@@ -138,9 +138,9 @@ func TestPager_Markup(t *testing.T) {
 	assert.Contains(t, out, `<span class="step" aria-disabled="true"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true">`+
 		`<path d="m15 18-6-6 6-6"/></svg>Previous</span>`)
 	assert.NotContains(t, out, `rel="prev"`)
-	assert.Contains(t, out, `<a href="/list?page=1" aria-label="Page 1" aria-current="page">1</a>`+
-		`<a href="/list?page=2" aria-label="Page 2">2</a><span class="gap" aria-hidden="true">…</span>`+
-		`<a href="/list?page=10" aria-label="Page 10">10</a><span class="of">Page 1 of 10</span>`)
+	assert.Contains(t, out, `<a id="pager-page-1" href="/list?page=1" aria-label="Page 1" aria-current="page">1</a>`+
+		`<a id="pager-page-2" href="/list?page=2" aria-label="Page 2">2</a><span class="gap" aria-hidden="true">…</span>`+
+		`<a id="pager-page-10" href="/list?page=10" aria-label="Page 10">10</a><span class="of">Page 1 of 10</span>`)
 	assert.Contains(t, out, `<a class="step" id="pager-next" href="/list?page=2" rel="next">Next<svg class="icon"`)
 	assert.NotContains(t, out, `id="pager-prev"`)
 	assert.Equal(t, 1, strings.Count(out, `aria-current="page"`))

@@ -161,6 +161,65 @@ and the address it listens on; no other page has a footer.
   open from a bookmark or from another app (mail, chat, a terminal) is
   understood, and so is any in a Safari before 16.4, which doesn't say
   where a request came from.
+
+  **Reordered after the results.** With the reranker on (see
+  [setup](setup.md), "Reranking"), an understood search's results show at
+  once, in their first order, and a quiet line over them says "Reordering
+  with <model>…" while the page asks the reranker to reorder their head
+  (the first `search.rerank_depth`; a later page past them stays as it is,
+  asking nothing): when it answers, the results are swapped for the
+  reordered ones in place, the line says "Reordered by <model>", the time
+  over them stays how long they took to show, and the scroll stays where it
+  was. Focus stays on the result it was on, wherever it moved, or, when the
+  reordering moved that result to a later page, goes to the title of the
+  result now in its place. A screen reader hears that one line, not the
+  list again. Typing, Enter, another page or switching to Ask meanwhile
+  cancels it. When the reranker kept curio's order, nothing moves; when its
+  model failed curio's check, or reranks keep timing out and it rests a
+  while, the line says so and what helps, at once, and nothing is sent.
+  Only Enter (or an address you typed or opened) asks the reranker: a link
+  to an understood address from another site asks neither model, and nor
+  does a browser's guess at a page you might open (the address bar's
+  prerender, a prefetch), which curio declines. The address then holds the
+  reordered order itself (`&order=…`), as the pages' links do: paging,
+  reloading, back and forward lay that order over the same results and ask
+  no model, and a search is one entry in the history, its first order
+  replaced by the reordered one. The type links, a chip's ×, the undated
+  link and **Search your words instead** each search other results, which
+  start in their own first order.
+
+  **Ask.** With Ask on (`ask.enabled`, see [setup](setup.md)), a switch
+  over the box, **Search | Ask**, turns it from searching to asking: in
+  Ask, typing sends nothing, and **Enter** or the **Ask** button asks the
+  question, as `curio ask` does. The answer streams in under the box: a
+  line says what curio is busy with (finding pages, loading or checking the
+  model, waiting for another answer, judging pages, writing), the answer is
+  written as it comes, and once it is whole each citation links to the page
+  it cites (a table row or a group, for questions about the interests over
+  time or everything on a topic, to that interest's page). Under it are its
+  sources, named as the Library names them, with their site, the day they
+  were first saved and what they are about; the pages the search found that
+  curio couldn't read; for a claim, the pages that support and contradict
+  it, with their quotes; for the interests over time, the table of your
+  saves by period; for everything on a topic, the pages grouped by
+  interest. Notes under the answer say when it was cut, cites none of your
+  pages, names pages it wasn't given, or didn't come (and why, with what
+  helps: curio busy with other questions or starting, a question too long,
+  the connection lost, or a failure in the daemon, with the request's ID to
+  find in its log). Switching to Ask cancels a search still on its way;
+  switching back to Search stops an answer that is still coming (back in
+  Ask, what it had written stays, under a note that Search stopped it) and
+  gives the page back the address of its results, which are those of the
+  words in the box: searched again, Back then returning to the search Ask
+  was opened over, unless they are the words the results show. The address
+  keeps the question (`/ui/?q=…&mode=ask`), and opening, reloading, back
+  and forward show it in Ask mode without asking: only Enter asks, so no
+  link loads the writing model. Without JavaScript the page searches, and
+  its box and button say so. When Ask can't answer here (it is off, off by
+  default for a model not measured as the answer writer, its model failed
+  curio's check, its provider can't stream, or questions would leave this
+  Mac for a server its role doesn't name), there is no switch, and such an
+  address searches the words, saying why in a quiet line.
 - **Library**: your saves, newest saved first (**Recently saved**, the
   order it opens in), or every document, most recently updated first
   (**Last updated**, `/ui/library?order=updated`): the time column's
@@ -456,8 +515,9 @@ quiet line under its results asking for a star on GitHub, with a link
 to the repository. `curio search` counts too when you read it on a
 terminal, and asks on stderr after its results; the two share one
 count and one ask. Search as you type, later pages, a search that found
-nothing (or only pages nearest in meaning), piped output and
-`curio-mcp`'s searches never count. The ask is shown once and never
+nothing (or only pages nearest in meaning), the reordering of a search's
+results, a question asked in Ask mode, piped output and `curio-mcp`'s
+searches never count. The ask is shown once and never
 again; curio sends nothing and doesn't learn whether you starred it.
 The daemon keeps the count in `~/.curio/star.json`.
 

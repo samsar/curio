@@ -21,7 +21,7 @@ import (
 func (h pageHandlers) interestMap(w http.ResponseWriter, r *http.Request) {
 	q, err := ui.ParseMapQuery(r.URL.Query())
 	if err != nil {
-		status, title := h.d.reportError(r, badRequest("%w", err))
+		status, title := h.report(r, badRequest("%w", err))
 		sentence, message, back := ui.MapQueryError(err)
 		h.renderError(w, r, ui.ErrorPage{Status: status, Title: title, Message: message, Sentence: sentence,
 			Back: back, Retry: ui.NavInterests})

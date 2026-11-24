@@ -4,6 +4,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Abstention is the one sentence an answer gives when its sources don't
@@ -15,14 +17,27 @@ const Abstention = "None of your saved pages answers this."
 // written: the sources it cites, in the order of their first citation, or
 // on the interests and list routes the table rows' and groups' markers it
 // cites ("T3", "G1"), likewise; the citations of what it wasn't given, as
-// written; whether it is the abstention; and whether it cites nothing
-// without abstaining.
+// written; whether it is the abstention; whether it cites nothing without
+// abstaining; and where in the answer each valid citation is written.
 type Citations struct {
 	Cited    []int
 	Markers  []string
 	Invalid  []string
 	Abstains bool
 	Uncited  bool
+	At       []CitedAt
+}
+
+// CitedAt is where a valid citation's number is written in an answer:
+// [Start, End) in Unicode code points from the answer's start, its
+// prefix and digits as written ("T2", "09"), and what it cites, a source
+// (N) or a marker (Marker). Every occurrence has one; a range has one for
+// each of its two written ends, none for the numbers it implies. A page
+// links the number where it stands, so no client reads the grammar again.
+type CitedAt struct {
+	Start, End int
+	N          int
+	Marker     string
 }
 
 // cite reads answer's citations of k sources (see citationMarks for the
@@ -30,11 +45,16 @@ type Citations struct {
 // is an invalid citation, kept as written.
 func cite(answer string, k int) Citations {
 	var c Citations
+	at := codePoints(answer)
 	for _, m := range citationMarks(answer, "") {
 		switch {
 		case m.n >= 1 && m.n <= k:
 			if !slices.Contains(c.Cited, m.n) {
 				c.Cited = append(c.Cited, m.n)
+			}
+			if m.written() {
+				start, end := at(m)
+				c.At = append(c.At, CitedAt{Start: start, End: end, N: m.n})
 			}
 		case !slices.Contains(c.Invalid, m.text):
 			c.Invalid = append(c.Invalid, m.text)
@@ -65,11 +85,16 @@ func markerPrefix(route Route) string {
 // citation, kept as written.
 func citeMarkers(answer, prefix string, n int) Citations {
 	var c Citations
+	at := codePoints(answer)
 	for _, m := range citationMarks(answer, prefix) {
 		switch marker := prefix + strconv.Itoa(m.n); {
 		case m.n >= 1 && m.n <= n:
 			if !slices.Contains(c.Markers, marker) {
 				c.Markers = append(c.Markers, marker)
+			}
+			if m.written() {
+				start, end := at(m)
+				c.At = append(c.At, CitedAt{Start: start, End: end, Marker: marker})
 			}
 		case !slices.Contains(c.Invalid, m.text):
 			c.Invalid = append(c.Invalid, m.text)
@@ -87,12 +112,33 @@ func abstains(answer string) bool {
 	return strings.Contains(fold(answer), strings.TrimSuffix(fold(Abstention), "."))
 }
 
-// mark is one number a citation group names: its value, and how it was
-// written, prefix and digits ("09" for [09]); a number a range only
-// implies is written as its decimal.
+// mark is one number a citation group names: its value, how it was
+// written, prefix and digits ("09" for [09]), and the byte offset in the
+// answer where it was; a number a range only implies is written as its
+// decimal, at -1.
 type mark struct {
 	n    int
 	text string
+	at   int
+}
+
+// implied is a mark's offset for a number a range implies: written
+// nowhere.
+const implied = -1
+
+// written reports whether m stands in the answer as written.
+func (m mark) written() bool { return m.at != implied }
+
+// codePoints returns the func that converts a mark of text, read in order
+// of its offsets, to its [start, end) in code points. It counts on from
+// the previous mark, so a whole answer is counted once.
+func codePoints(text string) func(mark) (int, int) {
+	byteAt, runeAt := 0, 0
+	return func(m mark) (int, int) {
+		runeAt += utf8.RuneCountInString(text[byteAt:m.at])
+		byteAt = m.at
+		return runeAt, runeAt + utf8.RuneCountInString(m.text)
+	}
 }
 
 // citationMarks are the numbers of every citation group in text whose
@@ -114,7 +160,7 @@ func citationMarks(text, prefix string) []mark {
 			break
 		}
 		end += i + 1
-		marks, ok := parseGroup(text[i+1:end], prefix)
+		marks, ok := parseGroup(text[i+1:end], prefix, i+1)
 		if !ok {
 			continue
 		}
@@ -133,9 +179,9 @@ func citationMarks(text, prefix string) []mark {
 	return out
 }
 
-// parseGroup reads the inside of a citation group: a list or a range of
-// numbers with prefix.
-func parseGroup(inner, prefix string) ([]mark, bool) {
+// parseGroup reads the inside of a citation group, which begins at byte
+// offset at of the answer: a list or a range of numbers with prefix.
+func parseGroup(inner, prefix string, at int) ([]mark, bool) {
 	for _, dash := range []string{"-", "–"} {
 		if a, b, ok := strings.Cut(inner, dash); ok {
 			lo, okLo := parseNumber(a, prefix)
@@ -143,21 +189,23 @@ func parseGroup(inner, prefix string) ([]mark, bool) {
 			if !okLo || !okHi || lo >= hi {
 				return nil, false
 			}
-			out := []mark{{lo, a}}
+			out := []mark{{lo, a, at}}
 			for n := lo + 1; n < hi; n++ {
-				out = append(out, mark{n, prefix + strconv.Itoa(n)})
+				out = append(out, mark{n, prefix + strconv.Itoa(n), implied})
 			}
-			return append(out, mark{hi, b}), true
+			return append(out, mark{hi, b, at + len(a) + len(dash)}), true
 		}
 	}
 	var out []mark
 	for part := range strings.SplitSeq(inner, ",") {
-		part = strings.TrimSpace(part)
-		n, ok := parseNumber(part, prefix)
+		lead := len(part) - len(strings.TrimLeftFunc(part, unicode.IsSpace))
+		number := strings.TrimSpace(part)
+		n, ok := parseNumber(number, prefix)
 		if !ok {
 			return nil, false
 		}
-		out = append(out, mark{n, part})
+		out = append(out, mark{n, number, at + lead})
+		at += len(part) + len(",")
 	}
 	return out, len(out) > 0
 }

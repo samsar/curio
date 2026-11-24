@@ -2501,7 +2501,15 @@ components:
             The parts of its text the model was shown, in their page's
             order: its chunks nearest the question, neutralized, the last
             fitted to the source's allowance by its paragraphs.
-      required: ["n", doc_id, url, title]
+        name:
+          type: string
+          description: >
+            What the dashboard's lists call it: its own title; untitled,
+            the title it was last saved under, unless that is an address;
+            else its short URL.
+        full_name: { type: string, description: "The whole of its name: its own title, its saved title, or its URL" }
+        untitled: { type: boolean, description: "It has no title of its own, however it is named" }
+      required: ["n", doc_id, url, title, name, full_name]
 
     AskPassage:
       type: object
@@ -2519,7 +2527,15 @@ components:
         title: { type: string }
         state: { type: string, enum: [failed, dead] }
         reason: { type: string, description: "Why it can't be read" }
-      required: [doc_id, url, title, state, reason]
+        name:
+          type: string
+          description: >
+            What the dashboard's lists call it: its own title; untitled,
+            the title it was last saved under, unless that is an address;
+            else its short URL.
+        full_name: { type: string, description: "The whole of its name: its own title, its saved title, or its URL" }
+        untitled: { type: boolean, description: "It has no title of its own, however it is named" }
+      required: [doc_id, url, title, state, reason, name, full_name]
 
     AskEvidenceEvent:
       type: object
@@ -2618,7 +2634,15 @@ components:
         title: { type: string }
         state: { type: string, enum: [pending, fetched, failed, dead] }
         about: { type: string }
-      required: [doc_id, url, title, state]
+        name:
+          type: string
+          description: >
+            What the dashboard's lists call it: its own title; untitled,
+            the title it was last saved under, unless that is an address;
+            else its short URL.
+        full_name: { type: string, description: "The whole of its name: its own title, its saved title, or its URL" }
+        untitled: { type: boolean, description: "It has no title of its own, however it is named" }
+      required: [doc_id, url, title, state, name, full_name]
       additionalProperties: false
 
     AskDeltaEvent:
@@ -2664,6 +2688,14 @@ components:
             On the interests and list routes, the table rows ([T3]) or
             groups ([G1]) the answer cites, by mark, in the order of their
             first citation.
+        cited_at:
+          type: array
+          items: { $ref: "#/components/schemas/AskMark" }
+          description: >
+            Where each valid citation is written in the answer (the delta
+            events' texts joined), in order: every occurrence, a range's
+            two written ends, none for the numbers a range implies or for
+            an invalid citation. Empty for none.
         invalid_citations:
           type: array
           items: { type: string }
@@ -2672,7 +2704,22 @@ components:
         uncited: { type: boolean, description: "The answer cites nothing and doesn't abstain: check its sources before relying on it" }
         partial: { type: boolean, description: "For timeout or unavailable: pieces of the answer were sent before it stopped" }
         timings: { $ref: "#/components/schemas/AskTimings" }
-      required: [type, status, prompt_version, route, citations, timings]
+      required: [type, status, prompt_version, route, citations, cited_at, timings]
+
+    AskMark:
+      type: object
+      description: >
+        A citation where it is written: [start, end) in Unicode code points
+        of the answer, spanning its number as written (its prefix and
+        digits, "T2" or "09"), and what it cites: a source by n, or a row
+        or a group by marker.
+      properties:
+        start: { type: integer, minimum: 0 }
+        end: { type: integer, minimum: 1 }
+        "n": { type: integer, minimum: 1, description: "The source cited, on the answer and evidence routes" }
+        marker: { type: string, description: "The row or group cited, on the interests and list routes" }
+      required: [start, end]
+      additionalProperties: false
 
     AskTimings:
       type: object

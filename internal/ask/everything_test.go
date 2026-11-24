@@ -61,6 +61,11 @@ func (r *rig) listed() {
 	}}
 	r.interests.labels = map[string]string{"area-cook": "Cooking", "in-bread": "Bread", "in-soup": "Soup"}
 	r.stores.summaries = map[string]*store.Summary{"b1": {About: "A loaf."}}
+	untitled := ""
+	r.ret.got.Result.Items[0].Document.Title = &untitled
+	r.stores.bookmarks = map[string][]*store.Bookmark{"u1": {
+		{ID: "bm-1", Title: new("Older title"), SavedAt: finishedAt.AddDate(-1, 0, 0)},
+		{ID: "bm-2", Title: new("Newer title"), SavedAt: finishedAt}}}
 }
 
 // TestList: the ranking's pages grouped by interest, the most first (ties
@@ -98,6 +103,9 @@ func TestList(t *testing.T) {
 	assert.Empty(t, rest.InterestID)
 	assert.Equal(t, []string{"u1", "out"}, docIDs(rest), "Unsorted and outside the rebuild, last")
 	assert.Equal(t, 3, g.Shown)
+	assert.Equal(t, Names{OwnTitle: "Bread one"}, bread.Documents[0].Names)
+	assert.Equal(t, Names{SavedTitle: "Newer title"}, rest.Documents[0].Names, "named by its newest save")
+	assert.Equal(t, 1, r.stores.bookmarkReads, "the listed pages' bookmarks read once")
 
 	asks := r.writer.asks()
 	require.Len(t, asks, 1)
@@ -105,6 +113,7 @@ func TestList(t *testing.T) {
 	d := doneOf(t, events)
 	assert.Equal(t, RouteList, d.Route)
 	assert.Equal(t, []string{"G1", "G2"}, d.Markers)
+	assert.Equal(t, []CitedAt{{Start: 16, End: 18, Marker: "G1"}, {Start: 20, End: 22, Marker: "G2"}}, d.CitedAt)
 	assert.Equal(t, []string{"G9"}, d.InvalidCitations)
 	assert.Positive(t, d.Timings.Sources, "reading the groups")
 }

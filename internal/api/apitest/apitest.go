@@ -302,12 +302,15 @@ func WithPlanner(p *Planner) func(*api.Deps) {
 }
 
 // Reranker is a reranker whose state a test sets, and which reverses every
-// head it reranks, at depth, recording the questions it is asked. Its
-// state, until set, a reranker that is on and hasn't checked its model.
-// Safe for concurrent use.
+// head it reranks, at depth, recording the questions it is asked; a test
+// can make it skip every search, or end every rerank with another status.
+// Its state, until set, a reranker that is on and hasn't checked its
+// model. Safe for concurrent use.
 type Reranker struct {
 	mu        sync.Mutex
 	depth     int
+	status    rerank.Status
+	err       error
 	state     *rerank.State
 	questions []string
 }
@@ -316,16 +319,52 @@ type Reranker struct {
 // every search.
 func NewReranker(depth int) *Reranker { return &Reranker{depth: depth} }
 
-// Decide implements api.Reranker.
+// Decide implements api.Reranker: depth, or a skip when it is 0.
 func (r *Reranker) Decide(string, understand.Kind, bool) (int, rerank.Outcome) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.depth == 0 {
+		return 0, rerank.Outcome{Status: rerank.StatusSkipped, Reason: "the fake skips every search"}
+	}
 	return r.depth, rerank.Outcome{}
 }
 
-// Rerank implements api.Reranker: the head reversed.
+// SetDepth makes Decide answer depth from now on; 0 skips every search.
+func (r *Reranker) SetDepth(depth int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.depth = depth
+}
+
+// SetStatus makes every rerank from now on end with status, its reason a
+// secret no page may show, keeping the first ranking; reranked, or "",
+// reverses the head again.
+func (r *Reranker) SetStatus(status rerank.Status) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.status = status
+}
+
+// SetError makes every rerank from now on fail with err, which fails its
+// search, as only the caller's context ending does in the daemon's.
+func (r *Reranker) SetError(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.err = err
+}
+
+// Rerank implements api.Reranker: the head reversed, or the status or the
+// error set.
 func (r *Reranker) Rerank(_ context.Context, req rerank.Request) (rerank.Outcome, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.questions = append(r.questions, req.Question)
+	if r.err != nil {
+		return rerank.Outcome{}, r.err
+	}
+	if r.status != "" && r.status != rerank.StatusReranked {
+		return rerank.Outcome{Status: r.status, Model: "m:1", Reason: "SECRET-RERANK-REASON"}, nil
+	}
 	order := make([]string, len(req.Candidates))
 	for i, c := range req.Candidates {
 		order[len(order)-1-i] = c.ID
@@ -364,14 +403,15 @@ func WithReranker(r *Reranker) func(*api.Deps) {
 }
 
 // Asker is an asker that answers every question with its events, whose
-// state a test sets, recording the requests it is asked. Its state, until
-// set, an asker that is on and hasn't checked its model. Safe for
-// concurrent use.
+// state a test sets, recording the requests it is asked and counting the
+// reads of its state. Its state, until set, an asker that is on and
+// hasn't checked its model. Safe for concurrent use.
 type Asker struct {
 	mu       sync.Mutex
 	events   []ask.Event
 	err      error
 	state    *ask.State
+	states   int
 	requests []ask.Request
 }
 
@@ -401,6 +441,7 @@ func (*Asker) Timeout() time.Duration {
 func (a *Asker) State() ask.State {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.states++
 	if a.state != nil {
 		return *a.state
 	}
@@ -419,6 +460,13 @@ func (a *Asker) Set(err error, events ...ask.Event) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.events, a.err = events, err
+}
+
+// States is how many times the asker's state was read.
+func (a *Asker) States() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.states
 }
 
 // Requests are the requests the asker was asked, in order.

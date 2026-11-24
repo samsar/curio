@@ -58,24 +58,28 @@ func TestAsk_Events(t *testing.T) {
 
 // TestAsk_RouteEvents: the fixed plans' events decode: a judging
 // progress, an evidence event, a table event (its timeline read back as
-// the timeline endpoint's), a groups event, and done's markers and
-// timings.
+// the timeline endpoint's), a groups event, the pages' names, and done's
+// markers, where they are written, and timings.
 func TestAsk_RouteEvents(t *testing.T) {
 	c := streamServer(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		for _, line := range []string{
 			`{"type":"progress","stage":"judging","model":"m","pages":12}`,
 			`{"type":"retrieval","route":"evidence","sources":[{"n":1,"doc_id":"d","url":"https://example.com/",` +
-				`"title":"T","quote":"q","passages":[{"text":"p","section":"S"}]}]}`,
+				`"title":"T","quote":"q","passages":[{"text":"p","section":"S"}],"name":"T","full_name":"T"}],` +
+				`"unreadable":[{"doc_id":"u","url":"https://example.org/","title":"U","state":"dead","reason":"gone",` +
+				`"name":"Saved U","full_name":"Saved U","untitled":true}]}`,
 			`{"type":"evidence","status":"judged","judged":12,"supports":[1],"contradicts":[],"dropped_quotes":2,` +
 				`"took_ms":900}`,
 			`{"type":"table","run":{"id":"r","finished_at":"2025-04-01T09:00:00Z","shape":"areas"},"period":"year",` +
 				`"periods":["2024"],"rows":[{"kind":"area","id":"a","label":"Cooking","counts":[3],"total":3,` +
 				`"marker":"T1"}],"dated":3,"undated":1,"undated_marker":"T2","shown":2}`,
 			`{"type":"groups","groups":[{"marker":"G1","label":"Bread","count":1,"documents":[{"doc_id":"d",` +
-				`"url":"https://example.com/","title":"T","state":"dead"}]}],"listed":1,"ranked":9,"wordless":true,` +
+				`"url":"https://example.com/","title":"T","state":"dead","name":"example.com",` +
+				`"full_name":"https://example.com/","untitled":true}]}],"listed":1,"ranked":9,"wordless":true,` +
 				`"shown":1}`,
 			`{"type":"done","status":"answered","route":"interests","citations":[],"markers":["T1","T2"],` +
+				`"cited_at":[{"start":4,"end":6,"marker":"T1"}],` +
 				`"timings":{"sources_ms":4,"judge_ms":900,"prompt_eval_ms":700,"total_ms":5}}`} {
 			fmt.Fprintln(w, line)
 		}
@@ -89,6 +93,8 @@ func TestAsk_RouteEvents(t *testing.T) {
 	assert.Equal(t, 12, events[0].Pages)
 	assert.Equal(t, "q", events[1].Sources[0].Quote)
 	assert.Equal(t, []AskPassage{{Text: "p", Section: "S"}}, events[1].Sources[0].Passages)
+	assert.Equal(t, AskNames{Name: "T", FullName: "T"}, events[1].Sources[0].AskNames)
+	assert.Equal(t, AskNames{Name: "Saved U", FullName: "Saved U", Untitled: true}, events[1].Unreadable[0].AskNames)
 	ev := events[2]
 	assert.Equal(t, "judged", ev.Status)
 	assert.Equal(t, 12, ev.Judged)
@@ -108,10 +114,13 @@ func TestAsk_RouteEvents(t *testing.T) {
 	require.Len(t, g.Groups, 1)
 	assert.Equal(t, "G1", g.Groups[0].Marker)
 	assert.Equal(t, "dead", g.Groups[0].Documents[0].State)
+	assert.Equal(t, AskNames{Name: "example.com", FullName: "https://example.com/", Untitled: true},
+		g.Groups[0].Documents[0].AskNames)
 	assert.True(t, g.Wordless)
 	assert.Equal(t, 9, g.Ranked)
 	done := events[5]
 	assert.Equal(t, []string{"T1", "T2"}, done.Markers)
+	assert.Equal(t, []AskMark{{Start: 4, End: 6, Marker: "T1"}}, done.CitedAt)
 	assert.Equal(t, AskTimings{SourcesMS: 4, JudgeMS: 900, PromptEvalMS: 700, TotalMS: 5}, done.Timings)
 }
 

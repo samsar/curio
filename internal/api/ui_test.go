@@ -106,12 +106,15 @@ func (h *logRecorder) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h *logRecorder) WithGroup(string) slog.Handler      { return h }
 
 // errors returns the attributes of each error record.
-func (h *logRecorder) errors() []map[string]any {
+func (h *logRecorder) errors() []map[string]any { return h.at(slog.LevelError) }
+
+// at returns the attributes of each record at level, with its message.
+func (h *logRecorder) at(level slog.Level) []map[string]any {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	var out []map[string]any
 	for _, r := range h.records {
-		if r.Level != slog.LevelError {
+		if r.Level != level {
 			continue
 		}
 		attrs := map[string]any{"msg": r.Message}
@@ -504,14 +507,16 @@ func TestUI_Search(t *testing.T) {
 	// request, on submit, carries it.
 	assert.Contains(t, form, `<form class="search-hero" action="/ui/" method="get" role="search"`+"\n"+
 		` hx-get="/ui/" hx-trigger="submit" hx-sync="closest .search-page:replace"`+"\n"+
-		` hx-target="#results" hx-select="#results > *" hx-select-oob="#search-scope" hx-swap="innerHTML"`+
-		` hx-push-url="true" hx-indicator="#understanding">`)
-	// A keystroke searches the words: its trigger is input alone (search,
-	// which Enter fires on a search box, would be a second request), and
-	// its hx-include of the form leaves the submit button out.
-	assert.Contains(t, form, `hx-get="/ui/" hx-trigger="input changed delay:400ms"`+
+		` hx-target="#results" hx-select="#results > *" hx-select-oob="#search-scope,#rerank-said:innerHTML"`+
+		` hx-swap="innerHTML" hx-push-url="true" hx-indicator="#understanding">`)
+	// A keystroke searches the words: its trigger is input (search, which
+	// Enter fires on a search box, would be a second request), or ask.js
+	// leaving Ask mode with other words, and its hx-include of the form
+	// leaves the submit button out.
+	assert.Contains(t, form, `hx-get="/ui/" hx-trigger="input changed delay:400ms, curio:search"`+
 		` hx-sync="closest .search-page:replace" hx-include="closest form"`)
-	assert.Contains(t, form, `hx-target="#results" hx-select="#results > *" hx-select-oob="#search-scope" hx-swap="innerHTML"`)
+	assert.Contains(t, form, `hx-target="#results" hx-select="#results > *" `+
+		`hx-select-oob="#search-scope,#rerank-said:innerHTML" hx-swap="innerHTML"`)
 	assert.Contains(t, form, `hx-push-url="true" hx-indicator="#searching">`)
 	assert.Contains(t, form, `<p id="understanding" class="htmx-indicator understanding" aria-hidden="true">`+
 		`<span class="spinner"></span>Understanding your question…</p>`)
@@ -526,15 +531,15 @@ func TestUI_Search(t *testing.T) {
 	assert.Contains(t, body, `<div id="results" aria-live="polite">`+"\n"+`<div class="results">`)
 	assert.Contains(t, body, `placeholder="Search your library"`)
 	assert.NotContains(t, body, `class="landing"`)
-	assert.Contains(t, body, `<a href="/ui/documents/`+doc.ID+`" title="Kafka partitions">Kafka partitions</a>`)
+	assert.Contains(t, body, `<a id="result-`+doc.ID+`" href="/ui/documents/`+doc.ID+`" title="Kafka partitions">Kafka partitions</a>`)
 	assert.Contains(t, body, `<span class="path" title="https://example.com/kafka"><b>example.com</b> › kafka</span>`)
 	assert.NotContains(t, body, `rel="noopener noreferrer"`, "results link to their document's page, not out")
 	assert.Contains(t, body, "<mark>kafka</mark>")
 	assert.Contains(t, body, `<div class="result-foot"><span class="score">score 0.`,
 		"its score for Show scores; no type pill (the icon before the host says it), no badge for a hit both found")
 	assert.Contains(t, body, "<strong>1 document</strong> matches · ")
-	assert.Contains(t, body, ` ms</span><label class="toggle"><input type="checkbox" id="show-scores" hx-preserve="true">`+
-		` Show scores</label></div>`)
+	assert.Contains(t, body, ` ms</span></span><label class="toggle">`+
+		`<input type="checkbox" id="show-scores" hx-preserve="true"> Show scores</label></div>`)
 	assert.Contains(t, body, "&lt;script&gt;alert(1)&lt;/script&gt;", "the chunk's markup is text")
 	assert.Regexp(t, `</mark>[^<]*(<mark>[^<]*</mark>[^<]*)*<span class="score">bm25 \d+\.\d{3} · vector \d+\.\d{3}</span></p>`, body,
 		"a passage's scores are in its .score span")
@@ -545,10 +550,9 @@ func TestUI_Search(t *testing.T) {
 
 	// htmx asks for the same page a plain GET gets, and selects its results
 	// and, out of band, the type links, which carry the query typed.
-	took := regexp.MustCompile(`· \d+ ms`)
 	htmx := getWith(t, srv, "/ui/?q=kafka", http.Header{"Hx-Request": {"true"}, "Hx-Current-Url": {srv.URL + "/ui/"}})
 	require.Equal(t, http.StatusOK, htmx.status)
-	assert.Equal(t, took.ReplaceAllString(body, ""), took.ReplaceAllString(htmx.body, ""))
+	assert.Equal(t, tookRE.ReplaceAllString(body, ""), tookRE.ReplaceAllString(htmx.body, ""))
 	assert.Contains(t, htmx.body, `<div class="search-scope" id="search-scope">`)
 	assert.Contains(t, htmx.body, `<a href="/ui/?content_type=pdf&amp;q=kafka">PDFs</a>`)
 
@@ -556,8 +560,12 @@ func TestUI_Search(t *testing.T) {
 		"<h2>Nothing in your library matches</h2>")
 }
 
+// tookRE finds the time a page of results took, which two renders of the
+// same page rarely share: tests comparing them compare what is left.
+var tookRE = regexp.MustCompile(`<span id="search-took">\d+ ms</span>`)
+
 // resultRE finds the documents a page of results names, in their order.
-var resultRE = regexp.MustCompile(`<h2 class="result-title"><a href="/ui/documents/([^"]+)"`)
+var resultRE = regexp.MustCompile(`<h2 class="result-title"><a id="result-[^"]+" href="/ui/documents/([^"]+)"`)
 
 func resultIDs(page string) []string {
 	matches := resultRE.FindAllStringSubmatch(page, -1)
@@ -613,10 +621,19 @@ func TestUI_SearchSavedHits(t *testing.T) {
 	assert.Equal(t, 3, strings.Count(body, `<li class="result">`))
 	assert.Contains(t, body, `<p class="saved-as" title="Saved as “Sourdough &lt;b&gt;&#34;starters&#34;&lt;/b&gt;” in Baking">`+
 		`Saved as “Sourdough &lt;b&gt;&#34;starters&#34;&lt;/b&gt;” in Baking</p>`)
-	assert.Contains(t, body, `<p class="saved-gone">Saved — the page is no longer available · `+
-		`<a href="https://example.com/gone" rel="noopener noreferrer" target="_blank">the original address</a></p>`)
-	assert.Contains(t, body, `<p class="saved-gone">Saved — the page couldn&#39;t be read · `+
-		`<a href="https://example.com/walled" rel="noopener noreferrer" target="_blank">the original address</a></p>`)
+	gone := regexp.MustCompile(`<p class="saved-gone">Saved — ([^·]+) · <a id="result-([^"]+)-original" `+
+		`href="([^"]+)" rel="noopener noreferrer" target="_blank">the original address</a></p>`).
+		FindAllStringSubmatch(body, -1)
+	require.Len(t, gone, 2)
+	byURL := map[string][]string{}
+	for _, g := range gone {
+		byURL[g[3]] = g[1:3]
+	}
+	assert.Equal(t, "the page is no longer available", byURL["https://example.com/gone"][0])
+	assert.Equal(t, "the page couldn&#39;t be read", byURL["https://example.com/walled"][0])
+	for u, g := range byURL {
+		assert.Contains(t, body, `<a id="result-`+g[1]+`" href="/ui/documents/`+g[1]+`"`, "%s: its title's id", u)
+	}
 	assert.Contains(t, body, `<p class="saved-as" title="Saved as “Sourdough hydration”">`)
 	assert.Equal(t, 2, strings.Count(body, `class="saved-gone"`), "the pending page is still there")
 	assert.Equal(t, 3, strings.Count(body, `<span class="badge badge-accent plain">bookmark details</span>`))
@@ -669,7 +686,7 @@ func TestUI_SearchPages(t *testing.T) {
 		} else {
 			assert.Contains(t, body, `<a class="step" id="pager-next" href="`+tc.next+`" rel="next">`, tc.path)
 		}
-		assert.Contains(t, body, `<a href="/ui/?q=kafka" aria-label="Page 1"`, "%s: page 1 names no page", tc.path)
+		assert.Contains(t, body, `<a id="pager-page-1" href="/ui/?q=kafka" aria-label="Page 1"`, "%s: page 1 names no page", tc.path)
 		assert.NotContains(t, body, "results-note", tc.path)
 	}
 
@@ -677,7 +694,7 @@ func TestUI_SearchPages(t *testing.T) {
 	assert.Empty(t, resultIDs(past))
 	assert.Contains(t, past, "<strong>25 documents</strong> match · ")
 	assert.Contains(t, past, `<h2>No page 4</h2>`+"\n"+`<p>This list has 3 pages.</p>`+"\n"+
-		`<p class="mt-2"><a class="btn" href="/ui/?q=kafka">First page</a> <a class="btn" href="/ui/?page=3&amp;q=kafka">Last page</a></p>`)
+		`<p class="mt-2"><a class="btn" id="out-of-range-first" href="/ui/?q=kafka">First page</a> <a class="btn" id="out-of-range-last" href="/ui/?page=3&amp;q=kafka">Last page</a></p>`)
 	assert.NotContains(t, past, `<nav class="pager"`)
 
 	third := getPage(t, srv, "/ui/?q=kafka&page=3", http.StatusOK)
@@ -685,12 +702,11 @@ func TestUI_SearchPages(t *testing.T) {
 	assert.NotContains(t, form, `name="page"`, "typing starts again at page 1")
 	assert.NotContains(t, form, "page=", "another type starts at page 1")
 
-	took := regexp.MustCompile(`· \d+ ms`)
 	plain := get(t, srv, "/ui/?q=kafka&page=2")
 	boosted := getWith(t, srv, "/ui/?q=kafka&page=2", http.Header{"Hx-Request": {"true"}, "Hx-Boosted": {"true"},
 		"Hx-Current-Url": {srv.URL + "/ui/?q=kafka"}})
 	require.Equal(t, http.StatusOK, boosted.status)
-	assert.Equal(t, took.ReplaceAllString(plain.body, ""), took.ReplaceAllString(boosted.body, ""))
+	assert.Equal(t, tookRE.ReplaceAllString(plain.body, ""), tookRE.ReplaceAllString(boosted.body, ""))
 
 	mu.Lock()
 	searched := embeds
@@ -742,13 +758,13 @@ func TestUI_SearchNamedByBookmark(t *testing.T) {
 	srv.AddContent(t, titledDoc, "kafka partitions, titled")
 
 	body := getPage(t, srv, "/ui/?q=kafka", http.StatusOK)
-	assert.Contains(t, body, `<a href="/ui/documents/`+named.ID+`" title="A &lt;kafka&gt; page" class="untitled">`+
+	assert.Contains(t, body, `<a id="result-`+named.ID+`" href="/ui/documents/`+named.ID+`" title="A &lt;kafka&gt; page" class="untitled">`+
 		`A &lt;kafka&gt; page</a>`)
 	assert.Contains(t, body, `<span class="path" title="https://named.example/a/b"><b>named.example</b> › a › b</span>`,
 		"its address above it")
-	assert.Contains(t, body, `<a href="/ui/documents/`+bare.ID+`" title="https://bare.example/x/y" class="untitled">`+
+	assert.Contains(t, body, `<a id="result-`+bare.ID+`" href="/ui/documents/`+bare.ID+`" title="https://bare.example/x/y" class="untitled">`+
 		`bare.example/x/y</a>`)
-	assert.Contains(t, body, `<a href="/ui/documents/`+titledDoc.ID+`" title="Kafka &lt;partitions&gt;">Kafka &lt;partitions&gt;</a>`)
+	assert.Contains(t, body, `<a id="result-`+titledDoc.ID+`" href="/ui/documents/`+titledDoc.ID+`" title="Kafka &lt;partitions&gt;">Kafka &lt;partitions&gt;</a>`)
 
 	page := getPage(t, srv, "/ui/documents/"+titledDoc.ID, http.StatusOK)
 	assert.Contains(t, page, `<li><a href="/ui/documents/`+named.ID+`" title="A &lt;kafka&gt; page" class="untitled">`+
@@ -858,12 +874,14 @@ func (failingRuns) LatestRun(context.Context, string, store.InterestRunStatus) (
 func TestUI_SearchHomeReadsOnlyWithoutAQuery(t *testing.T) {
 	states, runs, members, saves := new(atomic.Int32), new(atomic.Int32), new(atomic.Int32), new(atomic.Int32)
 	planner := apitest.NewPlanner(understand.Outcome{Status: understand.StatusCold})
+	asker := apitest.NewAsker()
 	srv := apitest.Start(t, func(d *api.Deps) {
 		d.Documents = countingStates{d.Documents, states}
 		d.Insights = countingRuns{d.Insights, runs, members}
 		d.Bookmarks = countingSaves{d.Bookmarks, saves}
-	}, apitest.WithPlanner(planner))
+	}, apitest.WithPlanner(planner), apitest.WithAsker(asker))
 	srv.AddInterest(t, "Kafka", srv.AddDocument(t, "https://example.com/kafka", store.DocStateFetched))
+	htmx := http.Header{"Hx-Request": {"true"}}
 	for _, tc := range []struct {
 		path   string
 		header http.Header
@@ -871,13 +889,17 @@ func TestUI_SearchHomeReadsOnlyWithoutAQuery(t *testing.T) {
 		reads  int32
 	}{
 		{"/ui/?q=kafka", nil, http.StatusOK, 0},
-		{"/ui/?q=kafka", http.Header{"Hx-Request": {"true"}}, http.StatusOK, 0},
+		{"/ui/?q=kafka", htmx, http.StatusOK, 0},
 		{"/ui/?q=kafka&content_type=pdf", nil, http.StatusOK, 0},
 		{"/ui/", nil, http.StatusOK, 1},
 		{"/ui/?q=", nil, http.StatusOK, 1},
 		{"/ui/?q=%20%20", nil, http.StatusOK, 1},
-		{"/ui/?q=", http.Header{"Hx-Request": {"true"}}, http.StatusOK, 1},
+		{"/ui/?q=", htmx, http.StatusOK, 1},
 		{"/ui/?content_type=bogus", nil, http.StatusBadRequest, 0},
+		{"/ui/?q=kafka&mode=ask", nil, http.StatusOK, 0},
+		{"/ui/?q=kafka&mode=ask", htmx, http.StatusOK, 0},
+		{"/ui/?mode=ask", nil, http.StatusOK, 1},
+		{"/ui/?q=kafka&mode=bogus", nil, http.StatusBadRequest, 0},
 	} {
 		states.Store(0)
 		runs.Store(0)
@@ -890,6 +912,7 @@ func TestUI_SearchHomeReadsOnlyWithoutAQuery(t *testing.T) {
 		assert.Zero(t, members.Load(), "%s: the landing names interests, never reads their members", tc.path)
 	}
 	assert.Empty(t, planner.Questions(), "a keystroke never asks the planner, nor the home")
+	assert.Empty(t, asker.Requests(), "no page asks")
 }
 
 // TestUI_SearchHome: without a query, the landing names the six largest
@@ -2097,7 +2120,7 @@ func TestUI_InterestsPages(t *testing.T) {
 		assert.NotContains(t, p.body, "<span>page ", "%s: no page number past the last", path)
 		assert.Contains(t, p.body, `id="rebuild-poll"`, path)
 		assert.Contains(t, p.body, "<p>This list has 2 pages.</p>", path)
-		assert.Contains(t, p.body, `<a class="btn" href="/ui/interests?page=2&amp;run=`+run+`">Last page</a>`, path)
+		assert.Contains(t, p.body, `<a class="btn" id="out-of-range-last" href="/ui/interests?page=2&amp;run=`+run+`">Last page</a>`, path)
 		assert.NotContains(t, p.body, "interest-grid", path)
 	}
 	for _, page := range []string{"0", "-1", "x", "1.5", "99999999999999999999"} {

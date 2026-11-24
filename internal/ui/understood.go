@@ -82,7 +82,7 @@ func (s Search) Chips() []Chip {
 	out := make([]Chip, 0, len(s.Understood.Filters))
 	for _, f := range s.Understood.Filters {
 		out = append(out, Chip{Label: planlabel.Filter(f.Field, f.Values, f.After, f.Before, time.Local),
-			Href: searchHref(s.Query, s.Type, 1, f.Token)})
+			Href: searchHref(s.Query, s.Type, 1, f.Token, "")})
 	}
 	return out
 }
@@ -96,7 +96,7 @@ func (s Search) UndatedLine() *UndatedLine {
 		return nil
 	}
 	line := &UndatedLine{Text: num(*u.Undated) + " undated left out", Action: "include them",
-		Href: searchHref(s.Query, s.Type, 1, u.UndatedToken)}
+		Href: searchHref(s.Query, s.Type, 1, u.UndatedToken, "")}
 	if u.UndatedKept {
 		line.Text, line.Action = num(*u.Undated)+" undated kept", "leave them out"
 	}
@@ -114,7 +114,7 @@ func hasDateFilter(filters []PlanFilter) bool {
 
 // WordsHref is the search of the query's own words, limited to the type
 // shown: what the page searched before it was understood.
-func (s Search) WordsHref() string { return searchHref(s.Query, s.Type, 1, "") }
+func (s Search) WordsHref() string { return searchHref(s.Query, s.Type, 1, "", "") }
 
 // AlsoSearched is the line that says what rewrites the plan searched with
 // the words; "" for none.

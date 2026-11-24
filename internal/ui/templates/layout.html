@@ -198,16 +198,17 @@ inside that control's tag: actions.js sends it as they say.
 A numbered list's Pager (pager.go), under the list: which rows the page
 shows; Previous, the pages by number with gaps for those left out, and
 Next. Previous on the first page and Next on the last are not links. A
-phone shows "Page N of M" in place of the numbers. The steps have ids, so
-that where htmx swaps in the next page's pager (search's), it gives focus
-back to the step that was used.
+phone shows "Page N of M" in place of the numbers. The steps and the
+pages have ids, so that where htmx swaps in the next page's pager, or a
+reordered ranking (search's), it gives focus back to the link that had
+it.
 */}}
 {{define "pager" -}}
 <nav class="pager" aria-label="Pages"><span class="pager-summary">{{.Summary}}</span><div class="pager-pages">
 {{- with .Prev}}<a class="step" id="pager-prev" href="{{.}}" rel="prev">{{template "icon" "chevron-left"}}Previous</a>
 {{- else}}<span class="step" aria-disabled="true">{{template "icon" "chevron-left"}}Previous</span>{{end}}
 {{- range .Items}}{{if .Gap}}<span class="gap" aria-hidden="true">…</span>
-{{- else}}<a href="{{.Href}}" aria-label="Page {{num .Page}}"{{if .Current}} aria-current="page"{{end}}>{{num .Page}}</a>{{end}}{{end -}}
+{{- else}}<a id="{{.ID}}" href="{{.Href}}" aria-label="Page {{num .Page}}"{{if .Current}} aria-current="page"{{end}}>{{num .Page}}</a>{{end}}{{end -}}
 <span class="of">Page {{num .Page}} of {{num .Pages}}</span>
 {{- with .Next}}<a class="step" id="pager-next" href="{{.}}" rel="next">Next{{template "icon" "chevron-right"}}</a>
 {{- else}}<span class="step" aria-disabled="true">Next{{template "icon" "chevron-right"}}</span>{{end -}}
@@ -216,14 +217,15 @@ back to the step that was used.
 
 {{/*
 A page past a numbered list's last, a PageOutOfRange, in place of the
-list: how many pages there are, and the way to the first and the last.
+list: how many pages there are, and the way to the first and the last,
+each with an id, as the pager's links have.
 */}}
 {{define "out-of-range" -}}
 <div class="card"><div class="empty">
 <div class="empty-icon">{{template "icon" "search-x"}}</div>
 <h2>No page {{num .Page}}</h2>
 <p>This list has {{count .Pages "page" "pages"}}.</p>
-<p class="mt-2"><a class="btn" href="{{.First}}">First page</a>{{if gt .Pages 1}} <a class="btn" href="{{.Last}}">Last page</a>{{end}}</p>
+<p class="mt-2"><a class="btn" id="out-of-range-first" href="{{.First}}">First page</a>{{if gt .Pages 1}} <a class="btn" id="out-of-range-last" href="{{.Last}}">Last page</a>{{end}}</p>
 </div></div>
 {{- end}}
 
@@ -323,12 +325,18 @@ alone, so it sits inside a line of either.
 {{- else}}rebuilt{{if not .LastRebuildAt.IsZero}} {{template "reltime" .LastRebuildAt}}{{end}}{{with .Kind}}, {{.}}{{end}} · <span title="{{.ChangedNote}}">{{.UntilNext}}</span>{{end}}
 {{- end}}
 
-{{/* A rebuild that is due, and what it waits for. */}}
+{{/*
+A rebuild that is due, and what it waits for, in the order curio status
+says it: the first grouping; one from scratch a re-embedding owes, while
+it waits for the re-embedding; any other from scratch; one due only to
+draw the map; or one the changes made due.
+*/}}
 {{define "interests-due" -}}
-{{if .LastRebuildAt.IsZero}}the first grouping is due ({{count .Changed "document" "documents"}} indexed): waiting for the library to settle
-{{- else if eq .FreshOwed "reindex"}}a rebuild from scratch is due: waiting for the re-embedding to finish
-{{- else if .FreshOwed}}a rebuild from scratch is due ({{freshReason .FreshOwed}}): waiting for the library to settle
-{{- else}}a rebuild is due ({{count .Changed "document" "documents"}} changed): waiting for the library to settle{{end}}
+{{if .LastRebuildAt.IsZero}}the first grouping is due ({{count .Changed "document" "documents"}} indexed): {{.Wait}}
+{{- else if .AwaitsReembedding}}a rebuild from scratch is due: waiting for the re-embedding to finish
+{{- else if .FreshOwed}}a rebuild from scratch is due ({{freshReason .FreshOwed}}): {{.Wait}}
+{{- else if .MapOwed}}a rebuild is due to draw the map: {{.Wait}}
+{{- else}}a rebuild is due ({{count .Changed "document" "documents"}} changed): {{.Wait}}{{end}}
 {{- end}}
 
 {{/*

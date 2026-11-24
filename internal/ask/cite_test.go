@@ -1,9 +1,11 @@
 package ask
 
 import (
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestCite: the citation grammar, against eight sources.
@@ -63,10 +65,10 @@ func TestCite_Abstains(t *testing.T) {
 // TestCitationMarks_Prefix: markers of a prefix read as numbers do, and
 // other prefixes and plain numbers are text.
 func TestCitationMarks_Prefix(t *testing.T) {
-	assert.Equal(t, []mark{{1, "A1"}, {3, "A3"}},
+	assert.Equal(t, []mark{{1, "A1", 6}, {3, "A3", 10}},
 		citationMarks("Grew [A1][A3], then [A2, I4], [I1] and [2].", "A"), "a list mixing prefixes is text")
-	assert.Equal(t, []mark{{1, "A01"}, {2, "A2"}, {3, "A3"}}, citationMarks("[A01-A3]", "A"))
-	assert.Equal(t, []mark{{4, "I4"}}, citationMarks("[I4]", "I"))
+	assert.Equal(t, []mark{{1, "A01", 1}, {2, "A2", implied}, {3, "A3", 5}}, citationMarks("[A01-A3]", "A"))
+	assert.Equal(t, []mark{{4, "I4", 1}}, citationMarks("[I4]", "I"))
 }
 
 // TestCitationsOf_Routes: the answer and evidence routes cite sources by
@@ -95,4 +97,53 @@ func TestCitationsOf_Routes(t *testing.T) {
 	c = CitationsOf("Nothing cited [7].", RouteInterests, 4)
 	assert.True(t, c.Uncited)
 	assert.False(t, CitationsOf(Abstention, RouteList, 4).Uncited)
+}
+
+// TestCite_At: where each valid citation is written, in code points, its
+// number as written: every occurrence, a range's two ends alone, none for
+// an invalid one or brackets that aren't a citation; on the routes that
+// cite markers, the marker. What CitationsOf reads otherwise is as before.
+func TestCite_At(t *testing.T) {
+	src := func(start, end, n int) CitedAt { return CitedAt{Start: start, End: end, N: n} }
+	for _, tc := range []struct {
+		name   string
+		answer string
+		route  Route
+		n      int
+		at     []CitedAt
+	}{
+		{"adjacent", "It rises [1][2].", RouteAnswer, 4, []CitedAt{src(10, 11, 1), src(13, 14, 2)}},
+		{"a list", "It rises [1, 3].", RouteAnswer, 4, []CitedAt{src(10, 11, 1), src(13, 14, 3)}},
+		{"a range's ends alone", "See [2-4].", RouteAnswer, 4, []CitedAt{src(5, 6, 2), src(7, 8, 4)}},
+		{"an en dash's range", "See [2–4].", RouteAnswer, 4, []CitedAt{src(5, 6, 2), src(7, 8, 4)}},
+		{"a range's invalid end", "See [3-5].", RouteAnswer, 4, []CitedAt{src(5, 6, 3)}},
+		{"a leading zero is written", "See [09].", RouteAnswer, 9, []CitedAt{src(5, 7, 9)}},
+		{"a leading zero past the sources", "See [09].", RouteAnswer, 4, nil},
+		{"every occurrence", "Up [2]. Down [2].", RouteAnswer, 4, []CitedAt{src(4, 5, 2), src(14, 15, 2)}},
+		{"invalid", "See [7] and [123].", RouteAnswer, 4, nil},
+		{"a link's text", "See [1](https://example.com).", RouteAnswer, 4, nil},
+		{"a reference's label", "[1]: note", RouteAnswer, 4, nil},
+		{"letters before", "Größe [1].", RouteAnswer, 4, []CitedAt{src(7, 8, 1)}},
+		{"an emoji before", "🍞 rises [1].", RouteAnswer, 4, []CitedAt{src(9, 10, 1)}},
+		{"evidence", "True [1].", RouteEvidence, 4, []CitedAt{src(6, 7, 1)}},
+		{"rows", "Grew [T2][T9].", RouteInterests, 5, []CitedAt{{Start: 6, End: 8, Marker: "T2"}}},
+		{"groups", "See [G1, G3].", RouteList, 5, []CitedAt{{Start: 5, End: 7, Marker: "G1"},
+			{Start: 9, End: 11, Marker: "G3"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := CitationsOf(tc.answer, tc.route, tc.n)
+			assert.Equal(t, tc.at, c.At)
+			runes := []rune(tc.answer)
+			for _, at := range c.At {
+				written := string(runes[at.Start:at.End])
+				if at.Marker != "" {
+					assert.Equal(t, at.Marker, written)
+					continue
+				}
+				n, err := strconv.Atoi(written)
+				require.NoError(t, err)
+				assert.Equal(t, at.N, n)
+			}
+		})
+	}
 }

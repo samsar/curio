@@ -17,6 +17,7 @@ import (
 
 	"github.com/samsar/curio/internal/api"
 	"github.com/samsar/curio/internal/api/apitest"
+	"github.com/samsar/curio/internal/rerank"
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/understand"
@@ -122,11 +123,17 @@ func encodedPlan(t *testing.T, p api.PlanJSON) string {
 }
 
 // TestUI_KeystrokesNeverUnderstand: search as you type, with or without
-// htmx, and limited to a type, never asks the planner; the home doesn't
-// either.
+// htmx, and limited to a type, never asks the planner, nor the reranker,
+// and sends no follow-up; the home doesn't either.
 func TestUI_KeystrokesNeverUnderstand(t *testing.T) {
 	planner := apitest.NewPlanner(plannedSummer())
-	srv := understandServer(t, planner)
+	reranker := apitest.NewReranker(rerank.MaxDepth)
+	srv := apitest.Start(t, apitest.WithPlanner(planner), apitest.WithReranker(reranker))
+	for _, d := range []struct{ url, ct string }{{"https://example.com/talk", "video"},
+		{"https://example.com/notes", "article"}} {
+		doc := titled(t, srv, d.url, "Kafka "+d.ct, store.DocStateFetched)
+		srv.AddContent(t, doc, "kafka "+d.ct+" about partitions")
+	}
 	for _, tc := range []struct {
 		path   string
 		header http.Header
@@ -141,8 +148,10 @@ func TestUI_KeystrokesNeverUnderstand(t *testing.T) {
 		require.Equal(t, http.StatusOK, p.status, tc.path)
 		assert.NotContains(t, p.body, `class="understood`, tc.path)
 		assert.Empty(t, p.header.Get("HX-Push-Url"), tc.path)
+		assert.NotContains(t, p.body, `id="rerank-status" hx-get`, tc.path)
 	}
 	assert.Empty(t, planner.Questions())
+	assert.Empty(t, reranker.Questions())
 }
 
 // TestUI_Understand: ?understand=1, which Enter sends, asks the planner

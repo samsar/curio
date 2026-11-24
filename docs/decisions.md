@@ -169,6 +169,8 @@ when the entry was first committed.
 - 2026-11-03 — [Summaries: one structured call per document, stored for the reranker](#summaries-one-structured-call-per-document-stored-for-the-reranker)
 - 2026-11-04 — [Reranking: a reranker role over the ranking's head, routed by the plan's kind](#reranking-a-reranker-role-over-the-rankings-head-routed-by-the-plans-kind)
 - 2026-11-04 — [Dashboard: a quieter home, saves first, a theme button](#dashboard-a-quieter-home-saves-first-a-theme-button)
+- 2026-11-23 — [Dashboard: Ask mode](#dashboard-ask-mode)
+- 2026-11-23 — [Dashboard: reranking after the instant results](#dashboard-reranking-after-the-instant-results)
 - 2026-09-25 — [Open questions](#open-questions)
 
 ---
@@ -8192,7 +8194,7 @@ the search and nothing else. Without one it reads `stats` (the fetched
 count, for the placeholder) and `interests` with limit 6 and no members
 (the latest run and its six largest clusters), for one quiet line of
 interests at the foot of the screen. Each read that fails is logged once
-(`reportError`, a 499 at info when the client has gone) and left out: no
+(`report`, a 499 at debug when the client has gone) and left out: no
 panel error on a page that shows no panels. On the operator's library
 (7,467 documents, about 12,000 jobs) each of stats' three counts and the
 interests read take under a millisecond on covering indexes, so nothing
@@ -15290,7 +15292,12 @@ after a pull loads it.
   isn't a browser, or a Safari before 16.4, which sends no Sec-Fetch
   headers); no website can make a modern browser send either. Otherwise
   it searches the words. A `?plan=` asks no model, wherever it comes
-  from.
+  from. A browser's own guess sends `none` too: Chrome's address bar
+  prerenders a history address as the person types, so a request
+  carrying `Sec-Purpose` (or an older prefetch or preview header) that
+  would ask a model is declined before anything is read ("Dashboard:
+  reranking after the instant results", "A browser's guess asks no
+  model").
 - **Plan texts refuse format characters** (Unicode's Cf: bidirectional
   overrides and isolates, zero-width spaces, soft hyphens), as they refuse
   control characters: no search needs one, and one can make a chip or the
@@ -16920,8 +16927,9 @@ before reranking existed can reach it.
   search can be reranked, and `curio doctor` has a `reranking` check.
 - **MCP** never reranks: its caller ranks what it reads, within its own
   30 s.
-- **The dashboard** doesn't rerank yet: a later change brings it as a
-  smart path after the instant results.
+- **The dashboard** reranks an understood search after its instant
+  results, in a follow-up of the page's own, its later pages by the
+  order (see "Dashboard: reranking after the instant results").
 - **cmd/searcheval.** `hybrid-reranked` and `planned-reranked`,
   `-rerank-with`, and answers recorded (`-reranks-out`) and replayed
   (`-reranks`), so the grid and later work measure with no model call.
@@ -18126,7 +18134,326 @@ Nothing is stored for Ask: no migration, no new table.
   truncate guard, on the answer's stream and the evidence judgment alike,
   is its prerequisite, and the first token's cost of a fuller prompt its
   measure.
-- The dashboard's Ask mode, on `/v1/ask` (PR 7).
+- The dashboard's Ask mode, on `/v1/ask`: done (see "Dashboard: Ask
+  mode").
+
+## Dashboard: Ask mode
+
+**Decision:** the search page asks as well as searches. Where Ask can
+answer, a switch over the box (Search | Ask) turns Enter into a question:
+a first-party script, `static/ask.js`, streams `POST /v1/ask` into a shell
+beside the results. No route is added: the pages stay GET-only, and the
+stream is the API's, under the same CSP (`connect-src 'self'`).
+
+**Never on load.** `?q=…&mode=ask` holds the question and the mode alone
+(any of a search's parameters with it is a 400 before anything is read),
+and the page reads nothing for it: only Enter asks. A page that asked as
+it loaded would let any site's link (a top-level navigation, which
+`isolateDashboard` lets through) load a writing model of gigabytes for its
+keep-alive, the reason `?understand=1` asks only for the dashboard's or
+the person's own request; and every reload, back and forward would ask
+again. ask.js keeps the question in the address with
+`history.replaceState`, as each ask is sent and as Ask mode is entered,
+never `pushState`. `TestAskScript` holds the script to one way to the
+model: the capture-phase `submit` listener alone calls `ask()`, which
+alone calls `read()`, which alone fetches, so an ask added on load, or on
+any other event, fails it.
+
+**The page is Search's without the script.** Without JavaScript Enter
+submits the form, which searches, so the box and its button carry
+Search's words in either mode; ask.js gives them Ask's from the
+switch's attributes as it starts.
+
+**Outside the results' live region, one announcement.** `#results` is
+`aria-live="polite"`: an answer streamed inside it would be read out
+piece by piece. The shell, `#ask`, sits beside it, and the one element in
+it that announces is `#ask-status`, which says once that the answer is
+ready, or why it didn't come.
+
+**Words from Go.** Whether a page offers Ask is read once for a whole
+page (never an htmx request, which is swapped into the results alone),
+from the asker's memory: off, off by default for an unmeasured model
+(`ask.State.OffByDefault`), withheld (`State.Withheld`), a provider that
+can't stream (`State.NoStream`), or a model that failed its check hide
+the switch, the shell and the script, and a `?mode=ask` address then
+searches the words under a quiet line of Go's words for the kind, each
+told by a fact of the state's, never by its reason: a refusal ask adds
+later sets a reason too, and a page that read any reason of an asker that
+is on as a provider that can't stream would word that refusal so. A hold,
+or a model not checked yet, still asks, since the answer says why it
+didn't come, and so would a refusal no fact names, whose ask ends off in
+words that name no cause. The notes ask.js shows are `<template>`s of
+Go's words, one for each of `ask.Statuses()` and each flag (partial,
+uncited, invalid citations), so a status added to ask fails a test until
+it is worded. None is ever the daemon's reason, which can carry a
+server's address or an error. Nor is any other text of the daemon's or
+the browser's, the error event's error, a refusal's problem detail and
+the browser's "network error" among them: an ask that ends without its
+done event ends on Go's words for the kind, the daemon's own failure (its
+error event), a refusal of the question (a 400, or a 413 past the body's
+cap), curio busy with as many asks as it takes (PR 6's cap) or starting
+(both 503s, told apart by the problem type, which the shell carries from
+Go), any other refusal, or the connection lost, and then the request's ID
+from `X-Request-Id`, which every answer carries and the daemon's log
+records. `TestAskScript` refuses any read of an event's error or reason,
+a problem's detail or title, an error's message, a status text or a body
+as text. `no_sources` says curio found nothing in the library to answer
+from, which holds on every route ("no readable page" would be wrong for
+an interests question before the first grouping), and the evidence
+route's pages judged with none for or against the claim are said so in
+place of it.
+
+**"Not pulled" is no switch state.** The gate learns that the model isn't
+pulled only when an attempt fails (`unavailable:missing`), and keeps that
+record after a pull: a switch hidden for it would never let the next ask
+find the model. An ask that meets it ends unavailable, whose note names
+the model and says it may not be pulled.
+
+**Names and citation places come from Go.** The answer's pages are named
+as every list of the dashboard names a document (`ui.DocRef`: its own
+title; untitled, its newest titled save's unless that is an address; else
+its short URL; italic either way), which isn't the prompt's title (its
+own, else the first title it was saved under in the fields' order, else
+its host). The events carry `name`, `full_name` and `untitled`, computed
+through `ui.DocRef` from the page's own title and its newest save's
+(`ask.Names`, from the bookmarks the answer route reads already, and one
+more read on the list route), and none reaches a prompt. The done event
+carries `cited_at`: each valid citation's number where it is written, in
+code points of the deltas joined, every occurrence, a range's two ends,
+never a number a range only implies or an invalid one. ask.js links the
+numbers there, with no copy of cite.go's grammar, which no Go test could
+hold to `CitationsOf`.
+
+**Bounds.** curio ask bounds a stream by 30 s of silence (the daemon
+writes a line at least every 10 s) and a line of 1 MiB. ask.js keeps
+both, its silence bound through `AbortSignal.timeout(idleMs)` raced
+against the headers and each read (no timer of its own), and adds a total
+of 4 MiB, since the page holds the whole answer. One ask at a time: a new
+one, or leaving Ask, aborts the last, which ends its writing in the
+daemon (a client gone, logged at DEBUG). Leaving Ask ends the answer on a
+note of its own (`stopped`: Search stopped it, Enter asks again), what it
+showed kept for a return to Ask, as every other way an ask ends without
+its done event keeps it: an answer cut short that came back with neither
+status nor note would read as though it were whole. `stop` ends the ask
+through `end`, the one place an ask ends, which aborts its request and
+clears `aria-busy`. `TestAskScript` reads these rules in the blocks that
+hold them (`askEndProblems`): `ask` opens with `stop()`, the way back to
+Search stops the ask on its note, puts `#results`'s address back and
+searches only under the `searched` guard, and `end` (or a `stop` that
+doesn't go through it) aborts and clears `aria-busy`; a change that
+breaks one (`askEndMutations`), made in ask.js itself, fails it.
+
+**Entering Ask aborts the search in flight.** Every search request, a
+keystroke's, Enter's, a page's and the follow-up, syncs on
+`.search-page`, which holds the one in flight; ask.js sends `htmx:abort`
+to it as Ask is entered. Left running, the follow-up's rerank would keep
+the writing model busy behind the ask's own plan, and when it landed its
+`HX-Replace-Url` (Enter's `HX-Push-Url` the same) would take the Ask
+address, so a reload would give the earlier search.
+
+**Back to Search.** Leaving Ask puts back the address the page had,
+`#results`'s, in the history entry Ask's address took, then searches
+the box's words again unless they are the words `#results` shows, those
+of the box's or the form's last search to land: ask.js sends
+`curio:search` to the box, a second trigger of its own words-only
+request, which never asks the planner and pushes an entry of its own,
+so Back from it is the search Ask was entered over. ask.js tells the
+searches that land by the element that sent each,
+`detail.requestConfig.elt`: htmx gives every event the element it is
+dispatched on as `detail.elt`, which for `htmx:afterSwap` is each element
+swapped in, never the box or the form. search.js lets `curio:search`
+through though the form was submitted since the box last changed:
+entering Ask aborted every request on its way, so no understanding is
+left for it to replace. Clearing search.js's record of the submit on the
+form's `htmx:sendAbort` instead would fail a second Enter within the
+keystroke delay: htmx confirms the second before it aborts the first, so
+the delayed keystroke search would replace the second's understanding.
+
+Each part is needed. A listener that read `detail.elt` would never hear a
+search land, so leaving Ask would search words `#results` already shows,
+adding an entry. A search.js that dropped `curio:search` after an Enter,
+as it drops a keystroke's search, would leave the old words' results
+under the new after Enter, Ask and Search within the keystroke delay.
+Without the address put back first, a return that searched nothing, or
+whose search was dropped, would leave `?mode=ask` as the address of a
+search's results, the search's own entry lost. And the words to compare
+with are those `#results` shows, not the box's as Ask is entered: Ask
+pressed within the keystroke delay aborts the search the box's words were
+waiting for, so a comparison with them would leave old results under new
+words.
+
+**Checked in a browser.** Headless Chrome 158, on a scratch daemon over
+copies of the operator's library (Ask and the reranker on with
+gemma4:26b, at 1440 and 390 px in both themes; 58 checks on a fresh copy)
+and over the API's test fakes (the planner and the reranker each taking
+2 s, no model; 37 checks, 9 of which a build without Back to Search's
+rules above fails). Every check passed.
+
+- On the daemon, a real answer streamed whole, its citations linked to
+  the pages cited; an evidence, an interests and a list question each
+  showed their part (the pages for and against with their quotes; the
+  table, its markers linked to the interests; the groups, linked); typing
+  in Ask sent nothing; leaving Ask mid-answer ended the request, with no
+  ERROR in the daemon's log; reload and back asked nothing; Ask entered
+  while the follow-up reranked cancelled the follow-up (its access line a
+  499, its log line aborted), and the address stayed Ask's 8 s later; Ask
+  pressed within the keystroke delay sent no search, and returning
+  searched the box's words once; a refusal of a busy curio, of a starting
+  one, any other refusal, the daemon's error event and a dropped
+  connection (the first four fulfilled through the browser's request
+  interception, the last failed by it) each ended on its Go note and the
+  request's ID, said once, with none of the daemon's or the browser's
+  text; a question past 512 bytes ended on the question's note; an
+  address in Ask mode said Search without JavaScript and Ask with it; and
+  no page scrolled sideways, the table scrolling in its own box. On the
+  fresh copy the daemon logged nothing at WARN or ERROR, and the console
+  held nothing but htmx's own lines for the one request it aborted; a
+  clean pass had no console entry and no CSP violation. Only the fakes
+  show whether leaving Ask follows the words `#results` shows: on the
+  daemon the box's words differed from them either way.
+- Over the fakes, Enter's page reordered, then Ask and Search, sent
+  nothing and put the order's address back, with no entry added, and a
+  reload of it showed the same order asking no model; a keystroke's
+  search, then Ask and Search, sent nothing and put its address back; new
+  words and Enter within the keystroke delay, Ask while the plan was on
+  its way, then Search, searched the box's words once, under their own
+  address, and Back gave the search Ask was entered over, in Search; two
+  Enters within the delay had htmx confirm the second before it aborted
+  the first, and the delayed keystroke search was dropped; Ask entered
+  while the follow-up reranked cancelled it and kept Ask's address, and
+  Search then put Enter's address back sending nothing; Ask within the
+  keystroke delay sent nothing, and Search searched the box's words once;
+  a page opened in Ask mode searched its words once on Search; and no
+  page threw.
+
+## Dashboard: reranking after the instant results
+
+**Decision:** an understood search's page shows its first ranking at once
+and asks for its head reordered after: a follow-up element in the head's
+slot loads once (`hx-trigger="load"`), GETs its own page with `rerank=1`,
+and swaps the reordered `#ranking` in. The page never waits on the
+reranker, whose rerank takes seconds.
+
+**Rendered only after the planner, on the page's own request.** The
+follow-up is always the page's own htmx request, `Sec-Fetch-Site:
+same-origin`, so `selfInitiated` on it alone guards nothing: a page
+another site's link reached would load the reranker's model through it.
+The guard is whether it is rendered: only on a page whose own request
+asked the planner (`understand=1` and `selfInitiated`) and got a plan the
+reranker would reorder (`Reranker.Decide`, from memory, the decision
+`POST /v1/search` makes before it searches), with a head of two or more
+that the page holds some of: a later page past the head (`understand=1`
+typed with `page=` beyond `search.rerank_depth`) would send one whose
+rerank would order a head nothing on that page shows, and whose answer
+would still replace its address with the order's. `Decide` doesn't read
+whether the model failed its check or the reranker rests after timeouts
+or evictions, in which a follow-up would run the search again only to
+fetch a note: Enter's page reads the reranker's state from memory and
+says the note itself, sending none (the follow-up still answers it, for a
+state that changes between the two), and a page past the head says
+nothing of reordering. `?rerank=1` itself reranks only for a
+`selfInitiated` request, needs the plan and goes with neither `order=`
+nor `understand=1`.
+
+**The order is IDs.** The reordered page's address, and its pager's
+links, carry the head's order itself (`?order=`: its document IDs,
+base64url JSON of at most 4 KiB, decoded strictly and held to
+`retrieve.CheckOrder`), so a later page, a reload or back lays the same
+order over the same ranking and asks no model, as "Paging by the order,
+not a cache" requires. Only that ranking's windows carry it: a type tab,
+a chip, the undated switch and "Search your words instead" each search
+another ranking, whose head `rerank.Apply` would misplace by putting the
+old head's IDs first.
+
+**Replace, not push.** The follow-up's answer replaces the page's address
+(`HX-Replace-Url`): pushing it would leave two history entries an Enter,
+and Back would land on the first ranking of the same search.
+
+**Only the ranking is swapped, and silently.** `#ranking` holds the
+head's slot, the results head, the results and the pager; the understood
+line, the callouts and the star ask stay outside it, so the once-only ask
+isn't removed. `#results` is a polite live region, which reads out the
+searches typed, Entered and paged to, and so would read the whole list
+out again as the follow-up swaps `#ranking` inside it. A live region
+can't tell one swap from another, and an `aria-live="off"` inside one
+isn't honoured by every engine, so `search.js` turns the region off
+before it swaps the follow-up's answer in and on again before any other
+swap. What the follow-up did is said by `#rerank-said`, a status of its
+own outside `#results`, visually hidden but in the accessibility tree:
+only the follow-up's answer fills it ("Reordered by <model>", or the
+note), out of band, and the box's and the form's answers clear it. Every
+focusable element in `#ranking` has an id that follows its document or
+its role, so htmx gives focus back to the same element wherever the
+reorder put it on the page. Focus on a result the reorder moved to a
+later page would be left on the body, since no element of its id is in
+the answer, and so would focus on an element htmx keeps by moving it
+(`hx-preserve`, the scores switch) in a browser without `moveBefore`:
+`search.js` notes what had focus in `#ranking`, and where among its
+results, as the follow-up's answer swaps in and, once it is in, if focus
+is still nowhere, gives it back to that element while it is on the page,
+else to the title of the result now in that place, else to the first
+result's when that one can't take it (inside the closed rest of a search
+by meaning alone); never from outside `#ranking`, nor from where the
+person or htmx put it. The head's time stays the instant page's, how
+long the results took to show: the follow-up's own, the search run again
+and the rerank, is marked `hx-preserve` in its answer, so htmx keeps the
+element of that id already on the page in its place. The follow-up's
+answer is the page reordered; a 204, nothing to swap, when the reranker
+kept curio's order without a word to say (a skip, a load, a check, an
+answer it couldn't use, a timeout or an outage without a hold) or the
+search failed (logged); or, for an unfit model or a reranker resting, the
+note alone in the slot (`HX-Retarget`, `HX-Reselect`). The pages swap 4xx
+and 5xx answers in, and one here would wipe the results it was sent to
+reorder, so `search.js` swaps no error answer to it. A keystroke, Enter
+or a page aborts it (`hx-sync` abort on the page), and so does entering
+Ask; it is dropped while one is in flight.
+
+**In the log.** The follow-up's access line says only `GET /ui/`, as
+Enter's does, so each follow-up logs one DEBUG line, `search page:
+follow-up`, with its request's ID, how it ended (reranked, kept, note,
+failed, aborted) and how long it took, never its query, plan or order.
+One the page aborted or left answers a 499, which its access line then
+records, where a 204 would say it had nothing to swap. A page's request
+whose client has gone is the person typing, clicking or leaving, which
+says nothing of the daemon, so the pages log it at DEBUG; the JSON API
+keeps INFO, and ERROR stays the daemon's own failures.
+
+**A browser's guess asks no model.** Chrome's address bar prerenders a
+history address as the person types (`Sec-Purpose: prefetch;prerender`,
+`Sec-Fetch-Site: none`), which `selfInitiated` takes as the person's: an
+understood address would be planned, and the page it rendered would send
+its follow-up and rerank, though nobody pressed Enter. The planner was
+reached so before this change; the reranker would have been with it. A
+search page request carrying `Sec-Purpose`, or the older
+`Purpose: prefetch`, `X-Moz: prefetch` or `X-Purpose: preview`, that
+would ask a model (`understand` or `rerank` present) is answered with a
+503 and `Cache-Control: no-store` before anything is read. Chrome's
+documentation says a prefetch or prerender whose answer isn't a 2xx is
+discarded, and the navigation, if the person makes it, is a request of
+its own; a 204 or 205 is a valid prefetch, which the navigation would
+show as nothing, so it isn't one. A speculative request that asks no
+model is served as before.
+
+**Measured** on the scratch daemon above, the operator's 50 search
+queries, each Enter planned by gemma4:26b: the Enter page took 1.08 s p50
+and 1.38 s p95 before this change, and 1.08 s and 1.39 s with it (two
+more runs: 1.07 / 1.42 s and 1.09 / 1.48 s), the same within noise. The
+follow-up was rendered for the 18 whose kind the reranker reorders, and
+arrived 2.86 s p50 and 3.04 s p95 after the page (warm; 15 reordered, 3
+kept curio's order on an answer it couldn't use).
+
+**Checked in a browser.** Headless Chrome 158 on the same daemon: each
+Enter sent one follow-up, none after the swap, and added one history
+entry; focus stayed on the box; the reordered head arrived about 2.0 s
+after the instant results (one warm sample); `#results` was
+`aria-live="off"` after the swap and `#rerank-said` said "Reordered by"
+the model, nothing inside `#ranking` announced, and the next keystroke's
+search set the region polite again and cleared the status; a 503 answer
+to the follow-up left the results; typing during it aborted it; and a
+prerender's or prefetch's request with `understand=1` was a 503 with
+`Cache-Control: no-store`, while the same headers without it were served.
+Ask mode's checks above cover the follow-up with Ask, on the daemon and
+over the fakes.
 
 ## Open questions
 

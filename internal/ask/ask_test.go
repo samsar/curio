@@ -1,6 +1,7 @@
 package ask
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -18,6 +19,8 @@ import (
 	"github.com/samsar/curio/internal/retrieve"
 	"github.com/samsar/curio/internal/search"
 	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/store/sqlite"
+	"github.com/samsar/curio/internal/store/sqlite/sqlitetest"
 	"github.com/samsar/curio/internal/understand"
 )
 
@@ -49,7 +52,8 @@ func TestAsk_Answered(t *testing.T) {
 	require.Len(t, got.Sources, 3)
 	assert.Equal(t, Source{N: 1, DocID: "d1", URL: "https://example.com/kafka", Title: "Kafka consumer groups",
 		Site:     "example.com",
-		Passages: []Passage{{Text: "A consumer group shares a topic's partitions among its members."}}},
+		Passages: []Passage{{Text: "A consumer group shares a topic's partitions among its members."}},
+		OwnTitle: "Kafka consumer groups"},
 		got.Sources[0])
 	assert.Equal(t, "Partitions are shared [1][3], and moved [9].", text(events))
 
@@ -57,6 +61,8 @@ func TestAsk_Answered(t *testing.T) {
 	assert.Equal(t, StatusAnswered, d.Status)
 	assert.Empty(t, d.Reason)
 	assert.Equal(t, []int{1, 3}, d.Citations)
+	assert.Equal(t, []CitedAt{{Start: 23, End: 24, N: 1}, {Start: 26, End: 27, N: 3}}, d.CitedAt,
+		"where in the delta texts' concatenation")
 	assert.Equal(t, []string{"9"}, d.InvalidCitations)
 	assert.False(t, d.Uncited)
 	assert.False(t, d.Partial)
@@ -145,17 +151,18 @@ func TestAsk_NoSources(t *testing.T) {
 	assert.Empty(t, got.Sources, "a page with neither a passage nor a summary is passed over")
 	assert.Equal(t, []Unreadable{
 		{DocID: "dead", URL: "https://example.com/gone", Title: "Gone", State: store.DocStateDead,
-			Reason: "the page is no longer available"},
+			Reason: "the page is no longer available", OwnTitle: "Gone"},
 		{DocID: "failed", URL: "https://example.org/walled", Title: "Walled", State: store.DocStateFailed,
-			Reason: "the page couldn't be read"},
+			Reason: "the page couldn't be read", OwnTitle: "Walled"},
 	}, got.Unreadable)
 	assert.Empty(t, r.writer.asks(), "no model asked")
 }
 
 // TestAsk_Sources: sources are the ranking's readable pages in order,
-// up to the request's count; each is named by its fields, its summary's
-// about line, its first known save and its two best passages; unreadable
-// pages are listed apart, at most three.
+// up to the request's count; each is named by its fields, and as the
+// dashboard names it, by its own title or else its newest save's, with its
+// summary's about line, its first known save and its two best passages;
+// unreadable pages are listed apart, at most three.
 func TestAsk_Sources(t *testing.T) {
 	r := newRig(t, nil)
 	r.ret.got.Result.Items = []search.Hit{
@@ -174,7 +181,8 @@ func TestAsk_Sources(t *testing.T) {
 	}
 	r.stores.summaries = map[string]*store.Summary{"summed": {About: "A page about b."}}
 	r.stores.bookmarks = map[string][]*store.Bookmark{
-		"a": {{SavedAt: exact, SavedDate: store.SavedDateExact}, {SavedAt: approx, SavedDate: store.SavedDateApprox},
+		"a": {{SavedAt: exact, SavedDate: store.SavedDateExact, Title: new(" Newest save ")},
+			{SavedAt: approx, SavedDate: store.SavedDateApprox, Title: new("Older save")},
 			{SavedAt: approx.AddDate(-5, 0, 0), SavedDate: store.SavedDateUnknown}},
 		"c": {{SavedAt: exact, SavedDate: store.SavedDateExact}},
 	}
@@ -182,12 +190,14 @@ func TestAsk_Sources(t *testing.T) {
 	require.Len(t, got.Sources, 2)
 	assert.Equal(t, Source{N: 1, DocID: "a", URL: "https://example.com/a", Title: "Saved A",
 		SavedAs: []string{"Saved again"}, Site: "Example News", SavedOn: "about 2023-05-06",
-		Passages: []Passage{{Text: "first passage"}, {Text: "second passage"}, {Text: "third"}}}, got.Sources[0])
+		Passages:   []Passage{{Text: "first passage"}, {Text: "second passage"}, {Text: "third"}},
+		SavedTitle: "Newest save"}, got.Sources[0])
 	assert.Equal(t, Source{N: 2, DocID: "summed", URL: "https://example.org/b", Title: "Summed",
-		Site: "example.org", About: "A page about b."}, got.Sources[1])
+		Site: "example.org", About: "A page about b.", OwnTitle: "Summed"}, got.Sources[1])
 	require.Len(t, got.Unreadable, 3)
 	assert.Equal(t, []string{"dead1", "dead2", "dead3"},
 		[]string{got.Unreadable[0].DocID, got.Unreadable[1].DocID, got.Unreadable[2].DocID})
+	assert.Equal(t, 1, r.stores.bookmarkReads, "the names come from the one read of the bookmarks")
 }
 
 // TestAsk_Off: Ask off, off by default for an unmeasured model, or a
@@ -210,6 +220,7 @@ func TestAsk_Off(t *testing.T) {
 	st := r.a.State()
 	assert.False(t, st.On)
 	assert.False(t, st.ByDefault)
+	assert.False(t, st.OffByDefault, "the options didn't say so")
 	assert.Equal(t, byDefault.OffReason, st.Reason, "healthz says it too")
 	assert.Empty(t, r.ret.queries)
 
@@ -223,6 +234,13 @@ func TestAsk_Off(t *testing.T) {
 	d = doneOf(t, events)
 	assert.Equal(t, StatusOff, d.Status)
 	assert.Equal(t, "ollama can't stream answers", d.Reason)
+	st = a.State()
+	assert.True(t, st.On)
+	assert.True(t, st.NoStream, "said as a fact, for a client that words it itself")
+	assert.False(t, st.Withheld)
+	assert.Equal(t, "ollama can't stream answers", st.Reason, "healthz says it too")
+	assert.False(t, r.a.State().NoStream, "off, its provider unasked")
+	assert.False(t, newRig(t, nil).a.State().NoStream, "a provider that streams")
 }
 
 // noStream is a generator without a stream.
@@ -249,6 +267,8 @@ func TestAsk_Withheld(t *testing.T) {
 	assert.Empty(t, r.ret.queries)
 	assert.Empty(t, r.writer.prompts)
 	assert.Equal(t, why, r.a.State().Reason)
+	assert.True(t, r.a.State().Withheld)
+	assert.False(t, r.a.State().OffByDefault)
 	warns := 0
 	for _, rec := range r.records(t) {
 		if rec["level"] == "WARN" {
@@ -742,5 +762,139 @@ func TestValidate(t *testing.T) {
 			_, ok := errors.AsType[*RequestError](err)
 			assert.True(t, ok)
 		})
+	}
+}
+
+// TestState_OffFacts: State says off by default and withheld as facts:
+// off by default for ask.enabled left out and an unmeasured model; never
+// for ask.enabled: false, or Ask on; withheld for an asker on whose
+// questions may not leave, never for one that is off.
+func TestState_OffFacts(t *testing.T) {
+	measured := config.Default()
+	measured.Generation.Model = "gemma4:26b"
+	off := config.Default()
+	off.Ask.Enabled = new(false)
+	withheld := measured
+	withheld.Generation.BaseURL = "http://gpu.example:11434"
+	offWithheld := withheld
+	offWithheld.Ask.Enabled = new(false)
+	for _, tc := range []struct {
+		name                   string
+		cfg                    config.Config
+		offByDefault, withheld bool
+	}{
+		{"ask.enabled left out, an unmeasured model", config.Default(), true, false},
+		{"ask.enabled: false", off, false, false},
+		{"on by default", measured, false, false},
+		{"withheld", withheld, false, true},
+		{"off and withheld", offWithheld, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := OptionsFrom(tc.cfg)
+			r := newRig(t, func(o *Options) {
+				o.On, o.ByDefault, o.OffByDefault, o.OffReason, o.Withheld = opts.On, opts.ByDefault,
+					opts.OffByDefault, opts.OffReason, opts.Withheld
+			})
+			st := r.a.State()
+			assert.Equal(t, tc.offByDefault, st.OffByDefault)
+			assert.Equal(t, tc.withheld, st.Withheld)
+			assert.Equal(t, cmp.Or(opts.OffReason, opts.Withheld), st.Reason)
+		})
+	}
+}
+
+// TestSavedTitle: an untitled document's saved title is its newest
+// titled bookmark's, ties to the higher ID, as the store lists them,
+// trimmed; a title blank of ASCII whitespace is passed over, one of other
+// spaces chosen and trimmed to nothing, as the search page shows it; a
+// document with a title of its own has none.
+func TestSavedTitle(t *testing.T) {
+	at := time.Date(2025, 4, 17, 15, 0, 0, 0, time.UTC)
+	bm := func(id, title string, saved time.Time) *store.Bookmark {
+		return &store.Bookmark{ID: id, Title: &title, SavedAt: saved}
+	}
+	for _, tc := range []struct {
+		name      string
+		own       string
+		bookmarks []*store.Bookmark
+		want      string
+	}{
+		{"the newest saved", "", []*store.Bookmark{bm("b1", "Older", at.Add(-time.Hour)), bm("b2", " Newer\n", at)},
+			"Newer"},
+		{"ties to the higher ID", "", []*store.Bookmark{bm("b2", "Higher", at), bm("b1", "Lower", at)}, "Higher"},
+		{"ties whatever the order", "", []*store.Bookmark{bm("b1", "Lower", at), bm("b2", "Higher", at)}, "Higher"},
+		{"blank of ASCII whitespace passed over", "",
+			[]*store.Bookmark{bm("b1", "Real", at.Add(-time.Hour)), bm("b2", " \t\n\v\f\r", at)}, "Real"},
+		{"other spaces chosen", "",
+			[]*store.Bookmark{bm("b1", "Real", at.Add(-time.Hour)), bm("b2", "\u00a0", at)}, ""},
+		{"no title", "", []*store.Bookmark{{ID: "b1", SavedAt: at}}, ""},
+		{"no bookmark", "", nil, ""},
+		{"a title of its own", "Own", []*store.Bookmark{bm("b1", "Saved", at)}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, savedTitle(tc.own, tc.bookmarks))
+		})
+	}
+}
+
+// TestAsk_NamesAsTheStoreNamesThem: an answer's pages are named as every
+// list of the dashboard names them, by their own title or the bookmark
+// the store names an untitled document by (GetByIDsWithLastError's, the
+// search page's and the Library's), through the real store's bookmarks as
+// ListByDocuments returns them: the newest save, ties at one saved time
+// to the higher ID, a title blank of ASCII whitespace passed over and one
+// of other spaces chosen, then trimmed as the search page trims it.
+func TestAsk_NamesAsTheStoreNamesThem(t *testing.T) {
+	ctx := context.Background()
+	db := sqlitetest.NewDB(t)
+	docs, bookmarks := sqlite.NewDocuments(db), sqlite.NewBookmarks(db)
+	at := time.Date(2025, 4, 17, 15, 0, 0, 0, time.UTC)
+	type save struct {
+		id    string
+		title *string
+		at    time.Time
+	}
+	pages := []struct {
+		own   string
+		saves []save
+		want  string
+	}{
+		{"", []save{{"b1", new("Older"), at.Add(-time.Hour)}, {"b2", new(" Newer\n"), at}}, "Newer"},
+		{"", []save{{"b4", new("Higher"), at}, {"b3", new("Lower"), at}}, "Higher"},
+		{"", []save{{"b5", new("Real"), at.Add(-time.Hour)}, {"b6", new(" \t\n\v\f\r"), at}}, "Real"},
+		{"", []save{{"b7", new("Real"), at.Add(-time.Hour)}, {"b8", new(" "), at}}, ""},
+		{"", []save{{"b9", nil, at}}, ""},
+		{"Its own", []save{{"b10", new("Saved"), at}}, ""},
+	}
+	hits := make([]search.Hit, 0, len(pages))
+	ids := make([]string, 0, len(pages))
+	for i, p := range pages {
+		doc := &store.Document{TenantID: "local", URL: fmt.Sprintf("https://example.com/%d", i),
+			State: store.DocStateFetched}
+		require.NoError(t, docs.Create(ctx, doc))
+		_, err := db.ExecContext(ctx, `UPDATE documents SET title = ? WHERE id = ?`, p.own, doc.ID)
+		require.NoError(t, err)
+		for j, s := range p.saves {
+			require.NoError(t, bookmarks.Create(ctx, &store.Bookmark{ID: s.id, TenantID: "local", DocumentID: &doc.ID,
+				URL: doc.URL, Title: s.title, SavedAt: s.at, Source: []string{"chrome", "safari"}[j]}))
+		}
+		hits = append(hits, hit(doc.ID, doc.URL, p.own, store.DocStateFetched, "a passage"))
+		ids = append(ids, doc.ID)
+	}
+	named, err := docs.GetByIDsWithLastError(ctx, "local", ids)
+	require.NoError(t, err)
+	storeNames := map[string]string{}
+	for _, d := range named {
+		storeNames[d.ID] = strings.TrimSpace(d.BookmarkTitle)
+	}
+
+	r := newRigReading(t, nil, bookmarks)
+	r.ret.got.Result.Items = hits
+	got := retrievedOf(t, r.ask(t, Request{Question: "q", Sources: len(pages)}))
+	require.Len(t, got.Sources, len(pages))
+	for i, s := range got.Sources {
+		assert.Equal(t, pages[i].want, s.SavedTitle, "page %d", i)
+		assert.Equal(t, storeNames[s.DocID], s.SavedTitle, "page %d: as the store names it", i)
+		assert.Equal(t, pages[i].own, s.OwnTitle, "page %d", i)
 	}
 }
