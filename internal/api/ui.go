@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strings"
@@ -143,7 +144,7 @@ func (h pageHandlers) pageWithCSP(w http.ResponseWriter, r *http.Request, status
 // error logged once, as writeError answers it as a problem. retry is the
 // page the error page suggests starting over from.
 func (h pageHandlers) writePageError(w http.ResponseWriter, r *http.Request, err error, retry ui.Nav) {
-	status, title := h.d.reportError(r, err)
+	status, title := h.report(r, err)
 	h.errorPage(w, r, status, title, err.Error(), retry)
 }
 
@@ -179,9 +180,9 @@ func (h pageHandlers) renderError(w http.ResponseWriter, r *http.Request, vm ui.
 	}
 }
 
-// panelError reports a panel's failed read, logged as writeError logs it,
-// for the panel to show while the rest of the page renders: the page
-// degrades by panel, where a JSON answer fails whole.
+// panelError reports a panel's failed read (report), for the panel to
+// show while the rest of the page renders: the page degrades by panel,
+// where a JSON answer fails whole.
 func (h pageHandlers) panelError(r *http.Request, err error) *ui.PanelError {
 	if err == nil {
 		return nil
@@ -190,18 +191,25 @@ func (h pageHandlers) panelError(r *http.Request, err error) *ui.PanelError {
 	return p
 }
 
-// quietError reports a failed read the page does without, logged as
-// writeError logs it: the page leaves out what the read was for, rather
-// than showing a panel's error where nothing would have shown.
+// report classifies and logs err, from serving the page r asked for, as
+// writeError logs a request's, but for a client gone, a 499 logged at
+// debug (reportErrorAt).
+func (h pageHandlers) report(r *http.Request, err error) (int, string) {
+	return h.d.reportErrorAt(r, err, slog.LevelDebug)
+}
+
+// quietError reports a failed read the page does without (report): the
+// page leaves out what the read was for, rather than showing a panel's
+// error where nothing would have shown.
 func (h pageHandlers) quietError(r *http.Request, err error) {
-	h.d.reportError(r, err)
+	h.report(r, err)
 }
 
 // reportPanel is panelError for a read whose failure is the page's answer,
-// a search's: it also returns the status to answer with, reportError's,
-// which is a 499 when the client has gone.
+// a search's: it also returns the status to answer with, report's, which
+// is a 499 when the client has gone.
 func (h pageHandlers) reportPanel(r *http.Request, err error) (int, *ui.PanelError) {
-	status, _ := h.d.reportError(r, err)
+	status, _ := h.report(r, err)
 	return status, &ui.PanelError{Message: err.Error(), RequestID: middleware.GetReqID(r.Context())}
 }
 

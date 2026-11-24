@@ -71,7 +71,7 @@ why, as the scheduler last saw it, or how to turn insight on.
 <h2>No interests yet</h2>
 {{if not .Enabled}}<p>Finding them is turned off: set <code>insight.enabled: true</code> in config.yaml and restart the daemon.</p>
 {{- else}}{{with .State}}
-{{- if eq .State "due"}}<p>The first grouping is due ({{count .Changed "document" "documents"}} indexed), and starts once the library settles.</p>
+{{- if eq .State "due"}}<p>The first grouping is due ({{count .Changed "document" "documents"}} indexed), and starts {{.FirstStarts}}.</p>
 {{- else if eq .State "none"}}<p>The library is grouped into them on its own once {{num .RebuildAt}} documents are indexed; {{count .Changed "is" "are"}} so far.</p>
 {{- else if eq .State "held"}}<p>Grouping is held: {{.HeldReason}}. Run <code>curio reindex --all</code>; the library is grouped once the re-embedding finishes.</p>
 {{- else if eq .State "failing"}}<p>The first grouping failed: <span class="state-error" title="{{.LastError}}">{{shortError .LastError}}</span>. It is tried again {{if .Retrying}}{{template "reltime" .RetryAt}}{{else}}once the library settles{{end}}.</p>

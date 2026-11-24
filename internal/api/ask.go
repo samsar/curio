@@ -13,6 +13,7 @@ import (
 
 	"github.com/samsar/curio/internal/ask"
 	"github.com/samsar/curio/internal/store"
+	"github.com/samsar/curio/internal/ui"
 )
 
 // Asker answers questions: the daemon's ask.Asker, which it always
@@ -362,6 +363,7 @@ type (
 		Route            string     `json:"route"`
 		Citations        []int      `json:"citations"`
 		Markers          []string   `json:"markers,omitempty"`
+		CitedAt          []AskMark  `json:"cited_at"`
 		InvalidCitations []string   `json:"invalid_citations,omitempty"`
 		Abstained        bool       `json:"abstained,omitempty"`
 		Uncited          bool       `json:"uncited,omitempty"`
@@ -374,6 +376,33 @@ type (
 		RequestID string `json:"request_id,omitempty"`
 	}
 )
+
+// AskMark mirrors the openapi AskMark schema: where a citation is
+// written in the answer (ask.CitedAt), in code points, and the source (N)
+// or the marker it cites.
+type AskMark struct {
+	Start  int    `json:"start"`
+	End    int    `json:"end"`
+	N      int    `json:"n,omitempty"`
+	Marker string `json:"marker,omitempty"`
+}
+
+// AskNames are the fields the openapi AskSource, AskUnreadable and
+// AskGroupDocument schemas each inline (name, full_name, untitled): how
+// the dashboard's lists name a page an ask reports (ui.DocRef), so that
+// the answer's page names it as Search and the Library do: the name a list
+// shows, the whole of it, and whether the page has no title of its own.
+type AskNames struct {
+	Name     string `json:"name"`
+	FullName string `json:"full_name"`
+	Untitled bool   `json:"untitled,omitempty"`
+}
+
+// askNames are the names of document id at url, named n.
+func askNames(id, url string, n ask.Names) AskNames {
+	ref := ui.DocRef{ID: id, Title: n.OwnTitle, Fallback: n.SavedTitle, URL: url}
+	return AskNames{Name: ref.Name(), FullName: ref.Hover(), Untitled: ref.Untitled()}
+}
 
 // AskSource mirrors the openapi AskSource schema: a page an answer is
 // written from, numbered as it cites it, with an evidence source's quote
@@ -389,6 +418,7 @@ type AskSource struct {
 	About    string       `json:"about,omitempty"`
 	Quote    string       `json:"quote,omitempty"`
 	Passages []AskPassage `json:"passages,omitempty"`
+	AskNames
 }
 
 // AskPassage mirrors the openapi AskPassage schema: a part of a page's
@@ -416,6 +446,7 @@ type AskGroupDocument struct {
 	Title string         `json:"title"`
 	State store.DocState `json:"state"`
 	About string         `json:"about,omitempty"`
+	AskNames
 }
 
 // AskUnreadable mirrors the openapi AskUnreadable schema: a page the
@@ -426,6 +457,7 @@ type AskUnreadable struct {
 	Title  string         `json:"title"`
 	State  store.DocState `json:"state"`
 	Reason string         `json:"reason"`
+	AskNames
 }
 
 // AskTimings mirrors the openapi AskTimings schema, in milliseconds: each
@@ -463,8 +495,8 @@ func askEventJSON(e ask.Event) any {
 		t := e.Timings
 		return askDoneEvent{Type: "done", Status: string(e.Status), Reason: e.Reason, Model: e.Model,
 			PromptVersion: e.PromptVersion, Route: string(e.Route), Citations: orEmpty(e.Citations),
-			Markers: e.Markers, InvalidCitations: e.InvalidCitations, Abstained: e.Abstained, Uncited: e.Uncited,
-			Partial: e.Partial,
+			Markers: e.Markers, CitedAt: marksOf(e.CitedAt), InvalidCitations: e.InvalidCitations,
+			Abstained: e.Abstained, Uncited: e.Uncited, Partial: e.Partial,
 			Timings: AskTimings{WaitMS: t.Wait.Milliseconds(), PlanMS: t.Plan.Milliseconds(),
 				SearchMS: t.Search.Milliseconds(), RerankMS: t.Rerank.Milliseconds(), SourcesMS: t.Sources.Milliseconds(),
 				JudgeMS: t.Judge.Milliseconds(), PromptEvalMS: t.PromptEval.Milliseconds(),
@@ -482,6 +514,16 @@ func orEmpty(xs []int) []int {
 	return xs
 }
 
+// marksOf are cited on the wire: an array, empty for none, as the wire's
+// lists always are.
+func marksOf(cited []ask.CitedAt) []AskMark {
+	out := make([]AskMark, len(cited))
+	for i, c := range cited {
+		out[i] = AskMark{Start: c.Start, End: c.End, N: c.N, Marker: c.Marker}
+	}
+	return out
+}
+
 // retrievalEventJSON is e on the wire.
 func retrievalEventJSON(e ask.Retrieved) askRetrievalEvent {
 	out := askRetrievalEvent{Type: "retrieval", Route: string(e.Route), Understanding: understandingOf(e.Understanding),
@@ -489,7 +531,7 @@ func retrievalEventJSON(e ask.Retrieved) askRetrievalEvent {
 		Sources: make([]AskSource, 0, len(e.Sources))}
 	for _, s := range e.Sources {
 		src := AskSource{N: s.N, DocID: s.DocID, URL: s.URL, Title: s.Title, SavedAs: s.SavedAs, Site: s.Site,
-			SavedOn: s.SavedOn, About: s.About, Quote: s.Quote}
+			SavedOn: s.SavedOn, About: s.About, Quote: s.Quote, AskNames: askNames(s.DocID, s.URL, s.Names)}
 		for _, p := range s.Passages {
 			src.Passages = append(src.Passages, AskPassage{Text: p.Text, Section: p.Section})
 		}
@@ -497,7 +539,7 @@ func retrievalEventJSON(e ask.Retrieved) askRetrievalEvent {
 	}
 	for _, u := range e.Unreadable {
 		out.Unreadable = append(out.Unreadable, AskUnreadable{DocID: u.DocID, URL: u.URL, Title: u.Title,
-			State: u.State, Reason: u.Reason})
+			State: u.State, Reason: u.Reason, AskNames: askNames(u.DocID, u.URL, u.Names)})
 	}
 	return out
 }
@@ -521,7 +563,7 @@ func groupsEventJSON(e ask.Groups) askGroupsEvent {
 			Count: g.Count, Documents: make([]AskGroupDocument, 0, len(g.Documents))}
 		for _, d := range g.Documents {
 			group.Documents = append(group.Documents, AskGroupDocument{DocID: d.DocID, URL: d.URL, Title: d.Title,
-				State: d.State, About: d.About})
+				State: d.State, About: d.About, AskNames: askNames(d.DocID, d.URL, d.Names)})
 		}
 		out.Groups = append(out.Groups, group)
 	}

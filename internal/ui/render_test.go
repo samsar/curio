@@ -283,6 +283,39 @@ func sampleVariants(t testing.TB) map[string][]any {
 				Understood: evilUnderstood("planned")},
 			Search{Layout: layout(NavSearch), Query: evilAttr, Results: &SearchResults{WordHits: 1, Total: 4, Hits: sampleHits()},
 				Understood: &Understood{Status: "cold", Model: evilScript}},
+			// An understood page with its follow-up, its star ask and the
+			// callouts beside its ranking; its follow-up's reordered page, a
+			// later page of it, one whose reranker rests, and the follow-up's
+			// note of a model unfit.
+			Search{Layout: layout(NavSearch), Query: evilScript, Plan: evilQuotes,
+				Results:    &SearchResults{Degraded: true, Warnings: []string{evilScript}, Total: 37, Hits: sampleHits()},
+				Understood: evilUnderstood("planned"), Reorder: &Reorder{Model: evilScript}, Star: NewStarAsk()},
+			Search{Layout: layout(NavSearch), Query: evilScript, Plan: evilQuotes, Order: evilAttr,
+				Results:    &SearchResults{WordHits: 1, Total: 37, Hits: reversed(sampleHits())},
+				Understood: evilUnderstood("supplied"), Reordered: &Reordered{Status: ReorderedByModel, Model: evilScript},
+				FollowUp: true},
+			Search{Layout: layout(NavSearch), Query: evilScript, Plan: evilQuotes, Order: evilAttr, Page: 2,
+				Results:    &SearchResults{WordHits: 1, Total: 37, Hits: sampleHits()},
+				Understood: evilUnderstood("supplied"), Reordered: &Reordered{Status: ReorderedAsFirst, Stale: 2}},
+			Search{Layout: layout(NavSearch), Query: evilURL, Plan: evilQuotes, Page: 1,
+				Results:   &SearchResults{Total: 4, Hits: sampleHits()},
+				Reordered: &Reordered{Status: ReorderedHeld, HeldUntil: at}},
+			Search{Layout: layout(NavSearch), Query: evilURL, Plan: evilQuotes, Page: 1, FollowUp: true,
+				Results:   &SearchResults{Total: 4, Hits: sampleHits()},
+				Reordered: &Reordered{Status: ReorderedUnfit, Model: evilScript}},
+			// Ask: the switch and the shell over a search's results, a page
+			// in Ask mode with its question, the home in Ask mode, and a
+			// page whose address asked but that can't ask.
+			Search{Layout: layout(NavSearch), Query: evilScript, Results: &SearchResults{WordHits: 1, Total: 4,
+				Hits: sampleHits()}, Asking: sampleAsking(AskCan)},
+			Search{Layout: layout(NavSearch), Query: evilQuotes, Mode: ModeAsk, Asked: true,
+				Asking: sampleAsking(AskCan)},
+			Search{Layout: layout(NavSearch), Mode: ModeAsk, Asked: true, Home: &SearchHome{Searchable: 12},
+				Asking: sampleAsking(AskCan)},
+			Search{Layout: layout(NavSearch), Query: evilAttr, Asked: true, Results: &SearchResults{WordHits: 1,
+				Total: 4, Hits: sampleHits()}, Asking: sampleAsking(AskOffByDefault)},
+			Search{Layout: layout(NavSearch), Query: evilAttr, Asked: true, Results: &SearchResults{},
+				Asking: sampleAsking(AskUnfit)},
 		},
 		PageStatus:    statusVariants(footed(layout(NavStatus)), panelErr, at),
 		PageFailures:  failuresVariants(layout(NavLibrary), panelErr, counts),
@@ -728,7 +761,15 @@ func partialSamples(t testing.TB) map[string][]any {
 		icons = append(icons, name)
 	}
 	return map[string][]any{
-		"understood":   understoodSamples(),
+		"understood": understoodSamples(),
+		"ask": {&AskShell{Notes: []AskNote{{Key: evilAttr, Text: evilScript}, {Key: "answered", Text: evilQuotes}}},
+			&AskShell{}},
+		"reorder": {Search{Query: evilScript, Type: evilAttr, Plan: evilQuotes, Reorder: &Reorder{Model: evilScript}},
+			Search{Reordered: &Reordered{Status: ReorderedByModel, Model: evilScript}},
+			Search{Reordered: &Reordered{Status: ReorderedAsFirst, Stale: 3}},
+			Search{Reordered: &Reordered{Status: ReorderedUnfit, Model: evilAttr}},
+			Search{Reordered: &Reordered{Status: ReorderedHeld, HeldUntil: at}},
+			Search{Reordered: &Reordered{Status: evilScript}}, Search{}},
 		"panel-error":  {&PanelError{Message: evilScript, RequestID: evilAttr}},
 		"icon":         icons,
 		"logo":         {nil},
@@ -903,6 +944,25 @@ func evilUnderstood(status string) *Understood {
 	}
 }
 
+// reversed is hits in the reverse order, as the fake reranker orders them.
+func reversed(hits []SearchHit) []SearchHit {
+	out := slices.Clone(hits)
+	slices.Reverse(out)
+	return out
+}
+
+// sampleStatuses are the statuses an ask can end with, as the daemon
+// passes them (ask.Statuses).
+var sampleStatuses = []string{"answered", "truncated", "no_sources", "off", "withheld", "unfit", "timeout",
+	"unavailable"}
+
+// sampleAsking is Ask as a page knows it, off as off says, its model
+// hostile.
+func sampleAsking(off AskOff) *Asking {
+	return &Asking{Off: off, Model: evilScript, Timeout: 90 * time.Second, MaxQuestion: 512,
+		Statuses: sampleStatuses}
+}
+
 // understoodSamples are the search page as its understood line renders
 // it: planned and supplied plans, one that adds nothing, and every status
 // that searched the words.
@@ -924,7 +984,7 @@ func understoodSamples() []any {
 }
 
 // evilSearchHref is a page of the search for a hostile query and type.
-func evilSearchHref(page int) string { return searchHref(evilScript+evilURL, evilAttr, page, "") }
+func evilSearchHref(page int) string { return searchHref(evilScript+evilURL, evilAttr, page, "", "") }
 
 // TestEveryTemplateRenders executes every template each page's set
 // defines, the page and the partials alike, with a typed sample whose
@@ -1124,7 +1184,7 @@ func TestAssets(t *testing.T) {
 			}
 		}
 	}
-	require.Len(t, refs, 16, "the stylesheet, theme.js, htmx, actions.js, search.js, the d3 modules and map.js")
+	require.Len(t, refs, 17, "the stylesheet, theme.js, htmx, actions.js, search.js, ask.js, the d3 modules and map.js")
 	entries, err := fs.ReadDir(files, "static")
 	require.NoError(t, err)
 	for _, e := range entries {
@@ -1163,9 +1223,10 @@ var themeScriptRE = regexp.MustCompile(`<title>[^<]*</title>\n<script src="/ui/s
 // TestPages_Scripts: every page loads theme.js first, before the
 // stylesheet and not deferred; then htmx, then actions.js, each deferred
 // and under its hashed name; the search page loads search.js after them,
-// and no other page does; the interest map's page, with a map to draw,
-// loads the d3 modules after them, in mapScripts' order, then map.js, and
-// no other page, nor the map's without a map, loads any of them.
+// and ask.js after it when it can ask, and no other page loads either;
+// the interest map's page, with a map to draw, loads the d3 modules after
+// them, in mapScripts' order, then map.js, and no other page, nor the
+// map's without a map, loads any of them.
 func TestPages_Scripts(t *testing.T) {
 	r := newRenderer(t)
 	base := []string{"htmx-2.0.11.min", "actions"}
@@ -1179,6 +1240,9 @@ func TestPages_Scripts(t *testing.T) {
 		want := base
 		if page == PageSearch {
 			want = append(slices.Clone(base), "search")
+			if data.(Search).Shell() != nil {
+				want = append(want, "ask")
+			}
 		}
 		if m, ok := data.(MapPage); ok && m.Ready() {
 			want = append(slices.Clone(base), "d3-dispatch-3.0.1.min", "d3-selection-3.0.0.min", "d3-timer-3.0.1.min",

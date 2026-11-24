@@ -123,19 +123,27 @@ func (d Deps) writeError(w http.ResponseWriter, r *http.Request, err error) {
 // reportError classifies err, from serving r, into the status and title
 // it is answered with (errorStatus), and logs a server error once with the
 // request ID, since the answer's detail is all the client gets. Problems
-// and pages both report through it.
+// report through it, and pages through reportErrorAt.
 //
 // When the client has already gone, the error is almost always the
 // cancellation itself, so it is logged at info as a 499 rather than as a
 // daemon failure.
 func (d Deps) reportError(r *http.Request, err error) (status int, title string) {
+	return d.reportErrorAt(r, err, slog.LevelInfo)
+}
+
+// reportErrorAt is reportError, logging a client gone at gone. The
+// dashboard's pages log it at debug: their requests are aborted whenever
+// the person types, clicks or leaves while one is in flight, which says
+// nothing of the daemon, and the access line records the 499 anyway.
+func (d Deps) reportErrorAt(r *http.Request, err error, gone slog.Level) (status int, title string) {
 	status, title = errorStatus(err)
 	if status < http.StatusInternalServerError {
 		return status, title
 	}
 	level := slog.LevelError
 	if r.Context().Err() != nil {
-		level, status, title = slog.LevelInfo, statusClientClosedRequest, "client closed request"
+		level, status, title = gone, statusClientClosedRequest, "client closed request"
 	}
 	d.Log.Log(r.Context(), level, "request failed",
 		"request_id", middleware.GetReqID(r.Context()),

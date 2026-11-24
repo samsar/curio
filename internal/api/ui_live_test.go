@@ -936,6 +936,35 @@ func TestUI_InterestsStates(t *testing.T) {
 			`>the first grouping is due \(25 documents indexed\): waiting for the library to settle</p>`},
 		{"due after a reindex", insight.Snapshot{State: insight.StateDue, LastRebuildAt: now,
 			FreshOwed: string(store.FreshReindex)}, `>a rebuild from scratch is due: waiting for the re-embedding to finish</p>`},
+		{"due after a reindex, re-embedding", insight.Snapshot{State: insight.StateDue, LastRebuildAt: now,
+			FreshOwed: string(store.FreshReindex), WaitingFor: insight.WaitingReembedding},
+			`>a rebuild from scratch is due: waiting for the re-embedding to finish</p>`},
+		{"due after a reindex, settling", insight.Snapshot{State: insight.StateDue, LastRebuildAt: now,
+			FreshOwed: string(store.FreshReindex), WaitingFor: insight.WaitingSettle},
+			`>a rebuild from scratch is due \(after a re-embedding\): waiting for the library to settle</p>`},
+		{"the first due, the embeddings unchecked", insight.Snapshot{State: insight.StateDue, Changed: 25, RebuildAt: 20,
+			WaitingFor: insight.WaitingEmbeddingCheck},
+			`>the first grouping is due \(25 documents indexed\): waiting for the first embedding check since the daemon ` +
+				`started</p>`},
+		{"due to draw the map", insight.Snapshot{State: insight.StateDue, LastRebuildAt: now, Changed: 3, RebuildAt: 263,
+			WaitingFor: insight.WaitingSettle, Map: insight.MapState{Status: insight.MapNone}},
+			`>a rebuild is due to draw the map: waiting for the library to settle</p>`},
+		// No map yet, but enough changes to make a rebuild due without one:
+		// it is due for the changes, as curio status says it.
+		{"due for the changes, no map yet", insight.Snapshot{State: insight.StateDue, LastRebuildAt: now, Changed: 263,
+			RebuildAt: 263, WaitingFor: insight.WaitingSettle, Map: insight.MapState{Status: insight.MapNone}},
+			`>a rebuild is due \(263 documents changed\): waiting for the library to settle</p>`},
+		// A re-embedding holds every due rebuild, not only the fresh one it
+		// owes: the first grouping, one asked for, the changes'.
+		{"the first due, re-embedding", insight.Snapshot{State: insight.StateDue, Changed: 25, RebuildAt: 20,
+			WaitingFor: insight.WaitingReembedding},
+			`>the first grouping is due \(25 documents indexed\): waiting for the re-embedding to finish</p>`},
+		{"due, asked for, re-embedding", insight.Snapshot{State: insight.StateDue, LastRebuildAt: now,
+			FreshOwed: string(store.FreshManual), WaitingFor: insight.WaitingReembedding},
+			`>a rebuild from scratch is due \(you asked for one\): waiting for the re-embedding to finish</p>`},
+		{"due, re-embedding", insight.Snapshot{State: insight.StateDue, LastRebuildAt: now, Changed: 300, RebuildAt: 263,
+			WaitingFor: insight.WaitingReembedding},
+			`>a rebuild is due \(300 documents changed\): waiting for the re-embedding to finish</p>`},
 		{"due, asked for", insight.Snapshot{State: insight.StateDue, LastRebuildAt: now,
 			FreshOwed: string(store.FreshManual)}, `>a rebuild from scratch is due \(you asked for one\): waiting for the library to settle</p>`},
 		{"due, the params changed", insight.Snapshot{State: insight.StateDue, LastRebuildAt: now,
@@ -986,6 +1015,11 @@ func TestUI_InterestsFirstGrouping(t *testing.T) {
 		{insight.Snapshot{State: insight.StateRebuilding}, "<h2>Your library is being grouped for the first time</h2>"},
 		{insight.Snapshot{State: insight.StateDue, Changed: 25, RebuildAt: 20},
 			"The first grouping is due (25 documents indexed), and starts once the library settles."},
+		{insight.Snapshot{State: insight.StateDue, Changed: 25, RebuildAt: 20, WaitingFor: insight.WaitingEmbeddingCheck},
+			"The first grouping is due (25 documents indexed), and starts after the first embedding check since the " +
+				"daemon started."},
+		{insight.Snapshot{State: insight.StateDue, Changed: 25, RebuildAt: 20, WaitingFor: insight.WaitingReembedding},
+			"The first grouping is due (25 documents indexed), and starts once the re-embedding finishes."},
 		{insight.Snapshot{State: insight.StateNone, Changed: 7, RebuildAt: 20},
 			"once 20 documents are indexed; 7 are so far."},
 		{insight.Snapshot{State: insight.StateHeld, HeldReason: "the embeddings <drifted>"},
@@ -995,6 +1029,39 @@ func TestUI_InterestsFirstGrouping(t *testing.T) {
 	} {
 		srv.Scheduler.Set(tc.snap)
 		assert.Contains(t, getPage(t, srv, "/ui/interests", http.StatusOK), tc.want, tc.snap.State)
+	}
+}
+
+// TestUI_InterestsSentenceShared: the pages that say where rebuilds stand
+// say it in one sentence, for the same snapshot, as curio status does:
+// Status and the Interests' head once there is a grouping; Status and the
+// map's page before the first.
+func TestUI_InterestsSentenceShared(t *testing.T) {
+	first := apitest.Start(t)
+	first.Scheduler.Set(insight.Snapshot{State: insight.StateDue, Changed: 25, RebuildAt: 20,
+		WaitingFor: insight.WaitingEmbeddingCheck})
+	for _, path := range []string{"/ui/status", "/ui/interests/map"} {
+		assert.Contains(t, getPage(t, first, path, http.StatusOK), "the first grouping is due (25 documents "+
+			"indexed): waiting for the first embedding check since the daemon started", path)
+	}
+
+	grouped := apitest.Start(t)
+	grouped.AddInterest(t, "Kafka", grouped.AddDocument(t, "https://example.com/a", store.DocStateFetched))
+	for _, tc := range []struct {
+		snap insight.Snapshot
+		want string
+	}{
+		{insight.Snapshot{State: insight.StateDue, LastRebuildAt: time.Now(), Changed: 3, RebuildAt: 263,
+			WaitingFor: insight.WaitingSettle, Map: insight.MapState{Status: insight.MapNone}},
+			"a rebuild is due to draw the map: waiting for the library to settle"},
+		{insight.Snapshot{State: insight.StateDue, LastRebuildAt: time.Now(), FreshOwed: string(store.FreshReindex),
+			WaitingFor: insight.WaitingSettle, Map: insight.MapState{Status: insight.MapNone}},
+			"a rebuild from scratch is due (after a re-embedding): waiting for the library to settle"},
+	} {
+		grouped.Scheduler.Set(tc.snap)
+		for _, path := range []string{"/ui/status", "/ui/interests"} {
+			assert.Contains(t, getPage(t, grouped, path, http.StatusOK), tc.want, path)
+		}
 	}
 }
 

@@ -198,7 +198,9 @@ type fakeStores struct {
 	ranked    map[string][]string
 	rankErr   error
 	rankAsked [][]float32
-	err       error
+	// bookmarkReads counts the ListByDocuments calls.
+	bookmarkReads int
+	err           error
 }
 
 func (s *fakeStores) RankChunks(_ context.Context, _ string, vector []float32, ids []string) ([]store.RankedChunk,
@@ -290,6 +292,7 @@ func (s *fakeStores) CurrentSummaries(context.Context, string, []string) (map[st
 }
 
 func (s *fakeStores) ListByDocuments(context.Context, string, []string) (map[string][]*store.Bookmark, error) {
+	s.bookmarkReads++
 	return s.bookmarks, s.err
 }
 
@@ -327,7 +330,18 @@ func defaultHits() []search.Hit {
 	}
 }
 
+// newRig is an asker over the fakes, its writer loaded, its options
+// changed by change.
 func newRig(t *testing.T, change func(*Options)) *rig {
+	t.Helper()
+	return newRigReading(t, change, nil)
+}
+
+// newRigReading is newRig whose asker reads the sources' bookmarks from
+// bookmarks, nil for the fake stores'.
+func newRigReading(t *testing.T, change func(*Options), bookmarks interface {
+	ListByDocuments(ctx context.Context, tenantID string, ids []string) (map[string][]*store.Bookmark, error)
+}) *rig {
 	t.Helper()
 	logs := &bytes.Buffer{}
 	var mu sync.Mutex
@@ -343,8 +357,12 @@ func newRig(t *testing.T, change func(*Options)) *rig {
 	if change != nil {
 		change(&opts)
 	}
-	r.a = New(lifetime, r.writer, r.ret, Stores{Library: r.stores, Fields: r.stores, Summaries: r.stores,
-		Bookmarks: r.stores, Chunks: r.stores, Interests: r.interests, TenantID: "local"}, opts)
+	stores := Stores{Library: r.stores, Fields: r.stores, Summaries: r.stores, Bookmarks: r.stores, Chunks: r.stores,
+		Interests: r.interests, TenantID: "local"}
+	if bookmarks != nil {
+		stores.Bookmarks = bookmarks
+	}
+	r.a = New(lifetime, r.writer, r.ret, stores, opts)
 	t.Cleanup(func() {
 		cancel()
 		r.a.Wait()

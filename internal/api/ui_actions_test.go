@@ -15,8 +15,11 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/net/html"
 
+	"github.com/samsar/curio/internal/ask"
+	"github.com/samsar/curio/internal/modelgate"
 	"github.com/samsar/curio/internal/store"
 	"github.com/samsar/curio/internal/ui"
+	"github.com/samsar/curio/internal/ui/uitest"
 )
 
 // TestDashboard_ActionsMatchTheAPI holds every change the pages render to
@@ -246,4 +249,51 @@ func TestInterestMap_ReadsOnly(t *testing.T) {
 		"data-interests-page": "/ui/interests"} {
 		assert.Equal(t, want, nodeAttr(root, attr), attr)
 	}
+}
+
+// TestAskShell holds the search page's Ask to the API: the one /v1 path
+// its shell names, which static/ask.js POSTs to, is routed as POST /v1/ask
+// and documented; the request ask.js sends, the question alone, is one the
+// route decodes strictly and answers with its stream; and the pages the
+// shell addresses and links to are the dashboard's own, as links.go
+// builds them. The page is inert.
+func TestAskShell(t *testing.T) {
+	asker := contractAsker()
+	asker.state = ask.State{On: true, Model: "gemma4:26b", Check: modelgate.CheckFit}
+	s := newTestServer(t, func(d *Deps) { d.Asker = asker })
+	router, err := newRouter(s.deps, testOrigin(t), testDashboard(t, pagesOn))
+	require.NoError(t, err)
+	index, err := methodIndex(router)
+	require.NoError(t, err)
+	ops := specOperations(loadSpec(t))
+
+	resp := s.do(t, request{method: http.MethodGet, path: "/ui/?q=kafka&mode=ask"})
+	require.Equal(t, http.StatusOK, resp.status, resp.body)
+	uitest.AssertInert(t, resp.body)
+	page, err := html.Parse(strings.NewReader(resp.body))
+	require.NoError(t, err)
+	var shell *html.Node
+	for n := range page.Descendants() {
+		if n.Type == html.ElementNode && nodeAttr(n, "id") == "ask" {
+			shell = n
+		}
+	}
+	require.NotNil(t, shell, "the answer's shell")
+	src, err := url.Parse(nodeAttr(shell, "data-src"))
+	require.NoError(t, err)
+	assert.Empty(t, src.Scheme+src.Host+src.RawQuery, "a path of the daemon's")
+	pattern := index.Find(chi.NewRouteContext(), http.MethodPost, src.Path)
+	require.Equal(t, "/v1/ask", pattern)
+	assert.Contains(t, ops, "POST "+pattern, "the spec documents it")
+	for attr, want := range map[string]string{"data-page": "/ui/", "data-document-page": "/ui/documents/",
+		"data-interest-page": "/ui/interests/", "data-unsorted-page": "/ui/interests/unsorted"} {
+		assert.Equal(t, want, nodeAttr(shell, attr), attr)
+	}
+
+	asked := s.do(t, request{method: http.MethodPost, path: src.Path, contentType: "application/json",
+		body: `{"question":"kafka"}`})
+	require.Equal(t, http.StatusOK, asked.status, asked.body)
+	assert.Equal(t, "application/x-ndjson", asked.contentType)
+	require.Len(t, asker.requests(), 1)
+	assert.Equal(t, "kafka", asker.requests()[0].Question)
 }

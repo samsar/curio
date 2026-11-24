@@ -158,6 +158,7 @@ func TestDashboard_SecurityHeaders(t *testing.T) {
 		"/ui/interests/unsorted?page=99": http.StatusNotFound, "/ui/interests/unsorted?page=x": http.StatusBadRequest,
 		"/ui/interests/changes":    http.StatusOK,
 		"/ui/?q=text&understand=1": http.StatusOK,
+		"/ui/?q=text&mode=ask":     http.StatusOK,
 		"/ui/?q=text&plan=" + base64.RawURLEncoding.EncodeToString([]byte(`{"kind":"one","rewrites":["text"]}`)): http.StatusOK,
 		"/ui/?q=text&plan=not*a*plan":   http.StatusBadRequest,
 		"/ui/interests/map?select=nope": http.StatusBadRequest, "/ui/interests/map?view=map": http.StatusBadRequest,
@@ -180,6 +181,33 @@ func TestDashboard_SecurityHeaders(t *testing.T) {
 	} {
 		resp := s.do(t, refused)
 		assert.Equal(t, http.StatusForbidden, resp.status)
+		assertSecurityHeaders(t, resp, ui.CSP)
+	}
+
+	// An order's page, and the follow-up's answers: the page reordered, and
+	// nothing to swap when no reranker reorders it.
+	plan := base64.RawURLEncoding.EncodeToString([]byte(`{"kind":"list"}`))
+	order := base64.RawURLEncoding.EncodeToString([]byte(`["a"]`))
+	htmx := http.Header{"Hx-Request": {"true"}, "Sec-Fetch-Site": {"same-origin"}}
+	reranked := newTestServer(t, withSearch, func(d *Deps) {
+		d.Reranker = &fakeReranker{depth: 5, rerankFn: reversed}
+	})
+	for _, u := range []string{"https://example.com/a", "https://example.com/b"} {
+		reranked.seedContent(t, reranked.seedDocument(t, u, store.DocStateFetched), "# A\n\ntext")
+	}
+	for _, tc := range []struct {
+		s      *testServer
+		req    request
+		status int
+	}{
+		{s, request{method: http.MethodGet, path: "/ui/?q=text&plan=" + plan + "&order=" + order}, http.StatusOK},
+		{s, request{method: http.MethodGet, path: "/ui/?q=text&plan=" + plan + "&rerank=1", header: htmx},
+			http.StatusNoContent},
+		{reranked, request{method: http.MethodGet, path: "/ui/?q=text&plan=" + plan + "&rerank=1", header: htmx},
+			http.StatusOK},
+	} {
+		resp := tc.s.do(t, tc.req)
+		assert.Equal(t, tc.status, resp.status, tc.req.path)
 		assertSecurityHeaders(t, resp, ui.CSP)
 	}
 
@@ -429,8 +457,8 @@ func TestPage_RenderFailure(t *testing.T) {
 }
 
 // TestSearchPage_ClientGone: a search that fails because its client has
-// gone answers, and logs, the 499 reportError gives it, not the 500 of the
-// error alone.
+// gone answers, and logs at debug, the 499 report gives it, not the 500 of
+// the error alone: the person typed, clicked or left.
 func TestSearchPage_ClientGone(t *testing.T) {
 	var rec logRecorder
 	deps := routerDeps(t, &rec, withSearch)
@@ -442,13 +470,14 @@ func TestSearchPage_ClientGone(t *testing.T) {
 
 	assert.Equal(t, statusClientClosedRequest, w.Code)
 	assert.Empty(t, rec.at(slog.LevelError))
-	infos := rec.at(slog.LevelInfo)
-	require.Len(t, infos, 1)
-	assert.EqualValues(t, statusClientClosedRequest, infos[0]["status"])
+	assert.Empty(t, rec.at(slog.LevelInfo))
+	debugs := rec.at(slog.LevelDebug)
+	require.Len(t, debugs, 1)
+	assert.EqualValues(t, statusClientClosedRequest, debugs[0]["status"])
 }
 
 // TestSearchHome_ClientGone: the home's reads failing because its client
-// has gone are logged at info as 499s, never as the daemon's errors.
+// has gone are logged at debug as 499s, never as the daemon's errors.
 func TestSearchHome_ClientGone(t *testing.T) {
 	var rec logRecorder
 	deps := routerDeps(t, &rec, withSearch)
@@ -461,10 +490,11 @@ func TestSearchHome_ClientGone(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Body.String(), `<div class="landing">`)
 	assert.Empty(t, rec.at(slog.LevelError))
-	infos := rec.at(slog.LevelInfo)
-	require.Len(t, infos, 2, "the counts and the interests")
-	for _, info := range infos {
-		assert.EqualValues(t, statusClientClosedRequest, info["status"])
+	assert.Empty(t, rec.at(slog.LevelInfo))
+	debugs := rec.at(slog.LevelDebug)
+	require.Len(t, debugs, 2, "the counts and the interests")
+	for _, debug := range debugs {
+		assert.EqualValues(t, statusClientClosedRequest, debug["status"])
 	}
 }
 

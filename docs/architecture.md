@@ -154,7 +154,10 @@ all fetch/index/search/insight workflows.
   sends to `/v1` as JSON, from
   actions built in Go (`internal/ui/actions.go`); the search page's
   `search.js` keeps a keystroke's search, still waiting out its delay,
-  from replacing the understood search Enter sent; `theme.js`, loaded
+  from replacing the understood search Enter sent, and an error answer
+  to the follow-up that reorders an understood search's head from
+  wiping its results; its `ask.js` streams a question asked in Ask mode
+  from `POST /v1/ask` into the page as text; `theme.js`, loaded
   first on every page, applies and keeps the header button's theme
   choice. Every response
   carries a strict CSP. See `docs/ui.md`, and decisions.md "Dashboard:
@@ -162,8 +165,9 @@ all fetch/index/search/insight workflows.
   language under the CSP", "Dashboard: search is home, the Overview
   becomes Status", "Dashboard: actions through /v1, sent by a
   first-party module", "Library: a Date saved order lists saves",
-  "Dashboard: the Failures tab" and "Dashboard: a quieter home, saves
-  first, a theme button"
+  "Dashboard: the Failures tab", "Dashboard: a quieter home, saves
+  first, a theme button", "Dashboard: Ask mode" and "Dashboard:
+  reranking after the instant results"
 - Internal worker pools process jobs from the SQLite-backed queue: fetch,
   index, cluster (one goroutine), cards (one goroutine, which embeds
   the documents' stale cards) and summarize (one goroutine, the summary

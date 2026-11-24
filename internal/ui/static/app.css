@@ -1008,6 +1008,43 @@ body:has(#show-scores:checked) .score { display: inline; }
 /* The last page of a search that matched more than it ranks says so. */
 .results-note { margin-top: var(--s5); color: var(--text-3); font-size: var(--fs-sm); text-align: center; }
 .star-ask { margin-top: var(--s5); color: var(--text-3); font-size: var(--fs-sm); text-align: center; text-wrap: pretty; }
+/* How an understood search's head was reordered: the follow-up's pending
+   line, then what came of it, in one slot whose height is kept either
+   way, so neither moves the results. */
+.rerank-status { display: flex; align-items: center; gap: var(--s2); min-height: 1.5rem; color: var(--text-3); font-size: var(--fs-xs); }
+
+/* Ask mode -------------------------------------------------------------------
+   The switch sits over the box; the page's data-mode, which ask.js sets,
+   shows the search's results or the answer, never both. Without
+   JavaScript the switch and the answer stay hidden (js-only), and the
+   page searches. The answer keeps the reading measure, and the line of
+   what it is busy with holds its height, so the answer doesn't move when
+   it clears. */
+.search-modes { margin-bottom: var(--s3); }
+:root[data-js] .search-page[data-mode="ask"] #results,
+:root[data-js] .search-page[data-mode="ask"] #search-scope,
+:root[data-js] .search-page[data-mode="ask"] #understanding { display: none; }
+:root[data-js] .search-page[data-mode="search"] #ask { display: none; }
+.ask { width: 100%; max-width: 80%; margin: 0 auto; }
+.ask-progress { min-height: 1.5rem; color: var(--text-3); font-size: var(--fs-sm); }
+.ask-answer { max-width: 70ch; font-size: var(--fs-md); line-height: var(--lh-read); white-space: pre-wrap; }
+.ask-answer:empty, .ask-notes:empty, .ask-evidence:empty, .ask-table:empty, .ask-sources:empty,
+.ask-unreadable:empty, .ask-groups:empty { display: none; }
+.ask-answer a { text-decoration: underline; text-decoration-color: var(--accent-border); text-underline-offset: 0.2em; }
+.ask-notes { margin-top: var(--s3); color: var(--text-3); font-size: var(--fs-sm); }
+.ask-notes p + p { margin-top: var(--s1); }
+.ask-evidence, .ask-table, .ask-sources, .ask-unreadable, .ask-groups { margin-top: var(--s6); }
+.ask h2 { margin-bottom: var(--s2); color: var(--text-2); font-size: var(--fs-sm); font-weight: var(--fw-strong); }
+.ask ol, .ask ul { padding-left: 1.6em; }
+.ask li + li { margin-top: var(--s2); }
+.ask-meta { color: var(--text-3); font-size: var(--fs-sm); }
+.ask-quote { margin-top: var(--s1); max-width: 70ch; color: var(--text-2); }
+/* The interests' table: every column a fixed width, so a long label
+   widens the table inside its scroller and never squeezes the counts. */
+col.c-marker { width: 3.5rem; }
+col.c-label { width: 16rem; }
+col.c-period { width: 5rem; }
+col.c-total { width: 5rem; }
 
 /* Search home -------------------------------------------------------------
    One frame for home and results. On the landing (#results holds
@@ -1421,7 +1458,7 @@ td .badge.fit-new { margin-top: var(--s1); }
   .grid-3, .grid-2, .interest-grid, .controls { grid-template-columns: minmax(0, 1fr); }
   .span-2 { grid-column: auto; }
   .page-head h1, .doc-head h1 { font-size: var(--fs-xl-sm); }
-  .search-hero, #results > .results { max-width: none; }
+  .search-hero, #results > .results, .ask { max-width: none; }
   .searchbox input[type="search"] { padding-right: 3.25rem; height: 3rem; }
   .searchbox .btn .label { display: none; }
   .searchbox .btn { width: 2.4rem; padding: 0; }

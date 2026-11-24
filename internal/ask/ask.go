@@ -135,11 +135,13 @@ type Timings struct {
 // Done is how the ask ended: its status, and its reason for any status but
 // answered; the model and prompt version; the route; the sources cited,
 // in the order of their first citation, or on the interests and list
-// routes the markers cited, likewise; the citations of what it wasn't
-// given, as written; whether the answer is the abstention, or cites
-// nothing without abstaining; and, for a timeout or an outage, whether
-// pieces of the answer were sent before it stopped. The answer's text is
-// never changed after it is sent: any marking is here.
+// routes the markers cited, likewise; where each valid citation is written
+// in the answer, the concatenation of its Delta events' text (CitedAt);
+// the citations of what it wasn't given, as written; whether the answer is
+// the abstention, or cites nothing without abstaining; and, for a timeout
+// or an outage, whether pieces of the answer were sent before it stopped.
+// The answer's text is never changed after it is sent: any marking is
+// here.
 type Done struct {
 	Status           Status
 	Reason           string
@@ -148,6 +150,7 @@ type Done struct {
 	Route            Route
 	Citations        []int
 	Markers          []string
+	CitedAt          []CitedAt
 	InvalidCitations []string
 	Abstained        bool
 	Uncited          bool
@@ -663,10 +666,17 @@ func (a *Asker) deadlineReason() string {
 // answer writer, with ask.enabled left out), why no question is answered
 // at all (Reason: off, off by default, a provider that can't stream, or
 // withheld), the fitness check's verdict and when it was reached, the last
-// ask's status, the holds in effect and the last failure.
+// ask's status, the holds in effect and the last failure. OffByDefault,
+// NoStream and Withheld say three of Reason's causes as facts, for a
+// client that words them itself: off because ask.enabled is left out for
+// an unmeasured model, on but with a provider that can't stream answers,
+// and on but withheld.
 type State struct {
 	On                bool
 	ByDefault         bool
+	OffByDefault      bool
+	NoStream          bool
+	Withheld          bool
 	Model             string
 	Reason            string
 	Check             string
@@ -682,12 +692,12 @@ type State struct {
 // State reads the asker's state, asking the model nothing.
 func (a *Asker) State() State {
 	g := a.gate.State()
-	s := State{On: a.opts.On, ByDefault: a.opts.ByDefault, Model: a.opts.Model.Model, Reason: a.offReason,
-		Check:     g.Check,
+	s := State{On: a.opts.On, ByDefault: a.opts.ByDefault, OffByDefault: !a.opts.On && a.opts.OffByDefault,
+		NoStream: a.opts.On && a.gen == nil, Model: a.opts.Model.Model, Reason: a.offReason, Check: g.Check,
 		CheckedAt: g.CheckedAt, Unfit: g.Unfit, TimeoutHoldUntil: g.TimeoutHoldUntil,
 		EvictionHoldUntil: g.EvictionHoldUntil, Failure: g.Failure}
-	if s.Reason == "" {
-		s.Reason = a.opts.Withheld
+	if s.Reason == "" && a.opts.Withheld != "" {
+		s.Reason, s.Withheld = a.opts.Withheld, true
 	}
 	a.mu.Lock()
 	s.Last, s.LastAt = a.last, a.lastAt

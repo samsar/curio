@@ -23,8 +23,11 @@ type Options struct {
 	On        bool
 	OffReason string
 	// ByDefault says On is config.yaml leaving ask.enabled out, for a
-	// model measured as the answer writer (config.AskMeasured).
-	ByDefault bool
+	// model measured as the answer writer (config.AskMeasured), and
+	// OffByDefault that off is, for a model that isn't
+	// (config.AskOffByDefault).
+	ByDefault    bool
+	OffByDefault bool
 	// Sources is how many pages an answer is written from (ask.sources).
 	Sources int
 	// MaxTokens caps an answer (ask.max_tokens).
@@ -78,17 +81,18 @@ type Options struct {
 func OptionsFrom(c config.Config) Options {
 	model := c.Generation.Role(config.RoleAnswers)
 	o := Options{
-		On:          c.AskOn(),
-		ByDefault:   c.AskOn() && c.Ask.Enabled == nil,
-		Sources:     c.Ask.Sources,
-		MaxTokens:   c.Ask.MaxTokens,
-		Timeout:     time.Duration(c.Ask.TimeoutSeconds) * time.Second,
-		Rerank:      c.Ask.Rerank,
-		Model:       model,
-		KeepAlive:   c.KeepAliveOf(config.RoleAnswers),
-		Shared:      c.SharesModel(config.RoleAnswers),
-		ShortSharer: c.SharesModelShorter(config.RoleAnswers),
-		Withheld:    withheld(c.Generation),
+		On:           c.AskOn(),
+		ByDefault:    c.AskOn() && c.Ask.Enabled == nil,
+		OffByDefault: c.AskOffByDefault(),
+		Sources:      c.Ask.Sources,
+		MaxTokens:    c.Ask.MaxTokens,
+		Timeout:      time.Duration(c.Ask.TimeoutSeconds) * time.Second,
+		Rerank:       c.Ask.Rerank,
+		Model:        model,
+		KeepAlive:    c.KeepAliveOf(config.RoleAnswers),
+		Shared:       c.SharesModel(config.RoleAnswers),
+		ShortSharer:  c.SharesModelShorter(config.RoleAnswers),
+		Withheld:     withheld(c.Generation),
 	}
 	if !o.On {
 		o.OffReason = offReason(c, model.Model)

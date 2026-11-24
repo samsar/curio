@@ -979,8 +979,10 @@ ranked best for it. `curio search` asks for it whenever it understands the
 question (`--no-rerank` understands without reranking, `--literal` does
 neither), and says on the line after the understood one how the results
 were ordered: `reranked (<model>, <method>, top <N>, <s> s)`, or why they
-kept their first order. The dashboard doesn't rerank yet, and MCP's
-`search_bookmarks` never does: its caller ranks what it reads.
+kept their first order. The dashboard reranks an understood search's
+results once they are shown, then swaps the reordered ones in place (see
+[the dashboard](ui.md)), and MCP's `search_bookmarks` never reranks: its
+caller ranks what it reads.
 
 What the reranker is asked depends on the question's kind, as the planner
 read it: a topic, a question to answer or a pattern across pages is
@@ -1058,6 +1060,9 @@ too, `search.rerank: false` keeping it off. Going back to a 2.7, remove `search.
 refuses keys and roles it doesn't know.
 
 ## Ask
+
+The dashboard's search page asks too: its switch over the box turns it
+from Search to Ask (see [the dashboard](ui.md)).
 
 `curio ask <question>` answers a question from the pages you saved: the
 question is searched as `curio search` searches it (understood, then

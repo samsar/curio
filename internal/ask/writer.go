@@ -92,7 +92,7 @@ func (r *run) stream(ctx, actx context.Context, p writerPrompt) (Done, error) {
 	}
 	c := CitationsOf(text.String(), r.route, p.n)
 	done := Done{Status: StatusAnswered, Citations: c.Cited, Markers: c.Markers, InvalidCitations: c.Invalid,
-		Abstained: c.Abstains, Uncited: c.Uncited}
+		Abstained: c.Abstains, Uncited: c.Uncited, CitedAt: c.At}
 	if end.Truncated {
 		done.Status = StatusTruncated
 		done.Reason = fmt.Sprintf("the answer ran past %d tokens (ask.max_tokens)", a.opts.MaxTokens)

@@ -91,6 +91,7 @@ type GroupDocument struct {
 	Title string
 	State store.DocState
 	About string
+	Names
 }
 
 // listTemplate asks the writer for an overview of what the library holds
@@ -174,6 +175,10 @@ func (a *Asker) groupsOf(ctx context.Context, hits []search.Hit) ([]Group, error
 	if err != nil {
 		return nil, fmt.Errorf("read the listed pages' summaries: %w", err)
 	}
+	bookmarks, err := a.stores.Bookmarks.ListByDocuments(ctx, tenant, ids)
+	if err != nil {
+		return nil, fmt.Errorf("read the listed pages' bookmarks: %w", err)
+	}
 	places, labels, err := a.places(ctx, ids)
 	if err != nil {
 		return nil, err
@@ -181,7 +186,8 @@ func (a *Asker) groupsOf(ctx context.Context, hits []search.Hit) ([]Group, error
 	docOf := func(h search.Hit) GroupDocument {
 		doc := h.Document
 		title, _ := titles(doc, fields[doc.ID])
-		d := GroupDocument{DocID: doc.ID, URL: doc.URL, Title: title, State: doc.State}
+		d := GroupDocument{DocID: doc.ID, URL: doc.URL, Title: title, State: doc.State,
+			Names: namesOf(doc, bookmarks[doc.ID])}
 		if s := summaries[doc.ID]; s != nil {
 			d.About = s.About
 		}

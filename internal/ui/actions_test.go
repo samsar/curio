@@ -161,14 +161,26 @@ func TestActionsScript(t *testing.T) {
 }
 
 // TestSearchScript: search.js, which only the search page loads, is one
-// strict IIFE of a few lines that sends nothing: it listens for typing
-// and for htmx confirming a request, and drops a request (search.html says
-// which), using nothing actions.js may not, nor fetch.
+// strict IIFE of a few lines that sends nothing: it listens for typing;
+// for htmx confirming a request, and drops a field's request while its
+// form was submitted since the field changed (search.html says why), but
+// never ask.js's curio:search, its search of the box's words on leaving
+// Ask, which has no understanding on its way to replace; and for htmx
+// about to swap, and swaps no error answer to the follow-up of an
+// understood page in, and the rest of its answers with #results' live
+// region off, every other swap with it on; and, once the follow-up's
+// answer is swapped in, gives focus that fell to the body, from a result
+// the reorder moved off the page or an element htmx kept by moving it, back
+// to that element, else to the title of the result now in its place, else
+// the first result's, never taking it from outside #ranking or from where
+// it went since. It uses nothing actions.js may not, nor fetch: 40 lines,
+// 5 for the silent swap, 1 for letting curio:search through, and 23 for
+// focus kept across the reorder, 7 of them the header saying what it does.
 func TestSearchScript(t *testing.T) {
 	src, err := fs.ReadFile(files, "static/search.js")
 	require.NoError(t, err)
 	js := string(src)
-	assert.LessOrEqual(t, strings.Count(js, "\n"), 40, "lines")
+	assert.LessOrEqual(t, strings.Count(js, "\n"), 69, "lines")
 
 	code := strings.TrimSpace(jsCode(js))
 	assertStrictIIFE(t, code)
@@ -177,9 +189,24 @@ func TestSearchScript(t *testing.T) {
 		assert.NotContains(t, code, banned)
 	}
 	listened := regexp.MustCompile(`addEventListener\('([^']+)'`).FindAllStringSubmatch(code, -1)
-	require.Len(t, listened, 2)
-	assert.Equal(t, []string{"input", "htmx:confirm"}, []string{listened[0][1], listened[1][1]})
-	assert.Contains(t, code, "event.preventDefault()")
+	require.Len(t, listened, 4)
+	assert.Equal(t, []string{"input", "htmx:confirm", "htmx:beforeSwap", "htmx:afterSwap"},
+		[]string{listened[0][1], listened[1][1], listened[2][1], listened[3][1]})
+	assert.Contains(t, code, "const leavingAsk = event.detail.triggeringEvent?.type === 'curio:search';")
+	assert.Contains(t, code, "} else if (submitted !== null && elt.form === submitted && !leavingAsk) {\n"+
+		"      event.preventDefault();", "a field's request dropped after a submit, but ask.js's on leaving Ask")
+	assert.Contains(t, code, "const followUp = event.detail.requestConfig.elt.id === 'rerank-status';")
+	assert.Contains(t, code, "if (followUp && event.detail.isError) {\n      event.detail.shouldSwap = false;")
+	assert.Contains(t, code, "results?.setAttribute('aria-live', followUp ? 'off' : 'polite');",
+		"the follow-up swapped in silently, every other swap read out")
+	assert.Contains(t, code, "    held = followUp && ranking?.contains(focused) ?\n"+
+		"      {focused, place: Array.from(ranking.querySelectorAll('.result')).indexOf(focused.closest('.result'))} : null;",
+		"what had focus is held only for the follow-up's answer, and only from inside #ranking")
+	assert.Contains(t, code, "const candidates = held === null ? [] : [held.focused.isConnected ? held.focused : null,\n"+
+		"      held.place < 0 ? null : titles[held.place], titles[0]];\n    held = null;",
+		"the element htmx kept, else the title now in its result's place, else the first result's, each held once")
+	assert.Contains(t, code, "      if (document.activeElement === document.body) {\n        candidate?.focus();",
+		"focus given only while it is nowhere: never taken from where htmx or the person put it")
 }
 
 // TestThemeScript: theme.js, which every page loads first, is one strict

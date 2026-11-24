@@ -744,7 +744,8 @@ func assertDashboard(t *testing.T, baseURL, docID string) {
 	_, doc := get("/ui/documents/" + docID)
 	assert.Contains(t, doc, "An Introduction to Zymurgy")
 	_, results := get("/ui/?q=" + distinctive)
-	assert.Contains(t, results, `<a href="/ui/documents/`+docID+`" title="`, "a result links to its document's page")
+	assert.Contains(t, results, `<a id="result-`+docID+`" href="/ui/documents/`+docID+`" title="`,
+		"a result links to its document's page")
 	_, status := get("/ui/status")
 	assert.Contains(t, status, "<h1>Status</h1>")
 	_, failures := get("/ui/failures")

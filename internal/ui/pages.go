@@ -451,16 +451,36 @@ type Search struct {
 	// Plan is the token of the plan the results were searched by
 	// (PlanParam), which the page's other pages and types keep; empty for
 	// a search of the query's words.
-	Plan    string
-	Home    *SearchHome    // set exactly when there is no query
-	Err     *PanelError    // the search failed
-	Results *SearchResults // nil without a query, or when it failed
+	Plan string
+	// Order is the token of the head order the results were searched by
+	// (OrderParam), which the page's other pages keep and nothing else:
+	// empty for a first ranking.
+	Order string
+	// Reorder is the reranker an understood page's head is sent to once
+	// the page is shown (its follow-up); nil when there is none to send.
+	Reorder *Reorder
+	// Reordered says how the head was reordered, or why it wasn't, where
+	// the page says so; nil otherwise. FollowUp is whether the page
+	// answers its own follow-up, which says it in #rerank-said too.
+	Reordered *Reordered
+	FollowUp  bool
+	Home      *SearchHome    // set exactly when there is no query
+	Err       *PanelError    // the search failed
+	Results   *SearchResults // nil without a query, or when it failed
 	// Understood is how the query was understood, for a search that asked
 	// (Enter, or a plan's link); nil for search as you type.
 	Understood *Understood
 	// Star is the one ask for a star on GitHub, under the results of the
 	// search that made it (NewStarAsk); nil on every other page.
 	Star *StarAsk
+	// Mode is the mode the page opens in: ModeSearch ("" too) or ModeAsk.
+	// Asked is whether its address asked for ModeAsk, which a page that
+	// can't ask says it searched in place of.
+	Mode  string
+	Asked bool
+	// Asking is what the page knows of Ask; nil for an htmx request,
+	// whose answer is swapped into the results alone, so it reads none.
+	Asking *Asking
 }
 
 // StarAsk is the ask for a star on GitHub: a quiet line under a search's
@@ -520,13 +540,15 @@ func (s Search) Pager() *Pager {
 		Noun: "Results", Href: s.pageHref})
 }
 
-// pageHref is page of the query's results, limited to the type shown and
-// searched by the plan shown.
-func (s Search) pageHref(page int) string { return searchHref(s.Query, s.Type, page, s.Plan) }
+// pageHref is page of the query's results, limited to the type shown,
+// searched by the plan shown, and its head in the order shown: a window of
+// the one ranking the page shows.
+func (s Search) pageHref(page int) string { return searchHref(s.Query, s.Type, page, s.Plan, s.Order) }
 
-// Address is the page's own address, its plan's when it has one: what an
-// understood search's history entry holds, so that reload, back and
-// forward search by the plan rather than asking the model again.
+// Address is the page's own address, its plan's and its order's when it
+// has them: what an understood search's history entry holds, so that
+// reload, back and forward search by the plan and the order rather than
+// asking a model again.
 func (s Search) Address() string { return s.pageHref(s.page()) }
 
 // nearestShown is how many of a wordless search's first page a result
@@ -592,7 +614,9 @@ type SearchHome struct {
 }
 
 // Placeholder is the search box's placeholder: how many documents there
-// are to search, when the home knows.
+// are to search, when the home knows. It is Search's in either mode: a
+// page opened in Ask mode searches without JavaScript, and ask.js gives
+// the box Ask's words where it runs.
 func (s Search) Placeholder() string {
 	if s.Home == nil || s.Home.Searchable <= 0 {
 		return "Search your library"
@@ -627,13 +651,14 @@ type Tab struct {
 func (s Search) ShowsTypes() bool { return strings.TrimSpace(s.Query) != "" || s.Type != "" }
 
 // TypeTabs are the search's type filter: a link to the first page of this
-// query limited to each offered type, by the plan shown, the current one
-// marked. A type the page doesn't offer (thread, unknown) still limits the
-// search, and marks none.
+// query limited to each offered type, by the plan shown, in its first
+// order (another type is another ranking), the current one marked. A type
+// the page doesn't offer (thread, unknown) still limits the search, and
+// marks none.
 func (s Search) TypeTabs() []Tab {
 	tabs := make([]Tab, 0, len(searchTypes))
 	for _, t := range searchTypes {
-		tabs = append(tabs, Tab{Label: t.label, Href: searchHref(s.Query, string(t.contentType), 1, s.Plan),
+		tabs = append(tabs, Tab{Label: t.label, Href: searchHref(s.Query, string(t.contentType), 1, s.Plan, ""),
 			Current: s.Type == string(t.contentType)})
 	}
 	return tabs
@@ -1149,14 +1174,18 @@ func (r DocRef) Name() string {
 // fallback, or its URL.
 func (r DocRef) Hover() string { return cmp.Or(r.Title, r.fallback(), r.URL) }
 
+// Untitled reports whether the document has no title of its own,
+// however it is named: its bookmark's title or its address.
+func (r DocRef) Untitled() bool { return r.Title == "" }
+
 // Class is the class its name carries besides doc-title: untitled for a
-// document without a title of its own, however it is named, and none for
-// its title.
+// document without a title of its own (Untitled), and none for its
+// title.
 func (r DocRef) Class() string {
-	if r.Title != "" {
-		return ""
+	if r.Untitled() {
+		return "untitled"
 	}
-	return "untitled"
+	return ""
 }
 
 // where is what a list shows under its name: its short URL when a title or
@@ -1754,17 +1783,61 @@ type UnsortedCard struct {
 // interests-state partial says it as `curio status` does. Changed and
 // RebuildAt are the documents changed since the rebuild and how many make
 // the next one due; before the first, the documents indexed and how many
-// the first waits for. The fields a state doesn't use are zero.
+// the first waits for. WaitingFor is what a due rebuild waits for
+// (reembedding, embedding_check or settle; "" from an older snapshot),
+// and MapOwed says it is due only to draw the map. The fields a state
+// doesn't use are zero.
 type InterestsState struct {
 	State         string
 	LastRebuildAt time.Time
 	LastKind      string
 	Changed       int
 	RebuildAt     int
+	WaitingFor    string
 	FreshOwed     string
+	MapOwed       bool
 	HeldReason    string
 	RetryAt       time.Time
 	LastError     string
+}
+
+// What a due rebuild waits for (insight.WaitingFor), and the fresh
+// rebuild a re-embedding owes (store.FreshReindex).
+const (
+	waitingReembedding    = "reembedding"
+	waitingEmbeddingCheck = "embedding_check"
+	freshReindex          = "reindex"
+)
+
+// Wait says what a due rebuild waits for, as curio status says it: the
+// re-embedding to finish, the drift monitor's first verdict since the
+// daemon started, else the library to settle.
+func (s InterestsState) Wait() string {
+	switch s.WaitingFor {
+	case waitingReembedding:
+		return "waiting for the re-embedding to finish"
+	case waitingEmbeddingCheck:
+		return "waiting for the first embedding check since the daemon started"
+	}
+	return "waiting for the library to settle"
+}
+
+// FirstStarts says when the first grouping, due, starts.
+func (s InterestsState) FirstStarts() string {
+	switch s.WaitingFor {
+	case waitingReembedding:
+		return "once the re-embedding finishes"
+	case waitingEmbeddingCheck:
+		return "after the first embedding check since the daemon started"
+	}
+	return "once the library settles"
+}
+
+// AwaitsReembedding reports whether a due rebuild from scratch, owed by a
+// re-embedding, waits for it to finish: while the daemon says so, and from
+// a daemon that says nothing of what it waits for.
+func (s InterestsState) AwaitsReembedding() bool {
+	return s.FreshOwed == freshReindex && (s.WaitingFor == "" || s.WaitingFor == waitingReembedding)
 }
 
 // The states automatic rebuilds are in (insight.RebuildState), and off.

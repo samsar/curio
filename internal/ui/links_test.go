@@ -173,7 +173,7 @@ func TestSearchHref(t *testing.T) {
 		for _, contentType := range []string{"", "article", "repo", "video", "pdf", "a&b"} {
 			for _, page := range []int{-1, 0, 1, 2, 10} {
 				for _, plan := range []string{"", "eyJraW5kIjoib25lIn0", "a+b/c="} {
-					u := parseHref(t, searchHref(q, contentType, page, plan))
+					u := parseHref(t, searchHref(q, contentType, page, plan, ""))
 					assert.Equal(t, "/ui/", u.Path, contentType)
 					want := url.Values{"q": {q}}
 					if contentType != "" {
@@ -190,12 +190,12 @@ func TestSearchHref(t *testing.T) {
 			}
 		}
 	}
-	assert.Equal(t, "/ui/", searchHref("", "", 1, ""))
-	assert.Equal(t, "/ui/", searchHref("  ", "", 3, "tok"), "a blank query is the home, which has no pages or plan")
-	assert.Equal(t, "/ui/?content_type=pdf", searchHref(" ", "pdf", 2, ""))
-	assert.Equal(t, "/ui/?content_type=pdf&q=kafka", searchHref("kafka", "pdf", 1, ""))
-	assert.Equal(t, "/ui/?content_type=pdf&page=2&q=kafka", searchHref("kafka", "pdf", 2, ""))
-	assert.Equal(t, "/ui/?page=2&plan=tok&q=kafka", searchHref("kafka", "", 2, "tok"))
+	assert.Equal(t, "/ui/", searchHref("", "", 1, "", ""))
+	assert.Equal(t, "/ui/", searchHref("  ", "", 3, "tok", ""), "a blank query is the home, which has no pages or plan")
+	assert.Equal(t, "/ui/?content_type=pdf", searchHref(" ", "pdf", 2, "", ""))
+	assert.Equal(t, "/ui/?content_type=pdf&q=kafka", searchHref("kafka", "pdf", 1, "", ""))
+	assert.Equal(t, "/ui/?content_type=pdf&page=2&q=kafka", searchHref("kafka", "pdf", 2, "", ""))
+	assert.Equal(t, "/ui/?page=2&plan=tok&q=kafka", searchHref("kafka", "", 2, "tok", ""))
 }
 
 // TestStateTabHref: a state tab keeps the page's other filters and its

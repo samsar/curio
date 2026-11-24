@@ -20,6 +20,7 @@ func TestOptionsFrom_Default(t *testing.T) {
 	o := OptionsFrom(config.Default())
 	assert.False(t, o.On)
 	assert.False(t, o.ByDefault)
+	assert.True(t, o.OffByDefault)
 	assert.Equal(t, "curio ask is off by default for qwen3:4b-instruct, which isn't measured as the answer writer; "+
 		"ask.enabled: true turns it on, its fitness check still guarding it (then restart)", o.OffReason)
 	assert.Equal(t, 6, o.Sources)
@@ -42,6 +43,7 @@ func TestOptionsFrom_OnByDefault(t *testing.T) {
 	o := OptionsFrom(c)
 	assert.True(t, o.On)
 	assert.True(t, o.ByDefault)
+	assert.False(t, o.OffByDefault)
 	assert.Empty(t, o.OffReason)
 
 	c.Ask.Enabled = new(true)
@@ -52,6 +54,7 @@ func TestOptionsFrom_OnByDefault(t *testing.T) {
 	c.Ask.Enabled = new(false)
 	o = OptionsFrom(c)
 	assert.False(t, o.On)
+	assert.False(t, o.OffByDefault, "off as set")
 	assert.Equal(t, OffReason, o.OffReason)
 }
 
